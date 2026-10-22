@@ -1,9 +1,7 @@
 # 工具与外部能力
 
-状态：目录已预留，能力尚未实现。当前只有职责说明，没有可调用功能。
+已实现只读工作区的 list_directory、read_text、search_text，以及 DeepSeek 的 web_search、web_fetch。
 
-负责工具声明、目录发现、参数与结果处理，以及原生工具、MCP、浏览器、终端和桌面执行器的接入。知识检索也是一类工具。
+builtin.py 负责原生 BaseTool 声明；context.py 装配可信 ToolRuntime 上下文和客户端生命周期；web.py 实现独立的 Search/Fetch HTTP 适配。文件实际访问由 workspace 负责。
 
-先用 LangChain 原生工具完成确定性的本地调用，再接 MCP。未来按实际实现增加 native/、mcp/、browser/、computer/、retrieval/ 子目录。
-
-边界：工具控制具体动作，runtime 提供权限上下文、期限和取消信号；文件与产物交给 workspace。不要把 MCP 当作另一套 Agent 编排层，也不要把技能脚本放进本包。
+对外使用 create_builtin_tools、ToolContext、tool_context，不创建自定义工具协议或 Agent 执行循环。后续 MCP、浏览器、计算机工具按实际需要接入。详细配置、限制与示例见 [工具使用文档](../../../docs/tools.md)。

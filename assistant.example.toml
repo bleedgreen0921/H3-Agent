@@ -83,3 +83,14 @@ api_key = "your-kimi-api-key"
 [models.kimi.parameters]
 timeout = 120
 max_retries = 0
+
+# Read-only project access. Relative root is resolved against this file's directory.
+[workspace]
+root = "."
+exclude_patterns = []
+
+# Optional: standalone DeepSeek Search/Fetch. Remove this section to disable web tools.
+# Reuses only the API key, never model parameters or a custom model base_url.
+[tools.web]
+credential_profile = "deepseek"
+timeout = 30

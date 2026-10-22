@@ -5,7 +5,7 @@ import tomllib
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
-from pydantic import field_validator, model_validator
+from pydantic import field_validator, model_validator, PrivateAttr
 
 from ai_assistant.llm.providers import API_KEY_PROVIDERS, is_deepseek, validate_deepseek_parameters
 
@@ -60,10 +60,39 @@ class ModelConfig(BaseModel):
         return self
 
 
+class WorkspaceConfig(BaseModel):
+    """Read-only workspace settings."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    root: str = Field(default=".", min_length=1)
+    exclude_patterns: list[str] = Field(default_factory=list)
+
+
+class WebConfig(BaseModel):
+    """DeepSeek web credentials and request deadline."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    credential_profile: str = Field(min_length=1)
+    timeout: float = Field(default=30, gt=0, allow_inf_nan=False)
+
+
+class ToolsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    web: WebConfig | None = None
+
+
 class AppConfig(BaseModel):
     """Validated application settings; no clients or global state are stored."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    _config_path: Path | None = PrivateAttr(default=None)
+
+    @property
+    def config_path(self) -> Path | None:
+        return self._config_path
 
     default_model: str = Field(min_length=1)
     models: dict[str, ModelConfig] = Field(min_length=1)
@@ -74,6 +103,10 @@ class AppConfig(BaseModel):
             raise ValueError("Model profile names must not be blank")
         if self.default_model not in self.models:
             raise ValueError("default_model must refer to an existing model profile")
+        if self.tools.web is not None:
+            profile = self.models.get(self.tools.web.credential_profile)
+            if profile is None or profile.provider != "deepseek" or profile.api_key is None:
+                raise ValueError("Web tools require a DeepSeek credential profile")
         return self
 
 
@@ -95,7 +128,9 @@ def load_config(path: str | Path = "assistant.toml") -> AppConfig:
     except OSError:
         raise ConfigError("Unable to read the configuration file.") from None
     try:
-        return AppConfig.model_validate(data)
+        config = AppConfig.model_validate(data)
+        config._config_path = Path(path).absolute()
+        return config
     except ValidationError as exc:
         # Field locations and raw exception text may themselves contain secrets.
         raise ConfigError(
