@@ -1,7 +1,7 @@
 # 工具与外部能力
 
-已实现只读工作区的 list_directory、read_text、search_text，以及 DeepSeek 的 web_search、web_fetch。
+已实现八个原生工具：工作区 list_directory、read_text、search_text、create_file、edit_file，DeepSeek web_search、web_fetch，以及 Bubblewrap run_command。
 
-builtin.py 负责原生 BaseTool 声明；context.py 装配可信 ToolRuntime 上下文和客户端生命周期；web.py 实现独立的 Search/Fetch HTTP 适配。文件实际访问由 workspace 负责。
+builtin.py 声明 BaseTool；context.py 装配可信 ToolRuntime 依赖、共享修改锁和资源生命周期；web.py 接入搜索服务；terminal.py 复用 LangChain ShellSession，薄执行策略落实 Bubblewrap 三档权限。文件实际访问和原子修改位于 workspace。
 
-对外使用 create_builtin_tools、ToolContext、tool_context，不创建自定义工具协议或 Agent 执行循环。后续 MCP、浏览器、计算机工具按实际需要接入。详细配置、限制与示例见 [工具使用文档](../../../docs/tools.md)。
+不创建自定义工具协议或 Agent 循环。写操作和终端默认禁用，详见 [工具使用](../../../docs/tools.md) 和 [写权限工具](../../../docs/write-tools.md)。

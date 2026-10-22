@@ -94,3 +94,15 @@ exclude_patterns = []
 [tools.web]
 credential_profile = "deepseek"
 timeout = 30
+
+# Optional mutation capabilities. Omit these sections to keep read-only tools.
+[tools.files]
+enabled = false
+
+# Uncomment to enable Bubblewrap commands; permissions are chosen by the app.
+# project: writable project, read-only current venv, no network.
+# scratch: read-only project/venv, disposable working directory, no network.
+# maintenance: writable project/venv, host network (for dependency installation).
+# [tools.terminal]
+# profile = "project"
+# timeout = 120

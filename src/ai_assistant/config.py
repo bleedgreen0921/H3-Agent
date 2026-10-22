@@ -2,7 +2,7 @@
 
 from pathlib import Path
 import tomllib
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 from pydantic import field_validator, model_validator, PrivateAttr
@@ -61,7 +61,7 @@ class ModelConfig(BaseModel):
 
 
 class WorkspaceConfig(BaseModel):
-    """Read-only workspace settings."""
+    """Shared workspace access settings."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     root: str = Field(default=".", min_length=1)
@@ -76,9 +76,22 @@ class WebConfig(BaseModel):
     timeout: float = Field(default=30, gt=0, allow_inf_nan=False)
 
 
+class FilesConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    enabled: bool = False
+
+
+class TerminalConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    profile: Literal["project", "scratch", "maintenance"] = "project"
+    timeout: float = Field(default=120, gt=0, le=1800, allow_inf_nan=False)
+
+
 class ToolsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     web: WebConfig | None = None
+    files: FilesConfig = Field(default_factory=FilesConfig)
+    terminal: TerminalConfig | None = None
 
 
 class AppConfig(BaseModel):

@@ -1,6 +1,7 @@
 """Bounded read-only filesystem operations, independent of Agent orchestration."""
 
 from fnmatch import fnmatchcase
+from hashlib import sha256
 import os
 from pathlib import Path
 import stat
@@ -41,12 +42,18 @@ class ReadOnlyWorkspace:
                  or any(fnmatchcase(part, pattern) for part in relative.parts)
                  for pattern in self.exclude_patterns)
 
-    def _path(self, value: str) -> Path:
+    def _relative(self, value: str) -> Path:
         relative = Path(value)
         if relative.is_absolute() or '..' in relative.parts:
             raise WorkspaceError('仅允许工作区内不含 .. 的相对路径。')
         if self._excluded(relative):
             raise WorkspaceError('该路径不允许访问。')
+        if self.root / relative == self.config_path:
+            raise WorkspaceError('该路径不允许访问。')
+        return relative
+
+    def _path(self, value: str) -> Path:
+        relative = self._relative(value)
         current = self.root
         try:
             for part in relative.parts:
@@ -63,7 +70,7 @@ class ReadOnlyWorkspace:
             raise WorkspaceError('路径不存在或无法访问。') from None
         return current
 
-    def _text(self, path: Path) -> str:
+    def _raw(self, path: Path) -> bytes:
         try:
             # O_NOFOLLOW also prevents a final-component symlink swap before open.
             fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
@@ -78,11 +85,15 @@ class ReadOnlyWorkspace:
                 raise WorkspaceError('文件超过 1 MiB 限制。')
             if b'\x00' in raw:
                 raise WorkspaceError('不支持二进制文件。')
-            return raw.decode('utf-8-sig')
+            raw.decode('utf-8-sig')
+            return raw
         except UnicodeError:
             raise WorkspaceError('文件不是有效的 UTF-8 文本。') from None
         except OSError:
             raise WorkspaceError('文件无法读取。') from None
+
+    def _text(self, path: Path) -> str:
+        return self._raw(path).decode('utf-8-sig')
 
     def list_directory(self, path='.', limit=100) -> dict:
         target = self._path(path)
@@ -112,10 +123,12 @@ class ReadOnlyWorkspace:
         target = self._path(path)
         if not target.is_file():
             raise WorkspaceError('路径必须是普通文件。')
-        lines = self._text(target).splitlines()
+        raw = self._raw(target)
+        lines = raw.decode('utf-8-sig').splitlines()
         selected = lines[start_line - 1:start_line - 1 + max_lines]
         content = '\n'.join(f'{number}: {line}' for number, line in enumerate(selected, start_line))
         return {'path': target.relative_to(self.root).as_posix(), 'content': content[:20000],
+                'sha256': sha256(raw).hexdigest(),
                 'truncated': len(content) > 20000 or start_line - 1 + len(selected) < len(lines)}
 
     def search_text(self, query, path='.', max_results=50) -> dict:
