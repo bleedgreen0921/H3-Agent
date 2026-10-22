@@ -1,0 +1,85 @@
+# Copy to assistant.toml and replace placeholders. Keep real credentials private.
+default_model = "deepseek"
+
+[models.primary]
+provider = "openai"
+model = "your-model-id"
+api_key = "your-api-key"
+
+[models.primary.parameters]
+timeout = 60
+max_retries = 0
+
+# A compatible server may accept a placeholder key; consult its documentation.
+[models.local]
+provider = "openai"
+model = "your-local-model-id"
+base_url = "http://127.0.0.1:8000/v1"
+api_key = "local-placeholder"
+
+[models.local.parameters]
+timeout = 120
+max_retries = 0
+
+[models.claude]
+provider = "anthropic"
+model = "your-anthropic-model-id"
+api_key = "your-anthropic-api-key"
+
+[models.gemini]
+provider = "google_genai"
+model = "your-gemini-model-id"
+api_key = "your-google-api-key"
+
+[models.ollama]
+provider = "ollama"
+model = "your-ollama-model-id"
+base_url = "http://127.0.0.1:11434"
+
+# Domestic providers: install .[domestic]. Model IDs are examples, not pinned versions.
+# Explicit base_url overrides the provider's public endpoint preset.
+[models.deepseek]
+provider = "deepseek"
+model = "deepseek-flash"
+api_key = "your-deepseek-api-key"
+
+[models.deepseek.parameters]
+timeout = 60
+max_retries = 0
+
+[models.deepseek.parameters.extra_body.thinking]
+type = "disabled"
+
+[models.glm]
+provider = "glm"
+model = "glm-5.3"
+api_key = "your-glm-api-key"
+
+[models.glm.parameters]
+timeout = 120
+max_retries = 0
+
+[models.qwen]
+provider = "qwen"
+model = "qwen-plus"
+api_key = "your-dashscope-api-key"
+# Preset: Beijing public endpoint. Override for your region or workspace.
+
+[models.qwen.parameters]
+timeout = 120
+max_retries = 0
+
+# Vendor-specific request fields belong in extra_body, not model_kwargs.
+# Enable or disable thinking only when your chosen model supports this option.
+# [models.qwen.parameters.extra_body]
+# enable_thinking = false
+
+[models.kimi]
+provider = "kimi"
+model = "kimi-k3"
+api_key = "your-kimi-api-key"
+# For mainland accounts, use the endpoint specified in your Kimi console.
+
+[models.kimi.parameters]
+timeout = 120
+max_retries = 0
