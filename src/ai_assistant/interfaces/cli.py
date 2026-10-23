@@ -6,6 +6,7 @@ import math
 import sys
 
 from ai_assistant.config import ConfigError, load_config
+from ai_assistant.storage.sessions import SessionError
 
 
 def _positive_timeout(value: str) -> float:
@@ -39,6 +40,10 @@ def _print_result(result) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m ai_assistant")
     commands = parser.add_subparsers(dest="command", required=True)
+    chat_parser = commands.add_parser("chat", help="Interactive assistant")
+    chat_parser.add_argument("--config", default="assistant.toml", metavar="PATH")
+    chat_parser.add_argument("--model", metavar="NAME")
+    chat_parser.add_argument("--session", metavar="SESSION_ID")
     config_parser = commands.add_parser("config", help="Application configuration")
     config_commands = config_parser.add_subparsers(dest="action", required=True)
     check = config_commands.add_parser("check", help="Validate configuration without network access")
@@ -53,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
     probe.add_argument("--timeout", type=_positive_timeout, default=60.0)
     from ai_assistant.knowledge.cli import add_commands
     add_commands(commands)
+    from ai_assistant.interfaces.sessions import add_commands as add_sessions
+    add_sessions(commands)
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
@@ -67,8 +74,24 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 print("RAG 操作失败：数据库或集成错误；请检查依赖、连接和显式迁移状态。", file=sys.stderr)
                 return 2
+        if args.command == "session":
+            from ai_assistant.interfaces.sessions import execute
+            try:
+                return asyncio.run(execute(config, args))
+            except SessionError as exc:
+                print(f"会话操作失败：{exc}", file=sys.stderr)
+                return 2
         if args.model is not None and args.model not in config.models:
             raise ConfigError("Unknown model profile.")
+        if args.command == "chat":
+            from ai_assistant.interfaces.chat import chat
+            try:
+                return asyncio.run(chat(config, args.model, session_id=args.session))
+            except ConfigError:
+                raise
+            except (ImportError, OSError, ValueError):
+                print("助理启动失败：请检查可选依赖及工作区。", file=sys.stderr)
+                return 2
         if args.command == "model":
             from ai_assistant.llm.checks import check_model
             selected = config.default_model if args.model is None else args.model
@@ -77,6 +100,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"开始真实模型检查（可能产生费用），SDK 重试：{retry_text}；每项一次逻辑调用。", flush=True)
             results = asyncio.run(check_model(config, args.model, args.capability, args.timeout, on_result=_print_result))
             return 1 if any(item.status == "failed" for item in results) else 0
+    except SessionError as exc:
+        print(f"会话失败：{exc}", file=sys.stderr, flush=True)
+        return 2
     except ConfigError as exc:
         print(f"检查失败：{exc}", file=sys.stderr, flush=True)
         return 2

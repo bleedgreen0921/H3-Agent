@@ -1,1 +1,1 @@
-"""Persistence assembly and repositories; implementation pending."""
+"""Native Saver assembly, session indexes and independent RAG storage."""

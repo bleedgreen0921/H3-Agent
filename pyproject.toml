@@ -17,6 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+sessions = ["langgraph-checkpoint-postgres==3.2.0", "psycopg[binary]==3.2.6"]
 openai = ["langchain-openai==1.7.2"]
 anthropic = ["langchain-anthropic"]
 google = ["langchain-google-genai"]

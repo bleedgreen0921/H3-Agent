@@ -40,8 +40,8 @@ async def execute(config, args):
         raise ConfigError('未配置 [knowledge]。')
     base = config.config_path.parent if config.config_path else Path.cwd()
     # All configured relative paths resolve against the TOML, not worker cwd.
-    c = c.model_copy(update={name: (getattr(c, name) if getattr(c, name).is_absolute() else base / getattr(c, name)).resolve()
-                            for name in ('materials_dir', 'diagnostics_dir', 'embedding_model', 'reranker_model')})
+    from ai_assistant.knowledge.config import resolve_knowledge_paths
+    c = resolve_knowledge_paths(c, base)
     if args.action == 'check' and not args.database and not args.gpu:
         missing = [name for name in ('embedding_model', 'reranker_model') if not getattr(c, name).is_dir()]
         if missing:

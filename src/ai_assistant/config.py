@@ -24,6 +24,7 @@ class ModelConfig(BaseModel):
     api_key: SecretStr | None = None
     base_url: str | None = Field(default=None, min_length=1)
     parameters: dict[str, Any] = Field(default_factory=dict)
+    max_input_tokens: int | None = Field(default=None, gt=0, strict=True)
 
     @field_validator("provider", "model", "base_url")
     @classmethod
@@ -97,11 +98,43 @@ class ToolsConfig(BaseModel):
 from ai_assistant.knowledge.config import KnowledgeConfig
 
 
+class AgentSettings(BaseModel):
+    """Per-turn native graph limits."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True, protected_namespaces=())
+    model_call_limit: int = Field(default=10, gt=0, strict=True)
+    tool_call_limit: int = Field(default=20, gt=0, strict=True)
+    knowledge_call_limit: int = Field(default=5, gt=0, strict=True)
+    turn_timeout_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
+
+
+class SessionsConfig(BaseModel):
+    """Independent psycopg connection settings; never inferred from RAG."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    database_url: SecretStr
+
+    @field_validator("database_url")
+    @classmethod
+    def postgres_url(cls, value):
+        if not value.get_secret_value().startswith(("postgresql://", "postgres://")):
+            raise ValueError("Use a PostgreSQL psycopg URL")
+        return value
+
+
+class ContextConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    summary_model: str | None = Field(default=None, min_length=1)
+
+
 class AppConfig(BaseModel):
     """Validated application settings; no clients or global state are stored."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
+    sessions: SessionsConfig | None = None
+    context: ContextConfig | None = None
+    agent: AgentSettings = Field(default_factory=AgentSettings)
     knowledge: KnowledgeConfig | None = None
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
@@ -120,6 +153,8 @@ class AppConfig(BaseModel):
             raise ValueError("Model profile names must not be blank")
         if self.default_model not in self.models:
             raise ValueError("default_model must refer to an existing model profile")
+        if self.context and self.context.summary_model is not None and self.context.summary_model not in self.models:
+            raise ValueError("Unknown summary model profile")
         if self.tools.web is not None:
             profile = self.models.get(self.tools.web.credential_profile)
             if profile is None or profile.provider != "deepseek" or profile.api_key is None:

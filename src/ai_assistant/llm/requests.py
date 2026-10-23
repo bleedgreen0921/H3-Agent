@@ -1,4 +1,4 @@
-"""Diagnostic request settings and ownership of temporary model HTTP clients."""
+"""Diagnostic request preparation and shared model-client ownership."""
 
 from collections.abc import Callable
 from contextlib import AsyncExitStack, asynccontextmanager

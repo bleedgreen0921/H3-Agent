@@ -44,3 +44,12 @@ class KnowledgeConfig(BaseModel):
         data = {key: str(getattr(self, key)) for key in fields}
         data.update(schema=1, parser='unstructured-local', dimensions=1024, tokenizer='embedding')
         return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+
+def resolve_knowledge_paths(settings, base):
+    """Resolve all local RAG paths relative to the configuration file."""
+    return settings.model_copy(update={
+        name: (getattr(settings, name) if getattr(settings, name).is_absolute()
+               else base / getattr(settings, name)).resolve()
+        for name in ('materials_dir', 'diagnostics_dir', 'embedding_model', 'reranker_model')
+    })

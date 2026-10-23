@@ -2,6 +2,8 @@
 default_model = "deepseek"
 
 [models.primary]
+# Application input budget; leave room for output within the actual model window.
+max_input_tokens = 24000
 provider = "openai"
 model = "your-model-id"
 api_key = "your-api-key"
@@ -12,6 +14,8 @@ max_retries = 0
 
 # A compatible server may accept a placeholder key; consult its documentation.
 [models.local]
+# Application input budget; leave room for output within the actual model window.
+max_input_tokens = 24000
 provider = "openai"
 model = "your-local-model-id"
 base_url = "http://127.0.0.1:8000/v1"
@@ -22,16 +26,22 @@ timeout = 120
 max_retries = 0
 
 [models.claude]
+# Application input budget; leave room for output within the actual model window.
+max_input_tokens = 24000
 provider = "anthropic"
 model = "your-anthropic-model-id"
 api_key = "your-anthropic-api-key"
 
 [models.gemini]
+# Application input budget; leave room for output within the actual model window.
+max_input_tokens = 24000
 provider = "google_genai"
 model = "your-gemini-model-id"
 api_key = "your-google-api-key"
 
 [models.ollama]
+# Application input budget; leave room for output within the actual model window.
+max_input_tokens = 24000
 provider = "ollama"
 model = "your-ollama-model-id"
 base_url = "http://127.0.0.1:11434"
@@ -39,6 +49,8 @@ base_url = "http://127.0.0.1:11434"
 # Domestic providers: install .[domestic]. Model IDs are examples, not pinned versions.
 # Explicit base_url overrides the provider's public endpoint preset.
 [models.deepseek]
+# Application input budget; leave room for output within the actual model window.
+max_input_tokens = 24000
 provider = "deepseek"
 model = "deepseek-flash"
 api_key = "your-deepseek-api-key"
@@ -51,6 +63,8 @@ max_retries = 0
 type = "disabled"
 
 [models.glm]
+# Application input budget; leave room for output within the actual model window.
+max_input_tokens = 24000
 provider = "glm"
 model = "glm-5.3"
 api_key = "your-glm-api-key"
@@ -60,6 +74,8 @@ timeout = 120
 max_retries = 0
 
 [models.qwen]
+# Application input budget; leave room for output within the actual model window.
+max_input_tokens = 24000
 provider = "qwen"
 model = "qwen-plus"
 api_key = "your-dashscope-api-key"
@@ -75,6 +91,8 @@ max_retries = 0
 # enable_thinking = false
 
 [models.kimi]
+# Application input budget; leave room for output within the actual model window.
+max_input_tokens = 24000
 provider = "kimi"
 model = "kimi-k3"
 api_key = "your-kimi-api-key"
@@ -119,3 +137,19 @@ enabled = false
 # chunk_size = 512
 # chunk_overlap = 64
 # top_k = 5
+
+# 可选：每轮原生逻辑调用限额，不限制 SDK 内部网络重试次数。
+[agent]
+model_call_limit = 10
+tool_call_limit = 20
+knowledge_call_limit = 5
+turn_timeout_seconds = 300
+
+# Persistent chat requires the sessions extra and explicit `session init`.
+# This connection uses psycopg syntax, independent of the RAG URL.
+[sessions]
+database_url = "postgresql://postgres:REPLACE_WITH_PRIVATE_PASSWORD@127.0.0.1:55432/rag"
+
+[context]
+# Optional existing profile; omission reuses the selected chat model.
+# summary_model = "primary"
