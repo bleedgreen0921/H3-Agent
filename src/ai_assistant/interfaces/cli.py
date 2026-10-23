@@ -51,9 +51,22 @@ def main(argv: list[str] | None = None) -> int:
     probe.add_argument("--model", metavar="NAME")
     probe.add_argument("--capability", choices=("all", "chat", "stream", "tools", "json_mode", "json_schema"), default="all")
     probe.add_argument("--timeout", type=_positive_timeout, default=60.0)
+    from ai_assistant.knowledge.cli import add_commands
+    add_commands(commands)
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
+        if args.command == "rag":
+            from ai_assistant.knowledge.cli import execute
+            from ai_assistant.knowledge import KnowledgeError
+            try:
+                return asyncio.run(execute(config, args))
+            except (KnowledgeError, ImportError, OSError) as exc:
+                print(f"RAG 操作失败：{exc if isinstance(exc, KnowledgeError) else type(exc).__name__}", file=sys.stderr)
+                return 2
+            except Exception:
+                print("RAG 操作失败：数据库或集成错误；请检查依赖、连接和显式迁移状态。", file=sys.stderr)
+                return 2
         if args.model is not None and args.model not in config.models:
             raise ConfigError("Unknown model profile.")
         if args.command == "model":

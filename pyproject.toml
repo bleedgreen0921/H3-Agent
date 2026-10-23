@@ -24,6 +24,15 @@ ollama = ["langchain-ollama"]
 deepseek = ["langchain-deepseek==1.1.1"]
 domestic = ["langchain-openai==1.7.2", "langchain-deepseek==1.1.1"]
 
+rag = [
+    "langchain-postgres==0.0.19", "langchain-huggingface==1.2.3",
+    "langchain-community==0.4.2", "langchain-classic==1.0.8",
+    "langchain-text-splitters==1.1.3", "langchain-unstructured==1.0.1",
+    "unstructured[csv,docx,pptx,xlsx,md]==0.15.14", "unstructured-client==0.27.0", "sentence-transformers==5.1.2",
+    "asyncpg==0.31.0", "psycopg[binary]==3.2.6", "jieba==0.42.1",
+    "torch==2.6.0", "transformers==4.57.3", "sentencepiece==0.2.1",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["ai_assistant*"]

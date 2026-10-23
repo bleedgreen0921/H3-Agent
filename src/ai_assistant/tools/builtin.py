@@ -150,7 +150,7 @@ async def run_command(command: Annotated[str, Field(min_length=1, max_length=320
 
 
 def create_builtin_tools(*, include_web: bool = False, include_write: bool = False,
-                         include_terminal: bool = False) -> list[BaseTool]:
+                         include_terminal: bool = False, retriever=None) -> list[BaseTool]:
     """Return fresh native tool instances with safe expected-error handling."""
     selected = [list_directory, read_text, search_text]
     if include_web:
@@ -159,4 +159,8 @@ def create_builtin_tools(*, include_web: bool = False, include_write: bool = Fal
         selected += [create_file, edit_file]
     if include_terminal:
         selected += [run_command]
-    return [item.model_copy(update={'handle_tool_error': True}) for item in selected]
+    result = [item.model_copy(update={'handle_tool_error': True}) for item in selected]
+    if retriever is not None:
+        from ai_assistant.knowledge.retrieval import create_knowledge_tool
+        result.append(create_knowledge_tool(retriever))
+    return result

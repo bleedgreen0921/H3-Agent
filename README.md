@@ -28,3 +28,5 @@ cp assistant.example.toml assistant.toml
 - [写权限工具](docs/write-tools.md)：文件创建、精确编辑与 Bubblewrap 终端。
 - [架构说明](docs/architecture.md)：目录职责、依赖边界与后续能力规划。
 - [框架复用记录](docs/llm-framework-reuse.md)：原生能力对照、行为差异与验证证据。
+
+可选的本地知识库支持 PostgreSQL/pgvector 持久化、可靠后台入库、元数据过滤、中文混合检索及本地重排，并以原生 LangChain 工具向 Agent 提供证据。安装、CLI、Agent 装配及验收见 [知识检索说明](docs/rag.md)。

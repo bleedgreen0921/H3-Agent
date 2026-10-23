@@ -94,11 +94,15 @@ class ToolsConfig(BaseModel):
     terminal: TerminalConfig | None = None
 
 
+from ai_assistant.knowledge.config import KnowledgeConfig
+
+
 class AppConfig(BaseModel):
     """Validated application settings; no clients or global state are stored."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
+    knowledge: KnowledgeConfig | None = None
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     _config_path: Path | None = PrivateAttr(default=None)

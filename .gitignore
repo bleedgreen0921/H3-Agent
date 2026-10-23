@@ -11,3 +11,6 @@ dist/
 models.toml
 assistant.toml
 docs/
+# Local immutable RAG inputs and explicit Compose credentials
+.rag/
+deploy/private/

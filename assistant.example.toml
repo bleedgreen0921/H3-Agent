@@ -106,3 +106,16 @@ enabled = false
 # [tools.terminal]
 # profile = "project"
 # timeout = 120
+
+# Optional; install the rag extra and run `rag init` explicitly before use.
+# [knowledge]
+# database_url = "postgresql+asyncpg://rag:REPLACE_WITH_PRIVATE_PASSWORD@127.0.0.1:55432/rag"
+# knowledge_base_id = "default"
+# materials_dir = ".rag/materials"
+# diagnostics_dir = ".rag/diagnostics"
+# device = "cuda"
+# embedding_batch = 4
+# reranker_batch = 4
+# chunk_size = 512
+# chunk_overlap = 64
+# top_k = 5

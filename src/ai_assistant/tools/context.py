@@ -5,6 +5,8 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from langchain_core.retrievers import BaseRetriever
+
 import httpx
 
 from ai_assistant.config import AppConfig
@@ -21,10 +23,11 @@ class ToolContext:
     writes: WritableWorkspace | None = None
     terminal: TerminalService | None = None
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
+    retriever: BaseRetriever | None = None
 
 
 @asynccontextmanager
-async def tool_context(config: AppConfig):
+async def tool_context(config: AppConfig, *, retriever: BaseRetriever | None = None):
     base = config.config_path.parent if config.config_path else Path.cwd()
     root = Path(config.workspace.root)
     workspace = ReadOnlyWorkspace(
@@ -46,4 +49,4 @@ async def tool_context(config: AppConfig):
             stack.push_async_callback(terminal.aclose)
         yield ToolContext(workspace, web,
                           WritableWorkspace(workspace) if config.tools.files.enabled else None,
-                          terminal, lock)
+                          terminal, lock, retriever)
