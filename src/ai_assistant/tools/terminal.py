@@ -96,6 +96,10 @@ class BubblewrapExecutionPolicy(BaseExecutionPolicy):
         self.profile = profile
         self.venv = venv
         self.temporary = temporary
+        self.skills_mode = False
+        self.skill_mounts = []
+        self.npm_project = None
+        self.node = None
         self._aborted = False
         self.cancelled = threading.Event()
         self._processes: list[subprocess.Popen] = []
@@ -136,6 +140,14 @@ class BubblewrapExecutionPolicy(BaseExecutionPolicy):
                             raise TerminalError('虚拟环境位于被排除目录内。')
                         if self._user_excluded(relative):
                             raise TerminalError('虚拟环境与自定义排除规则冲突。')
+                        continue
+                    if self.skills_mode and self.npm_project is not None and path == self.npm_project / 'node_modules':
+                        from ai_assistant.skills.dependencies import inventory
+                        from ai_assistant.skills.catalog import SkillError
+                        try:
+                            inventory(path)
+                        except SkillError as exc:
+                            raise TerminalError(str(exc)) from None
                         continue
                     info = child.stat(follow_symlinks=False)
                     if stat.S_ISLNK(info.st_mode):
@@ -197,11 +209,26 @@ class BubblewrapExecutionPolicy(BaseExecutionPolicy):
         args += ['--proc', '/proc', '--dev', '/dev', '--bind', str(self.temporary), '/tmp']
         root = str(self.workspace.root)
         args += ['--ro-bind' if self.profile == 'scratch' else '--bind', root, root]
-        args += ['--bind' if self.profile == 'maintenance' else '--ro-bind',
+        args += ['--bind' if self.profile == 'maintenance' and not self.skills_mode else '--ro-bind',
                  str(self.venv), str(self.venv)]
         for path, directory in self._masks():
             source = self.temporary / ('empty-dir' if directory else 'empty-file')
             args += ['--ro-bind', str(source), str(path)]
+        if self.skills_mode:
+            if self.node is not None and not self.node.is_relative_to('/usr'):
+                args += ['--ro-bind', str(self.node), '/opt/assistant-node/bin/node']
+            project = self.npm_project
+            if project is not None and project.is_relative_to(self.workspace.root):
+                for name in ('node_modules', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json'):
+                    path = project / name
+                    if path.exists():
+                        if path.is_symlink():
+                            raise TerminalError('npm project roots and manifests cannot be symlinks.')
+                        args += ['--ro-bind', str(path), str(path)]
+            for skill in self.skill_mounts:
+                args += ['--ro-bind', str(skill.path), skill.sandbox_path]
+                if project is not None and project.is_relative_to(self.workspace.root) and (project / 'node_modules').is_dir() and (skill.path / 'node_modules').is_dir():
+                    args += ['--ro-bind', str(project / 'node_modules'), skill.sandbox_path + '/node_modules']
         args += ['--chdir', str(cwd)]
         return args + ['--', *command]
 
@@ -237,15 +264,40 @@ class TerminalService:
         self.timeout = timeout
         self.venv = (venv or Path(sys.prefix)).absolute()
         self.lock = lock or asyncio.Lock()
+        self.skills_mode = False
+        self.npm_project = None
         self._active: set[asyncio.Task] = set()
         self._closed = False
 
     def _execute(self, policy, command, cwd, timeout):
+        if not self.skills_mode:
+            return self._execute_unlocked(policy, command, cwd, timeout)
+        from contextlib import ExitStack
+        from ai_assistant.skills.manager import file_lock
+        from ai_assistant.skills.dependencies import Transaction
+        from ai_assistant.skills.catalog import SkillError
+        import sysconfig
+        try:
+            with ExitStack() as stack:
+                environment = self.venv / '.assistant-dependencies'
+                stack.enter_context(file_lock(environment / 'environment.lock'))
+                Transaction(environment, [Path(sysconfig.get_path('purelib')).absolute(), self.venv / 'bin']).recover()
+                if self.npm_project is not None and self.npm_project.is_relative_to(self.workspace.root):
+                    journal_root = self.workspace.root / '.assistant-dependencies'
+                    stack.enter_context(file_lock(journal_root / 'project.lock'))
+                    Transaction(journal_root, [self.npm_project]).recover()
+                return self._execute_unlocked(policy, command, cwd, timeout)
+        except SkillError as exc:
+            raise TerminalError(str(exc)) from None
+
+    def _execute_unlocked(self, policy, command, cwd, timeout):
         env = {'PATH': f'{self.venv}/bin:/usr/bin:/bin', 'HOME': '/tmp/home',
                'TMPDIR': '/tmp/tmp', 'XDG_CACHE_HOME': '/tmp/cache',
                'PIP_CACHE_DIR': '/tmp/cache/pip', 'PIP_CONFIG_FILE': '/dev/null',
                'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8', 'VIRTUAL_ENV': str(self.venv),
                'PYTHONDONTWRITEBYTECODE': '1'}
+        if self.skills_mode:
+            env['PATH'] = '/opt/assistant-node/bin:' + env['PATH']
         session = _CancellableShellSession(cwd, policy, ('/bin/bash', '--noprofile', '--norc'), env)
         try:
             session.start()
@@ -271,7 +323,7 @@ class TerminalService:
                     if stream is not None:
                         stream.close()
 
-    async def run_command(self, command: str, cwd='.', timeout: float | None = None) -> dict:
+    async def run_command(self, command: str, cwd='.', timeout: float | None = None, *, skills=()) -> dict:
         if not command.strip() or len(command) > 32000 or '\0' in command:
             raise TerminalError('命令必须非空、不含 NUL，且不超过 32,000 字符。')
         effective = self.timeout if timeout is None else timeout
@@ -302,6 +354,11 @@ class TerminalService:
                         (root / name).mkdir(mode=0o700)
                     (root / 'empty-file').touch(mode=0o600)
                     policy = BubblewrapExecutionPolicy(self.workspace, self.profile, self.venv, root, effective)
+                    policy.skills_mode = self.skills_mode
+                    policy.skill_mounts = list(skills)
+                    policy.npm_project = self.npm_project
+                    node = shutil.which('node')
+                    policy.node = Path(node).resolve() if node else None
                     worker = asyncio.create_task(asyncio.to_thread(
                         self._execute, policy, command,
                         Path('/tmp') if self.profile == 'scratch' else directory, effective))

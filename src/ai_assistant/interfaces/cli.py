@@ -60,9 +60,19 @@ def main(argv: list[str] | None = None) -> int:
     add_commands(commands)
     from ai_assistant.interfaces.sessions import add_commands as add_sessions
     add_sessions(commands)
+    from ai_assistant.skills.cli import add_commands as add_skills
+    add_skills(commands)
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
+        if args.command == "skill":
+            from ai_assistant.skills.cli import execute
+            from ai_assistant.skills.catalog import SkillError
+            try:
+                return asyncio.run(execute(config, args))
+            except (SkillError, OSError, ImportError) as exc:
+                print(f"Skill 操作失败：{exc}", file=sys.stderr)
+                return 2
         if args.command == "rag":
             from ai_assistant.knowledge.cli import execute
             from ai_assistant.knowledge import KnowledgeError

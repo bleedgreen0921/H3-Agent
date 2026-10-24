@@ -136,7 +136,10 @@ async def run_command(command: Annotated[str, Field(min_length=1, max_length=320
     if runtime.context.terminal is None:
         raise ToolException('终端工具尚未启用。')
     try:
-        result = await runtime.context.terminal.run_command(command, cwd, timeout)
+        options = {}
+        if runtime.context.skills is not None:
+            options['skills'] = runtime.context.skills.active(runtime.state.get('active_skills', {}))
+        result = await runtime.context.terminal.run_command(command, cwd, timeout, **options)
     except TerminalError as exc:
         raise ToolException(str(exc)) from None
     success = not result['timed_out'] and result['exit_code'] == 0

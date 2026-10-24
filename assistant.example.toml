@@ -153,3 +153,10 @@ database_url = "postgresql://postgres:REPLACE_WITH_PRIVATE_PASSWORD@127.0.0.1:55
 [context]
 # Optional existing profile; omission reuses the selected chat model.
 # summary_model = "primary"
+
+# Optional community Agent Skills. Omit this section to preserve the old behavior.
+# [skills]
+# roots = [] # Extra roots resolve relative to this TOML; shared .agents/skills roots are automatic.
+# dependency_install = true
+# npm_project = "." # Workspace-relative existing npm project (package.json + lockfile v2/v3).
+# dependency_timeout_seconds = 120

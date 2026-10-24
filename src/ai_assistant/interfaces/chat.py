@@ -11,7 +11,7 @@ from ai_assistant.config import ConfigError
 from ai_assistant.storage.sessions import SessionError, SessionStorageError
 from ai_assistant.agents.context import ContextBudgetError, SummaryCallLimitError
 
-HELP = '/help 帮助；/new 新会话；/exit 退出。每行输入一个请求。'
+HELP = '/help 帮助；/new 新会话；/skills 技能目录；/skill ID 请求；/exit 退出。每行输入一个请求。'
 
 
 class ConsoleInput:
@@ -61,6 +61,8 @@ def show_turn(turn):
             print(f"- {doc.id} | {m.get('source_name', '')} | "
                   f"{m.get('document_version_id', '')} | {location(m)}")
 
+    if turn.skill_ids:
+        print('本轮技能：' + ', '.join(turn.skill_ids))
     usage = turn.usage
     print(f'调用：模型 {usage.main_model_calls}，摘要 {usage.summary_model_calls}，工具 {usage.tool_calls}；'
           f'未报告用量的模型调用 {usage.unreported_model_calls}')
@@ -130,8 +132,25 @@ async def chat(config, model_name=None, *, session_id=None):
                         return 2
                     print(f'已开始新会话：{session.session_id}')
                     continue
+                if line == '/skills':
+                    catalog = session.context.skills
+                    if catalog is None:
+                        print('Skills 未配置。')
+                    else:
+                        for skill in catalog.skills.values():
+                            print(f"{skill.id} | {skill.metadata['name']}: {skill.metadata['description']}")
+                        for diagnostic in catalog.diagnostics:
+                            print(diagnostic)
+                    continue
+                skill_ids = None
+                if line.startswith('/skill '):
+                    parts = line.split(maxsplit=2)
+                    if len(parts) != 3:
+                        print('用法：/skill SKILL_ID 请求正文')
+                        continue
+                    skill_ids, line = [parts[1]], parts[2]
                 interrupted = False
-                active = asyncio.create_task(session.run_turn(line, on_event=show_event))
+                active = asyncio.create_task(session.run_turn(line, on_event=show_event, **({'skill_ids': skill_ids} if skill_ids else {})))
                 try:
                     turn = await active
                     show_turn(turn)
@@ -143,7 +162,7 @@ async def chat(config, model_name=None, *, session_id=None):
                     print(f'本轮未完成：{exc}；已发生的文件或命令效果不会回滚。')
                     return 2
                 except ContextBudgetError:
-                    print('本轮上下文超出预算或无法安全压缩，未完成；请缩小输入或 /new。已发生的文件或命令效果不会回滚。')
+                    print('本轮上下文超出预算或无法安全压缩，未完成；请缩小输入、卸载部分技能或 /new。已发生的文件或命令效果不会回滚。')
                 except Exception as exc:
                     from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
                     from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError

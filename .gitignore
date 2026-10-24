@@ -14,3 +14,7 @@ docs/
 # Local immutable RAG inputs and explicit Compose credentials
 .rag/
 deploy/private/
+
+# Skills installer object cache and recoverable dependency journals
+.agents/.assistant-skills/
+.assistant-dependencies/

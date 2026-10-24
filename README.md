@@ -70,3 +70,8 @@ async def example():
 模型和工具。事件回调接收原生工具事件；不要将工具参数、完整输出或诊断直接展示给终端用户。
 显式手动验收：`python scripts/check_chat_live.py --config assistant.toml`，
 加 `--write` 可显示文件创建及追问修改任务，`--session` 可重开已有会话。该脚本调用真实模型，可能产生费用；自动测试不运行它。
+
+
+社区 Agent Skills 可选接入：配置 `[skills]` 后启用共享目录发现、原生按需加载、
+只读脚本挂载和只新增依赖事务。安装方式、CLI、会话语义和显式联网验收见
+[Skills 文档](src/ai_assistant/skills/README.md)。未配置时保持原有行为。

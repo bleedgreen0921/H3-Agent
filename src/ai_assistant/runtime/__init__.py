@@ -31,6 +31,7 @@ class AgentTurn:
     messages: list[BaseMessage]
     sources: list[Document]
     usage: TurnUsage = field(default_factory=TurnUsage)
+    skill_ids: list[str] = field(default_factory=list)
 
 
 def final_text(messages):
@@ -96,7 +97,7 @@ class AssistantSession:
                 return
             await asyncio.sleep(1)
 
-    async def run_turn(self, text, *, on_event=None):
+    async def run_turn(self, text, *, skill_ids=None, on_event=None):
         if self._closed:
             raise RuntimeError('Session is closed.')
         if self._running:
@@ -120,15 +121,29 @@ class AssistantSession:
             if self._reopened:
                 inputs.append(HumanMessage(content=REOPEN_NOTICE))
             inputs.append(HumanMessage(content=text))
+            activated_skills = set()
+            graph_input = {'messages': inputs}
+            if skill_ids:
+                from ai_assistant.skills.catalog import SkillError
+                if self.context.skills is None:
+                    raise SkillError('Skills are not configured.')
+                chosen = [self.context.skills.resolve(identity) for identity in skill_ids]
+                graph_input['active_skills'] = {s.id: s.digest for s in chosen}
+                activated_skills.update(s.id for s in chosen)
             result = None
             root_id = None
             async with asyncio.timeout(self.settings.turn_timeout_seconds):
                 async for event in self.agent.astream_events(
-                    {'messages': inputs}, config=config, context=self.context,
+                    graph_input, config=config, context=self.context,
                     version='v2', durability='sync'
                 ):
                     if root_id is None:
                         root_id = event['run_id']
+                    if event['event'] == 'on_tool_end' and event.get('name') == 'load_skill' and self.context.skills:
+                        from langgraph.types import Command
+                        output = event.get('data', {}).get('output')
+                        if isinstance(output, Command) and isinstance(output.update, dict):
+                            activated_skills.update(s.id for s in self.context.skills.active(output.update.get('active_skills', {})))
                     if event['event'] in {'on_tool_start', 'on_tool_end', 'on_tool_error'} and on_event:
                         returned = on_event(event)
                         if inspect.isawaitable(returned):
@@ -148,7 +163,8 @@ class AssistantSession:
                 await self.repository.complete(state.config)
             self._complete = state.config
             self._failed = self._reopened = False
-            return AgentTurn(result['messages'], observer.sources, observer.usage)
+            return AgentTurn(result['messages'], observer.sources, observer.usage,
+                sorted(activated_skills | {s.id for s in self.context.skills.active(result.get('active_skills', {}))}) if self.context.skills else [])
         except BaseException as exc:
             self._failed = True
             if self.repository is not None:
@@ -203,11 +219,14 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         tools = create_builtin_tools(include_web=config.tools.web is not None,
             include_write=config.tools.files.enabled,
             include_terminal=config.tools.terminal is not None, retriever=retriever)
+        if context.skills is not None:
+            from ai_assistant.tools.skills import create_skill_tools
+            tools.extend(create_skill_tools(config.skills.dependency_install))
         agent = create_assistant_agent(model, tools, checkpointer=saver, settings=config.agent,
             context_settings=config.context, summary_model=summary_model,
             max_input_tokens=config.models[selected].max_input_tokens,
             summary_max_input_tokens=config.models[summary_name].max_input_tokens,
-            summary_profile=summary_name)
+            summary_profile=summary_name, skills_enabled=context.skills is not None)
         session = AssistantSession(agent, context, config.agent, model_name=selected,
                                    tools=tools, repository=repository)
         await session.open(session_id)

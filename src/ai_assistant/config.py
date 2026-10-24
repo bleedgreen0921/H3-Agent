@@ -127,11 +127,20 @@ class ContextConfig(BaseModel):
     summary_model: str | None = Field(default=None, min_length=1)
 
 
+class SkillsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    roots: list[str] = Field(default_factory=list)
+    dependency_install: bool = True
+    npm_project: str = Field(default=".", min_length=1)
+    dependency_timeout_seconds: float = Field(default=120, gt=0, le=1800, allow_inf_nan=False)
+
+
 class AppConfig(BaseModel):
     """Validated application settings; no clients or global state are stored."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
+    skills: SkillsConfig | None = None
     sessions: SessionsConfig | None = None
     context: ContextConfig | None = None
     agent: AgentSettings = Field(default_factory=AgentSettings)
