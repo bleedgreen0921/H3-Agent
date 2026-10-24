@@ -26,10 +26,14 @@ class ToolContext:
     retriever: BaseRetriever | None = None
     skills: object | None = None
     skill_dependencies: object | None = None
+    mcp: object | None = None
+    caller: object | None = None
+    operations: object | None = None
+    input_id: str | None = None
 
 
 @asynccontextmanager
-async def tool_context(config: AppConfig, *, retriever: BaseRetriever | None = None):
+async def tool_context(config: AppConfig, *, retriever: BaseRetriever | None = None, skill_snapshot=None):
     base = config.config_path.parent if config.config_path else Path.cwd()
     root = Path(config.workspace.root)
     workspace = ReadOnlyWorkspace(
@@ -45,8 +49,9 @@ async def tool_context(config: AppConfig, *, retriever: BaseRetriever | None = N
         if config.skills is not None:
             from ai_assistant.skills.catalog import SkillCatalog, configured_roots
             from ai_assistant.skills.dependencies import DependencyService
-            skills = SkillCatalog(configured_roots(config))
-            stack.callback(skills.close)
+            skills = skill_snapshot or SkillCatalog(configured_roots(config))
+            if skill_snapshot is None:
+                stack.callback(skills.close)
             if config.skills.dependency_install:
                 dependencies = DependencyService(workspace.root, config.skills, lock=lock)
             if terminal is not None:

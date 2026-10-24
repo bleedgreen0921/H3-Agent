@@ -2,7 +2,7 @@
 import asyncio
 import inspect
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -32,6 +32,8 @@ class AgentTurn:
     sources: list[Document]
     usage: TurnUsage = field(default_factory=TurnUsage)
     skill_ids: list[str] = field(default_factory=list)
+    input_id: str = ""
+    operations: list[dict] = field(default_factory=list)
 
 
 def final_text(messages):
@@ -97,13 +99,15 @@ class AssistantSession:
                 return
             await asyncio.sleep(1)
 
-    async def run_turn(self, text, *, skill_ids=None, on_event=None):
+    async def run_turn(self, text, *, skill_ids=None, on_event=None, input_id=None):
         if self._closed:
             raise RuntimeError('Session is closed.')
         if self._running:
             raise RuntimeError('A turn is already running.')
         if self._storage_lost:
             raise SessionStorageError('Session connection lost; reopen the conversation.')
+        input_id = input_id or str(uuid4())
+        turn_context = replace(self.context, input_id=input_id)
         self._running = True
         self._active_task = asyncio.current_task()
         try:
@@ -134,7 +138,7 @@ class AssistantSession:
             root_id = None
             async with asyncio.timeout(self.settings.turn_timeout_seconds):
                 async for event in self.agent.astream_events(
-                    graph_input, config=config, context=self.context,
+                    graph_input, config=config, context=turn_context,
                     version='v2', durability='sync'
                 ):
                     if root_id is None:
@@ -160,11 +164,15 @@ class AssistantSession:
             if state.next:
                 raise RuntimeError('Agent has pending execution.')
             if self.repository is not None:
-                await self.repository.complete(state.config)
+                if self.context.mcp is not None or self.context.caller is not None:
+                    await self.repository.complete(state.config, input_id=input_id)
+                else:
+                    await self.repository.complete(state.config)
             self._complete = state.config
             self._failed = self._reopened = False
             return AgentTurn(result['messages'], observer.sources, observer.usage,
-                sorted(activated_skills | {s.id for s in self.context.skills.active(result.get('active_skills', {}))}) if self.context.skills else [])
+                sorted(activated_skills | {s.id for s in self.context.skills.active(result.get('active_skills', {}))}) if self.context.skills else [],
+                input_id, await self.context.operations.list(input_id) if self.context.operations else [])
         except BaseException as exc:
             self._failed = True
             if self.repository is not None:
@@ -190,7 +198,14 @@ def validate_context_config(config, selected):
 
 
 @asynccontextmanager
-async def assistant_session(config, model_name=None, *, retriever=None, session_id=None):
+async def assistant_session(config, model_name=None, *, retriever=None, session_id=None, caller=None, resources=None):
+    from ai_assistant.integrations.policy import Caller
+    caller = caller or Caller()
+    if caller.channel == 'feishu_group':
+        # Group sessions cannot inherit private local capabilities.
+        config = config.model_copy(update={'knowledge': None, 'skills': None,
+            'tools': config.tools.model_copy(update={'web': None, 'files': config.tools.files.model_copy(update={'enabled': False}), 'terminal': None})})
+        retriever = None
     selected = model_name or config.default_model
     if selected not in config.models:
         raise ConfigError('Unknown model profile.')
@@ -208,7 +223,16 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
     async with AsyncExitStack() as stack:
         repository = await stack.enter_async_context(session_storage(config.sessions)) if config.sessions else None
         saver = repository.saver if repository else InMemorySaver()
-        context = await stack.enter_async_context(tool_context(config, retriever=retriever))
+        context = await stack.enter_async_context(tool_context(config, retriever=retriever,
+            skill_snapshot=getattr(resources, "skills", None) if caller.channel != "feishu_group" else None))
+        context = replace(context, caller=caller if caller.channel != "cli" else None)
+        if config.mcp is not None and config.mcp.servers:
+            from ai_assistant.integrations.mcp import mcp_resources
+            from ai_assistant.storage.integrations import operation_storage
+            directory = getattr(resources, "catalog", resources) if resources is not None else await stack.enter_async_context(
+                mcp_resources(config, context.workspace, caller=caller))
+            operations = await stack.enter_async_context(operation_storage(config.sessions)) if config.sessions else None
+            context = replace(context, mcp=directory.for_caller(caller), caller=caller, operations=operations)
         model = await stack.enter_async_context(model_session(config, selected,
             config.models[selected].parameters.get('timeout', 300), factory=create_model))
         summary_name = (config.context.summary_model or selected) if config.context else selected
@@ -222,11 +246,17 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         if context.skills is not None:
             from ai_assistant.tools.skills import create_skill_tools
             tools.extend(create_skill_tools(config.skills.dependency_install))
+        if caller.channel == 'feishu_group':
+            tools = []
+        if context.mcp is not None:
+            from ai_assistant.tools.mcp import discovery_tools
+            tools.extend(discovery_tools())
+            tools.extend(e.tool for e in context.mcp.entries.values())
         agent = create_assistant_agent(model, tools, checkpointer=saver, settings=config.agent,
             context_settings=config.context, summary_model=summary_model,
             max_input_tokens=config.models[selected].max_input_tokens,
             summary_max_input_tokens=config.models[summary_name].max_input_tokens,
-            summary_profile=summary_name, skills_enabled=context.skills is not None)
+            summary_profile=summary_name, skills_enabled=context.skills is not None, mcp_enabled=context.mcp is not None)
         session = AssistantSession(agent, context, config.agent, model_name=selected,
                                    tools=tools, repository=repository)
         await session.open(session_id)

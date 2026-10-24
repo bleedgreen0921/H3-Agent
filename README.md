@@ -75,3 +75,7 @@ async def example():
 社区 Agent Skills 可选接入：配置 `[skills]` 后启用共享目录发现、原生按需加载、
 只读脚本挂载和只新增依赖事务。安装方式、CLI、会话语义和显式联网验收见
 [Skills 文档](src/ai_assistant/skills/README.md)。未配置时保持原有行为。
+
+网易邮箱、飞书办公与机器人接入见 [OFFICE.md](OFFICE.md)，配置参考
+[assistant.office.example.toml](assistant.office.example.toml)。默认关闭；使用原生 MCP
+发现/激活工具，外部写入和机器人入口要求 PostgreSQL 持久会话与显式迁移。

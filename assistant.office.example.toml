@@ -1,0 +1,63 @@
+# Standalone office configuration. Replace placeholders in a private copy.
+default_model = "chat"
+[models.chat]
+provider = "openai"
+model = "YOUR_MODEL"
+api_key = "REPLACE_MODEL_KEY"
+max_input_tokens = 32000
+[workspace]
+root = "."
+[sessions]
+database_url = "postgresql://USER:PASSWORD@127.0.0.1:5432/assistant"
+[mcp]
+connect_timeout = 15
+call_timeout = 30
+# Must be outside workspace; ~ is expanded only for this explicit state path.
+state_dir = "~/.local/state/ai-assistant"
+[integrations.netease.accounts.personal]
+address = "owner@163.com"
+authorization_code = "REPLACE_CLIENT_AUTHORIZATION_CODE"
+# Optional TLS hosts: imap_host / smtp_host. Plaintext authentication is unsupported.
+[integrations.netease.accounts.personal.folders]
+sent = "REPLACE_EXACT_SENT_FOLDER"
+drafts = "REPLACE_EXACT_DRAFT_FOLDER"
+[mcp.servers.mail]
+transport = "netease"
+identity = "private"
+account = "personal"
+tools = ["folders", "search", "read", "download", "send", "draft", "update_draft", "mark", "move"]
+write_tools = ["send", "draft", "update_draft", "mark", "move"]
+allow_write = true
+[integrations.feishu]
+app_id = "cli_REPLACE"
+app_secret = "REPLACE_APP_SECRET"
+owner_open_id = "REPLACE_OWNER_OPEN_ID"
+redirect_uri = "http://127.0.0.1:3000/callback"
+scopes = ["offline_access", "im:message", "im:message:readonly", "im:chat:readonly", "docx:document", "drive:drive", "wiki:wiki", "bitable:app", "calendar:calendar", "task:task", "contact:user.base:readonly"]
+node_project = "deploy/feishu"
+[mcp.servers.feishu_user]
+transport = "feishu"
+identity = "user"
+tools = ["docx_v1_document_get", "docx_v1_document_rawContent", "docx_v1_document_create", "calendar_v4_calendar_list", "calendar_v4_calendarEvent_list", "calendar_v4_calendarEvent_create", "calendar_v4_calendarEvent_patch", "calendar_v4_calendarEvent_delete", "task_v2_task_list", "task_v2_task_create", "task_v2_task_patch"]
+write_tools = ["docx_v1_document_create", "calendar_v4_calendarEvent_create", "calendar_v4_calendarEvent_patch", "calendar_v4_calendarEvent_delete", "task_v2_task_create", "task_v2_task_patch"]
+allow_write = true
+[mcp.servers.feishu_bot]
+transport = "feishu"
+identity = "bot"
+tools = ["im_v1_message_list", "im_v1_message_create", "docx_v1_document_get", "docx_v1_document_create", "wiki_v2_space_list", "wiki_v2_spaceNode_create", "bitable_v1_appTableRecord_list", "bitable_v1_appTableRecord_create", "drive_v1_file_list", "drive_v1_file_createFolder", "contact_v3_user_get"]
+write_tools = ["im_v1_message_create", "docx_v1_document_create", "wiki_v2_spaceNode_create", "bitable_v1_appTableRecord_create", "drive_v1_file_createFolder"]
+allow_write = true
+[mcp.servers.feishu_bot.resource_arguments]
+im_v1_message_create = ["data.receive_id"]
+im_v1_message_list = ["params.container_id"]
+[mcp.servers.feishu_files]
+transport = "feishu_files"
+identity = "bot"
+tools = ["upload_drive", "download_drive", "upload_message_file", "download_message_file"]
+write_tools = ["upload_drive", "upload_message_file"]
+allow_write = true
+[channels.feishu]
+enabled = false
+# Explicitly enable only your test group after applying the schema and OAuth login.
+# [channels.feishu.groups.oc_REPLACE.resources]
+# feishu_bot = ["oc_REPLACE"]

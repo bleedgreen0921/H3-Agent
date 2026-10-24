@@ -12,7 +12,7 @@ SYSTEM_PROMPT = '''你是中文工作助理。根据任务自主选择工具，�
 def create_assistant_agent(model, tools, *, checkpointer, settings,
                            context_settings=None, summary_model=None,
                            max_input_tokens=None, summary_max_input_tokens=None,
-                           summary_profile='', skills_enabled=False):
+                           summary_profile='', skills_enabled=False, mcp_enabled=False):
     middleware = [
         ModelCallLimitMiddleware(run_limit=settings.model_call_limit, exit_behavior='error'),
         ToolCallLimitMiddleware(run_limit=settings.tool_call_limit, exit_behavior='error'),
@@ -36,6 +36,14 @@ def create_assistant_agent(model, tools, *, checkpointer, settings,
         if context_settings is None and max_input_tokens is not None:
             from ai_assistant.agents.context import InputBudgetMiddleware
             middleware.append(InputBudgetMiddleware(max_input_tokens))
+    if mcp_enabled:
+        from ai_assistant.agents.mcp import MCPMiddleware
+        from ai_assistant.tools.mcp import OfficeState
+        from ai_assistant.agents.context import InputBudgetMiddleware
+        position = next((i for i, item in enumerate(middleware) if isinstance(item, InputBudgetMiddleware)), len(middleware))
+        middleware.insert(position, MCPMiddleware())
+        if context_settings is None and not skills_enabled and max_input_tokens is not None:
+            middleware.append(InputBudgetMiddleware(max_input_tokens))
     return create_agent(model, tools, system_prompt=SYSTEM_PROMPT,
                         context_schema=ToolContext, checkpointer=checkpointer,
-                        middleware=middleware, **({"state_schema": SkillState} if skills_enabled else {}))
+                        middleware=middleware, **({"state_schema": OfficeState} if mcp_enabled else {"state_schema": SkillState} if skills_enabled else {}))

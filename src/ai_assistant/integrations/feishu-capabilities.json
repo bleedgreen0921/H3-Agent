@@ -1,0 +1,1038 @@
+{
+  "version": 1,
+  "official_mcp_version": "0.5.1",
+  "tools": [
+    {
+      "name": "im.v1.chat.get",
+      "native_name": "im_v1_chat_get",
+      "domain": "im",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "im:message",
+        "im:message:readonly",
+        "im:chat:readonly"
+      ],
+      "path": "/open-apis/im/v1/chats/:chat_id",
+      "method": "GET"
+    },
+    {
+      "name": "im.v1.chat.list",
+      "native_name": "im_v1_chat_list",
+      "domain": "im",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "im:message",
+        "im:message:readonly",
+        "im:chat:readonly"
+      ],
+      "path": "/open-apis/im/v1/chats",
+      "method": "GET"
+    },
+    {
+      "name": "im.v1.chat.search",
+      "native_name": "im_v1_chat_search",
+      "domain": "im",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "im:message",
+        "im:message:readonly",
+        "im:chat:readonly"
+      ],
+      "path": "/open-apis/im/v1/chats/search",
+      "method": "GET"
+    },
+    {
+      "name": "im.v1.message.get",
+      "native_name": "im_v1_message_get",
+      "domain": "im",
+      "write": false,
+      "identities": [
+        "bot"
+      ],
+      "scopes": [
+        "im:message",
+        "im:message:readonly",
+        "im:chat:readonly"
+      ],
+      "path": "/open-apis/im/v1/messages/:message_id",
+      "method": "GET"
+    },
+    {
+      "name": "im.v1.message.list",
+      "native_name": "im_v1_message_list",
+      "domain": "im",
+      "write": false,
+      "identities": [
+        "bot"
+      ],
+      "scopes": [
+        "im:message",
+        "im:message:readonly",
+        "im:chat:readonly"
+      ],
+      "path": "/open-apis/im/v1/messages",
+      "method": "GET"
+    },
+    {
+      "name": "im.v1.message.create",
+      "native_name": "im_v1_message_create",
+      "domain": "im",
+      "write": true,
+      "identities": [
+        "bot"
+      ],
+      "scopes": [
+        "im:message",
+        "im:message:readonly",
+        "im:chat:readonly"
+      ],
+      "path": "/open-apis/im/v1/messages",
+      "method": "POST"
+    },
+    {
+      "name": "im.v1.message.reply",
+      "native_name": "im_v1_message_reply",
+      "domain": "im",
+      "write": true,
+      "identities": [
+        "bot"
+      ],
+      "scopes": [
+        "im:message",
+        "im:message:readonly",
+        "im:chat:readonly"
+      ],
+      "path": "/open-apis/im/v1/messages/:message_id/reply",
+      "method": "POST"
+    },
+    {
+      "name": "im.v1.message.forward",
+      "native_name": "im_v1_message_forward",
+      "domain": "im",
+      "write": true,
+      "identities": [
+        "bot"
+      ],
+      "scopes": [
+        "im:message",
+        "im:message:readonly",
+        "im:chat:readonly"
+      ],
+      "path": "/open-apis/im/v1/messages/:message_id/forward",
+      "method": "POST"
+    },
+    {
+      "name": "im.v1.message.update",
+      "native_name": "im_v1_message_update",
+      "domain": "im",
+      "write": true,
+      "identities": [
+        "bot"
+      ],
+      "scopes": [
+        "im:message",
+        "im:message:readonly",
+        "im:chat:readonly"
+      ],
+      "path": "/open-apis/im/v1/messages/:message_id",
+      "method": "PUT"
+    },
+    {
+      "name": "im.v1.message.patch",
+      "native_name": "im_v1_message_patch",
+      "domain": "im",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "im:message",
+        "im:message:readonly",
+        "im:chat:readonly"
+      ],
+      "path": "/open-apis/im/v1/messages/:message_id",
+      "method": "PATCH"
+    },
+    {
+      "name": "docx.v1.document.get",
+      "native_name": "docx_v1_document_get",
+      "domain": "docx",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "docx:document"
+      ],
+      "path": "/open-apis/docx/v1/documents/:document_id",
+      "method": "GET"
+    },
+    {
+      "name": "docx.v1.document.rawContent",
+      "native_name": "docx_v1_document_rawContent",
+      "domain": "docx",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "docx:document"
+      ],
+      "path": "/open-apis/docx/v1/documents/:document_id/raw_content",
+      "method": "GET"
+    },
+    {
+      "name": "docx.v1.document.create",
+      "native_name": "docx_v1_document_create",
+      "domain": "docx",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "docx:document"
+      ],
+      "path": "/open-apis/docx/v1/documents",
+      "method": "POST"
+    },
+    {
+      "name": "docx.v1.documentBlock.get",
+      "native_name": "docx_v1_documentBlock_get",
+      "domain": "docx",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "docx:document"
+      ],
+      "path": "/open-apis/docx/v1/documents/:document_id/blocks/:block_id",
+      "method": "GET"
+    },
+    {
+      "name": "docx.v1.documentBlock.list",
+      "native_name": "docx_v1_documentBlock_list",
+      "domain": "docx",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "docx:document"
+      ],
+      "path": "/open-apis/docx/v1/documents/:document_id/blocks",
+      "method": "GET"
+    },
+    {
+      "name": "docx.v1.documentBlock.patch",
+      "native_name": "docx_v1_documentBlock_patch",
+      "domain": "docx",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "docx:document"
+      ],
+      "path": "/open-apis/docx/v1/documents/:document_id/blocks/:block_id",
+      "method": "PATCH"
+    },
+    {
+      "name": "docx.v1.documentBlock.batchUpdate",
+      "native_name": "docx_v1_documentBlock_batchUpdate",
+      "domain": "docx",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "docx:document"
+      ],
+      "path": "/open-apis/docx/v1/documents/:document_id/blocks/batch_update",
+      "method": "PATCH"
+    },
+    {
+      "name": "docx.v1.documentBlockChildren.create",
+      "native_name": "docx_v1_documentBlockChildren_create",
+      "domain": "docx",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "docx:document"
+      ],
+      "path": "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children",
+      "method": "POST"
+    },
+    {
+      "name": "docx.v1.documentBlockChildren.get",
+      "native_name": "docx_v1_documentBlockChildren_get",
+      "domain": "docx",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "docx:document"
+      ],
+      "path": "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children",
+      "method": "GET"
+    },
+    {
+      "name": "drive.v1.file.list",
+      "native_name": "drive_v1_file_list",
+      "domain": "drive",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "drive:drive"
+      ],
+      "path": "/open-apis/drive/v1/files",
+      "method": "GET"
+    },
+    {
+      "name": "drive.v1.file.createFolder",
+      "native_name": "drive_v1_file_createFolder",
+      "domain": "drive",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "drive:drive"
+      ],
+      "path": "/open-apis/drive/v1/files/create_folder",
+      "method": "POST"
+    },
+    {
+      "name": "drive.v1.file.move",
+      "native_name": "drive_v1_file_move",
+      "domain": "drive",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "drive:drive"
+      ],
+      "path": "/open-apis/drive/v1/files/:file_token/move",
+      "method": "POST"
+    },
+    {
+      "name": "wiki.v2.space.list",
+      "native_name": "wiki_v2_space_list",
+      "domain": "wiki",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "wiki:wiki"
+      ],
+      "path": "/open-apis/wiki/v2/spaces",
+      "method": "GET"
+    },
+    {
+      "name": "wiki.v2.space.get",
+      "native_name": "wiki_v2_space_get",
+      "domain": "wiki",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "wiki:wiki"
+      ],
+      "path": "/open-apis/wiki/v2/spaces/:space_id",
+      "method": "GET"
+    },
+    {
+      "name": "wiki.v2.space.getNode",
+      "native_name": "wiki_v2_space_getNode",
+      "domain": "wiki",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "wiki:wiki"
+      ],
+      "path": "/open-apis/wiki/v2/spaces/get_node",
+      "method": "GET"
+    },
+    {
+      "name": "wiki.v2.spaceNode.list",
+      "native_name": "wiki_v2_spaceNode_list",
+      "domain": "wiki",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "wiki:wiki"
+      ],
+      "path": "/open-apis/wiki/v2/spaces/:space_id/nodes",
+      "method": "GET"
+    },
+    {
+      "name": "wiki.v2.spaceNode.create",
+      "native_name": "wiki_v2_spaceNode_create",
+      "domain": "wiki",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "wiki:wiki"
+      ],
+      "path": "/open-apis/wiki/v2/spaces/:space_id/nodes",
+      "method": "POST"
+    },
+    {
+      "name": "wiki.v2.spaceNode.move",
+      "native_name": "wiki_v2_spaceNode_move",
+      "domain": "wiki",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "wiki:wiki"
+      ],
+      "path": "/open-apis/wiki/v2/spaces/:space_id/nodes/:node_token/move",
+      "method": "POST"
+    },
+    {
+      "name": "wiki.v2.spaceNode.updateTitle",
+      "native_name": "wiki_v2_spaceNode_updateTitle",
+      "domain": "wiki",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "wiki:wiki"
+      ],
+      "path": "/open-apis/wiki/v2/spaces/:space_id/nodes/:node_token/update_title",
+      "method": "POST"
+    },
+    {
+      "name": "bitable.v1.app.get",
+      "native_name": "bitable_v1_app_get",
+      "domain": "bitable",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "bitable:app"
+      ],
+      "path": "/open-apis/bitable/v1/apps/:app_token",
+      "method": "GET"
+    },
+    {
+      "name": "bitable.v1.appTable.list",
+      "native_name": "bitable_v1_appTable_list",
+      "domain": "bitable",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "bitable:app"
+      ],
+      "path": "/open-apis/bitable/v1/apps/:app_token/tables",
+      "method": "GET"
+    },
+    {
+      "name": "bitable.v1.appTable.create",
+      "native_name": "bitable_v1_appTable_create",
+      "domain": "bitable",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "bitable:app"
+      ],
+      "path": "/open-apis/bitable/v1/apps/:app_token/tables",
+      "method": "POST"
+    },
+    {
+      "name": "bitable.v1.appTableField.list",
+      "native_name": "bitable_v1_appTableField_list",
+      "domain": "bitable",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "bitable:app"
+      ],
+      "path": "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields",
+      "method": "GET"
+    },
+    {
+      "name": "bitable.v1.appTableField.create",
+      "native_name": "bitable_v1_appTableField_create",
+      "domain": "bitable",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "bitable:app"
+      ],
+      "path": "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/fields",
+      "method": "POST"
+    },
+    {
+      "name": "bitable.v1.appTableRecord.get",
+      "native_name": "bitable_v1_appTableRecord_get",
+      "domain": "bitable",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "bitable:app"
+      ],
+      "path": "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/:record_id",
+      "method": "GET"
+    },
+    {
+      "name": "bitable.v1.appTableRecord.list",
+      "native_name": "bitable_v1_appTableRecord_list",
+      "domain": "bitable",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "bitable:app"
+      ],
+      "path": "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records",
+      "method": "GET"
+    },
+    {
+      "name": "bitable.v1.appTableRecord.search",
+      "native_name": "bitable_v1_appTableRecord_search",
+      "domain": "bitable",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "bitable:app"
+      ],
+      "path": "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/search",
+      "method": "POST"
+    },
+    {
+      "name": "bitable.v1.appTableRecord.create",
+      "native_name": "bitable_v1_appTableRecord_create",
+      "domain": "bitable",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "bitable:app"
+      ],
+      "path": "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records",
+      "method": "POST"
+    },
+    {
+      "name": "bitable.v1.appTableRecord.update",
+      "native_name": "bitable_v1_appTableRecord_update",
+      "domain": "bitable",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "bitable:app"
+      ],
+      "path": "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/:record_id",
+      "method": "PUT"
+    },
+    {
+      "name": "bitable.v1.appTableRecord.batchCreate",
+      "native_name": "bitable_v1_appTableRecord_batchCreate",
+      "domain": "bitable",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "bitable:app"
+      ],
+      "path": "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/batch_create",
+      "method": "POST"
+    },
+    {
+      "name": "bitable.v1.appTableRecord.batchUpdate",
+      "native_name": "bitable_v1_appTableRecord_batchUpdate",
+      "domain": "bitable",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "bitable:app"
+      ],
+      "path": "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/batch_update",
+      "method": "POST"
+    },
+    {
+      "name": "bitable.v1.appTableRecord.batchGet",
+      "native_name": "bitable_v1_appTableRecord_batchGet",
+      "domain": "bitable",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "bitable:app"
+      ],
+      "path": "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records/batch_get",
+      "method": "POST"
+    },
+    {
+      "name": "calendar.v4.calendar.list",
+      "native_name": "calendar_v4_calendar_list",
+      "domain": "calendar",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "calendar:calendar"
+      ],
+      "path": "/open-apis/calendar/v4/calendars",
+      "method": "GET"
+    },
+    {
+      "name": "calendar.v4.calendar.get",
+      "native_name": "calendar_v4_calendar_get",
+      "domain": "calendar",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "calendar:calendar"
+      ],
+      "path": "/open-apis/calendar/v4/calendars/:calendar_id",
+      "method": "GET"
+    },
+    {
+      "name": "calendar.v4.calendarEvent.get",
+      "native_name": "calendar_v4_calendarEvent_get",
+      "domain": "calendar",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "calendar:calendar"
+      ],
+      "path": "/open-apis/calendar/v4/calendars/:calendar_id/events/:event_id",
+      "method": "GET"
+    },
+    {
+      "name": "calendar.v4.calendarEvent.list",
+      "native_name": "calendar_v4_calendarEvent_list",
+      "domain": "calendar",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "calendar:calendar"
+      ],
+      "path": "/open-apis/calendar/v4/calendars/:calendar_id/events",
+      "method": "GET"
+    },
+    {
+      "name": "calendar.v4.calendarEvent.search",
+      "native_name": "calendar_v4_calendarEvent_search",
+      "domain": "calendar",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "calendar:calendar"
+      ],
+      "path": "/open-apis/calendar/v4/calendars/:calendar_id/events/search",
+      "method": "POST"
+    },
+    {
+      "name": "calendar.v4.calendarEvent.create",
+      "native_name": "calendar_v4_calendarEvent_create",
+      "domain": "calendar",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "calendar:calendar"
+      ],
+      "path": "/open-apis/calendar/v4/calendars/:calendar_id/events",
+      "method": "POST"
+    },
+    {
+      "name": "calendar.v4.calendarEvent.patch",
+      "native_name": "calendar_v4_calendarEvent_patch",
+      "domain": "calendar",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "calendar:calendar"
+      ],
+      "path": "/open-apis/calendar/v4/calendars/:calendar_id/events/:event_id",
+      "method": "PATCH"
+    },
+    {
+      "name": "calendar.v4.calendarEvent.delete",
+      "native_name": "calendar_v4_calendarEvent_delete",
+      "domain": "calendar",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "calendar:calendar"
+      ],
+      "path": "/open-apis/calendar/v4/calendars/:calendar_id/events/:event_id",
+      "method": "DELETE"
+    },
+    {
+      "name": "calendar.v4.calendarEventAttendee.list",
+      "native_name": "calendar_v4_calendarEventAttendee_list",
+      "domain": "calendar",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "calendar:calendar"
+      ],
+      "path": "/open-apis/calendar/v4/calendars/:calendar_id/events/:event_id/attendees",
+      "method": "GET"
+    },
+    {
+      "name": "calendar.v4.calendarEventAttendee.create",
+      "native_name": "calendar_v4_calendarEventAttendee_create",
+      "domain": "calendar",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "calendar:calendar"
+      ],
+      "path": "/open-apis/calendar/v4/calendars/:calendar_id/events/:event_id/attendees",
+      "method": "POST"
+    },
+    {
+      "name": "calendar.v4.calendarEventAttendee.batchDelete",
+      "native_name": "calendar_v4_calendarEventAttendee_batchDelete",
+      "domain": "calendar",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "calendar:calendar"
+      ],
+      "path": "/open-apis/calendar/v4/calendars/:calendar_id/events/:event_id/attendees/batch_delete",
+      "method": "POST"
+    },
+    {
+      "name": "task.v2.task.get",
+      "native_name": "task_v2_task_get",
+      "domain": "task",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "task:task"
+      ],
+      "path": "/open-apis/task/v2/tasks/:task_guid",
+      "method": "GET"
+    },
+    {
+      "name": "task.v2.task.list",
+      "native_name": "task_v2_task_list",
+      "domain": "task",
+      "write": false,
+      "identities": [
+        "user"
+      ],
+      "scopes": [
+        "task:task"
+      ],
+      "path": "/open-apis/task/v2/tasks",
+      "method": "GET"
+    },
+    {
+      "name": "task.v2.task.create",
+      "native_name": "task_v2_task_create",
+      "domain": "task",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "task:task"
+      ],
+      "path": "/open-apis/task/v2/tasks",
+      "method": "POST"
+    },
+    {
+      "name": "task.v2.task.patch",
+      "native_name": "task_v2_task_patch",
+      "domain": "task",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "task:task"
+      ],
+      "path": "/open-apis/task/v2/tasks/:task_guid",
+      "method": "PATCH"
+    },
+    {
+      "name": "task.v2.task.addMembers",
+      "native_name": "task_v2_task_addMembers",
+      "domain": "task",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "task:task"
+      ],
+      "path": "/open-apis/task/v2/tasks/:task_guid/add_members",
+      "method": "POST"
+    },
+    {
+      "name": "task.v2.task.removeMembers",
+      "native_name": "task_v2_task_removeMembers",
+      "domain": "task",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "task:task"
+      ],
+      "path": "/open-apis/task/v2/tasks/:task_guid/remove_members",
+      "method": "POST"
+    },
+    {
+      "name": "task.v2.task.addTasklist",
+      "native_name": "task_v2_task_addTasklist",
+      "domain": "task",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "task:task"
+      ],
+      "path": "/open-apis/task/v2/tasks/:task_guid/add_tasklist",
+      "method": "POST"
+    },
+    {
+      "name": "task.v2.task.tasklists",
+      "native_name": "task_v2_task_tasklists",
+      "domain": "task",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "task:task"
+      ],
+      "path": "/open-apis/task/v2/tasks/:task_guid/tasklists",
+      "method": "GET"
+    },
+    {
+      "name": "task.v2.tasklist.get",
+      "native_name": "task_v2_tasklist_get",
+      "domain": "task",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "task:task"
+      ],
+      "path": "/open-apis/task/v2/tasklists/:tasklist_guid",
+      "method": "GET"
+    },
+    {
+      "name": "task.v2.tasklist.list",
+      "native_name": "task_v2_tasklist_list",
+      "domain": "task",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "task:task"
+      ],
+      "path": "/open-apis/task/v2/tasklists",
+      "method": "GET"
+    },
+    {
+      "name": "task.v2.tasklist.create",
+      "native_name": "task_v2_tasklist_create",
+      "domain": "task",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "task:task"
+      ],
+      "path": "/open-apis/task/v2/tasklists",
+      "method": "POST"
+    },
+    {
+      "name": "task.v2.tasklist.patch",
+      "native_name": "task_v2_tasklist_patch",
+      "domain": "task",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "task:task"
+      ],
+      "path": "/open-apis/task/v2/tasklists/:tasklist_guid",
+      "method": "PATCH"
+    },
+    {
+      "name": "task.v2.tasklist.tasks",
+      "native_name": "task_v2_tasklist_tasks",
+      "domain": "task",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "task:task"
+      ],
+      "path": "/open-apis/task/v2/tasklists/:tasklist_guid/tasks",
+      "method": "GET"
+    },
+    {
+      "name": "contact.v3.user.get",
+      "native_name": "contact_v3_user_get",
+      "domain": "contact",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "contact:user.base:readonly"
+      ],
+      "path": "/open-apis/contact/v3/users/:user_id",
+      "method": "GET"
+    },
+    {
+      "name": "contact.v3.user.batchGetId",
+      "native_name": "contact_v3_user_batchGetId",
+      "domain": "contact",
+      "write": false,
+      "identities": [
+        "bot"
+      ],
+      "scopes": [
+        "contact:user.base:readonly"
+      ],
+      "path": "/open-apis/contact/v3/users/batch_get_id",
+      "method": "POST"
+    }
+  ]
+}

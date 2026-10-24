@@ -62,9 +62,33 @@ def main(argv: list[str] | None = None) -> int:
     add_sessions(commands)
     from ai_assistant.skills.cli import add_commands as add_skills
     add_skills(commands)
+    from ai_assistant.integrations.cli import add_commands as add_mcp
+    add_mcp(commands)
+    feishu_parser = commands.add_parser("feishu", help="Feishu owner bot")
+    feishu_commands = feishu_parser.add_subparsers(dest="action", required=True)
+    feishu_commands.add_parser("serve").add_argument("--config", default="assistant.toml")
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
+        if args.command == "feishu":
+            from ai_assistant.interfaces.feishu import serve
+            try:
+                asyncio.run(serve(config))
+                return 0
+            except ConfigError:
+                raise
+            except Exception:
+                print("飞书入口失败：请检查部署、持久存储和认证状态。", file=sys.stderr)
+                return 2
+        if args.command == "mcp":
+            from ai_assistant.integrations.cli import execute
+            try:
+                return asyncio.run(execute(config, args))
+            except ConfigError:
+                raise
+            except Exception:
+                print("MCP 操作失败：请检查可选依赖、配置、部署及迁移状态。", file=sys.stderr)
+                return 2
         if args.command == "skill":
             from ai_assistant.skills.cli import execute
             from ai_assistant.skills.catalog import SkillError

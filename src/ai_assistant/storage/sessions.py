@@ -115,13 +115,18 @@ class SessionRepository:
             thread_ids=CASE WHEN %s=ANY(thread_ids) THEN thread_ids ELSE array_append(thread_ids,%s) END,
             updated_at=clock_timestamp() WHERE id=%s''', (thread, thread, thread, self.current))
 
-    async def complete(self, config):
+    async def complete(self, config, *, input_id=None):
         from psycopg.types.json import Jsonb
         # Keep only the native state locator, never callbacks or runtime resources.
         c = config['configurable']
         locator = {'configurable': {k: c[k] for k in ('thread_id', 'checkpoint_ns', 'checkpoint_id')}}
-        await self.update_current('''UPDATE assistant_sessions SET complete=%s,status='ready',
-            updated_at=clock_timestamp() WHERE id=%s''', (Jsonb(locator), self.current))
+        if input_id is not None:
+            await self.update_current('''UPDATE assistant_sessions SET complete=%s,status='ready',
+                last_input_id=%s, updated_at=clock_timestamp() WHERE id=%s''',
+                (Jsonb(locator), input_id, self.current))
+        else:
+            await self.update_current('''UPDATE assistant_sessions SET complete=%s,status='ready',
+                updated_at=clock_timestamp() WHERE id=%s''', (Jsonb(locator), self.current))
 
     async def interrupted(self):
         await self.update_current("UPDATE assistant_sessions SET status='interrupted', updated_at=clock_timestamp() WHERE id=%s",

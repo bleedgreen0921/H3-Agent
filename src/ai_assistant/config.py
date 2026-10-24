@@ -135,11 +135,17 @@ class SkillsConfig(BaseModel):
     dependency_timeout_seconds: float = Field(default=120, gt=0, le=1800, allow_inf_nan=False)
 
 
+from ai_assistant.integrations.config import MCPConfig, IntegrationsConfig, ChannelsConfig
+
+
 class AppConfig(BaseModel):
     """Validated application settings; no clients or global state are stored."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
+    mcp: MCPConfig | None = None
+    integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
+    channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     skills: SkillsConfig | None = None
     sessions: SessionsConfig | None = None
     context: ContextConfig | None = None
@@ -168,6 +174,24 @@ class AppConfig(BaseModel):
             profile = self.models.get(self.tools.web.credential_profile)
             if profile is None or profile.provider != "deepseek" or profile.api_key is None:
                 raise ValueError("Web tools require a DeepSeek credential profile")
+        if self.mcp:
+            for server in self.mcp.servers.values():
+                if server.allow_write and self.sessions is None:
+                    raise ValueError('External writes require persistent sessions')
+                if server.transport in {'feishu', 'feishu_files'} and self.integrations.feishu is None:
+                    raise ValueError('Feishu services require integrations.feishu')
+                if server.transport == 'netease' and (self.integrations.netease is None or
+                        server.account not in self.integrations.netease.accounts):
+                    raise ValueError('Unknown mailbox account')
+        for group in self.channels.feishu.groups.values():
+            for name in group.resources:
+                if self.mcp is None or name not in self.mcp.servers:
+                    raise ValueError('Group refers to an unknown MCP service')
+                server = self.mcp.servers[name]
+                if server.transport != 'feishu' or server.identity != 'bot':
+                    raise ValueError('Groups may only grant official Feishu bot services')
+        if self.channels.feishu.enabled and (self.sessions is None or self.integrations.feishu is None):
+            raise ValueError('Feishu channel requires sessions and Feishu configuration')
         return self
 
 

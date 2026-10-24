@@ -1,0 +1,1 @@
+{"name":"assistant-feishu-runtime","version":"1.0.0","private":true,"type":"module","engines":{"node":">=20"},"dependencies":{"@larksuiteoapi/lark-mcp":"0.5.1","@larksuiteoapi/node-sdk":"1.76.0","pg":"8.23.1"}}
