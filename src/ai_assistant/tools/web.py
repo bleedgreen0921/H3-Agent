@@ -7,6 +7,16 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+# Keep one search + fetch exchange usable within the default 24k input budget.
+# The full bounded provider response remains in the artifact, outside model text.
+SEARCH_TEXT_LIMIT = 6000
+FETCH_TEXT_LIMIT = 8000
+
+
+def bounded_text(content, limit):
+    marker = '\n[内容已截断；仅展示部分结果]'
+    return content if len(content) <= limit else content[:limit - len(marker)] + marker
+
 
 class WebError(ValueError):
     """A provider failure with a safe public message."""
@@ -110,8 +120,8 @@ class DeepSeekWeb:
             + (f'\n日期：{item.date}' if item.date else '')
             for item in response.results
         ) or '没有找到匹配结果。'
-        artifact = {'response': data, 'truncated': len(content) > 20000}
-        return content[:20000], artifact
+        artifact = {'response': data, 'truncated': len(content) > SEARCH_TEXT_LIMIT}
+        return bounded_text(content, SEARCH_TEXT_LIMIT), artifact
 
     async def fetch(self, url: str) -> tuple[str, dict]:
         data = await self._post('fetch', {'url': validate_url(url)})
@@ -122,4 +132,4 @@ class DeepSeekWeb:
         except (ValidationError, ValueError):
             raise WebError('联网服务响应格式无效或网页正文为空。') from None
         content = f'{page.title}\n{url}\n\n{page.content}'
-        return content[:30000], {'url': url, 'response': data, 'truncated': len(content) > 30000}
+        return bounded_text(content, FETCH_TEXT_LIMIT), {'url': url, 'response': data, 'truncated': len(content) > FETCH_TEXT_LIMIT}

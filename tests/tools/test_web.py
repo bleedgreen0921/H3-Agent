@@ -3,7 +3,7 @@ import unittest
 
 import httpx
 
-from ai_assistant.tools.web import DeepSeekWeb, WebError, validate_url
+from ai_assistant.tools.web import DeepSeekWeb, WebError, validate_url, SEARCH_TEXT_LIMIT, FETCH_TEXT_LIMIT
 
 
 ITEM = {'title': 'Title', 'url': 'https://example.com', 'snippet': 'short',
@@ -49,7 +49,7 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
         for data in ({'results': []}, {'results': [dict(ITEM, summary='x' * 21000)]}):
             async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=data))) as client:
                 content, artifact = await DeepSeekWeb(client, 'key').search('x')
-                self.assertLessEqual(len(content), 20000)
+                self.assertLessEqual(len(content), SEARCH_TEXT_LIMIT)
                 self.assertEqual(artifact['truncated'], bool(data['results']))
         for body in (b'not json', b'[]', b'{}', b'x' * (2 * 1024 * 1024 + 1)):
             async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, content=body))) as client:
@@ -57,7 +57,8 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
                     await DeepSeekWeb(client, 'key').search('x')
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={'title': '', 'content': 'x' * 31000}))) as client:
             content, artifact = await DeepSeekWeb(client, 'key').fetch('https://example.com')
-            self.assertEqual(len(content), 30000)
+            self.assertEqual(len(content), FETCH_TEXT_LIMIT)
+            self.assertIn('内容已截断', content)
             self.assertTrue(artifact['truncated'])
 
     async def test_transport_and_cancellation(self):
@@ -93,3 +94,19 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(WebError):
                 await web.fetch('http://localhost')
         self.assertEqual(requests, [])
+
+
+def test_combined_web_results_fit_default_context_budget():
+    from ai_assistant.agents.context import count_tokens, fit_messages, usable_budget
+    from ai_assistant.agents import SYSTEM_PROMPT
+    from ai_assistant.tools.builtin import create_builtin_tools
+    from ai_assistant.tools.web import bounded_text
+    from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+    tools = create_builtin_tools(include_web=True)
+    messages = [HumanMessage(content='x' * 857), AIMessage(content='', tool_calls=[
+        {'id':'search','name':'web_search','args':{'query':'fixture'}},
+        {'id':'fetch','name':'web_fetch','args':{'url':'https://example.com'}}]),
+        ToolMessage(content=bounded_text('x'*30000,SEARCH_TEXT_LIMIT),tool_call_id='search'),
+        ToolMessage(content=bounded_text('x'*30000,FETCH_TEXT_LIMIT),tool_call_id='fetch')]
+    counter=lambda items:count_tokens([SystemMessage(content=SYSTEM_PROMPT)]+list(items),tools=tools)
+    assert fit_messages(messages,usable_budget(24000),counter=counter) == messages

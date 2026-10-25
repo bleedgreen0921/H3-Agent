@@ -1,0 +1,10 @@
+# 复制为 models.local.toml，填写本机 GGUF 路径；应用不读取此部署配置。
+server = "llama-server"
+embedding_model_file = "/ABSOLUTE/PATH/Qwen3-Embedding-0.6B-Q8_0.gguf"
+reranker_model_file = "/ABSOLUTE/PATH/qwen3-reranker-0.6b-q8_0.gguf"
+embedding_port = 1236
+reranker_port = 1235
+context_size = 2048
+# 更换 Embedding 权重/量化版本时，设置不同标识并同步 knowledge.embedding.model。
+# embedding_model_name = "qwen3-embedding-0.6b-q8-v2"
+# reranker_model_name = "qwen3-reranker-0.6b"

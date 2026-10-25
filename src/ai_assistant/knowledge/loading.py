@@ -1,4 +1,4 @@
-"""Local native loaders in a disposable CPU process; explicit loader granularity."""
+"""Local native loaders in a disposable process; explicit loader granularity."""
 import asyncio
 import json
 import os
@@ -91,10 +91,10 @@ async def _stop_parser(process):
 
 
 async def parse_snapshot(path: Path, *, timeout: float):
-    # A new interpreter prevents CUDA inheritance and permits reliable termination.
+    # 独立解释器隔离解析资源，并允许超时终止。
     with tempfile.TemporaryDirectory(prefix='rag-parse-') as directory:
         output = Path(directory) / 'documents.json'
-        env = dict(os.environ, CUDA_VISIBLE_DEVICES='', HF_HUB_OFFLINE='1',
+        env = dict(os.environ, HF_HUB_OFFLINE='1',
                    TRANSFORMERS_OFFLINE='1', UNSTRUCTURED_DOWNLOAD_NLTK='False')
         process = await asyncio.create_subprocess_exec(
             __import__('sys').executable, '-m', 'ai_assistant.knowledge.loading', str(path), str(output),
@@ -157,13 +157,6 @@ def _main():
     import sys
     import traceback
     try:
-        if sys.platform == 'linux':
-            import ctypes
-            import signal
-            if ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
-                raise RuntimeError('Cannot establish parser parent-death signal')
-            if os.getppid() == 1:
-                raise RuntimeError('Parser parent already exited')
         docs = _run_local_loader(sys.argv[1])
         payload = dict(status='ok', documents=[
             dict(page_content=d.page_content, metadata=d.metadata) for d in docs])

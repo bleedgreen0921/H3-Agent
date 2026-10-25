@@ -39,7 +39,6 @@ def test_parser_process_is_reaped_on_timeout_or_cancellation(tmp_path, cancel):
         original = asyncio.create_subprocess_exec
         processes = []
         async def slow(*args, **kwargs):
-            assert kwargs['env']['CUDA_VISIBLE_DEVICES'] == ''
             assert kwargs['env']['HF_HUB_OFFLINE'] == '1'
             process = await original(sys.executable, '-c', 'import time; time.sleep(30)', **kwargs)
             processes.append(process)

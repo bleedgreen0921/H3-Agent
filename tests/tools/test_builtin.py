@@ -61,7 +61,7 @@ class BuiltinTests(unittest.IsolatedAsyncioTestCase):
             path.write_text('default_model="d"\n[models.d]\nprovider="deepseek"\nmodel="deepseek-chat"\napi_key="SECRET"\n[tools.web]\ncredential_profile="d"\n')
             config = load_config(path)
             async with tool_context(config) as context:
-                self.assertEqual(context.workspace.root, path.parent)
+                self.assertEqual(context.workspace.root, path.parent.resolve())
                 client = context.web._client
                 self.assertFalse(client.is_closed)
                 with self.assertRaises(ValueError):

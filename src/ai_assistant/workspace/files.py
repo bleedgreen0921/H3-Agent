@@ -14,7 +14,7 @@ class WorkspaceError(ValueError):
 MAX_FILE_BYTES = 1024 * 1024
 EXCLUDED = {
     'venv', '__pycache__', 'node_modules', 'build', 'dist',
-    'assistant.toml', 'models.toml', 'credentials', 'credentials.json',
+    'assistant.toml', 'assistant.office.toml', 'models.local.toml', 'models.toml', 'credentials', 'credentials.json',
     'credentials.toml', 'secrets.json', 'secrets.toml', 'env',
     'service-account.json', 'service_account.json', 'token.json', 'tokens.json',
     'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519',
@@ -42,13 +42,24 @@ class ReadOnlyWorkspace:
                  or any(fnmatchcase(part, pattern) for part in relative.parts)
                  for pattern in self.exclude_patterns)
 
+    def _is_config(self, path):
+        if self.config_path is None:
+            return False
+        if path == self.config_path:
+            return True
+        try:
+            # APFS 可能不区分大小写及 Unicode 表示，不能仅比较路径字符串。
+            return path.samefile(self.config_path)
+        except OSError:
+            return False
+
     def _relative(self, value: str) -> Path:
         relative = Path(value)
         if relative.is_absolute() or '..' in relative.parts:
             raise WorkspaceError('仅允许工作区内不含 .. 的相对路径。')
         if self._excluded(relative):
             raise WorkspaceError('该路径不允许访问。')
-        if self.root / relative == self.config_path:
+        if self._is_config(self.root / relative):
             raise WorkspaceError('该路径不允许访问。')
         return relative
 
@@ -61,7 +72,7 @@ class ReadOnlyWorkspace:
                 if current.is_symlink():
                     raise WorkspaceError('不允许访问符号链接。')
             resolved = current.resolve(strict=True)
-            if not resolved.is_relative_to(self.root) or resolved == self.config_path:
+            if not resolved.is_relative_to(self.root) or self._is_config(resolved):
                 raise WorkspaceError('该路径不允许访问。')
             mode = current.stat().st_mode
             if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):

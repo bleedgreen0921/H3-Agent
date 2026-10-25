@@ -16,14 +16,12 @@ from ai_assistant.llm.factory import create_model
 from ai_assistant.llm.requests import model_session
 from ai_assistant.tools.builtin import create_builtin_tools
 from ai_assistant.tools.context import tool_context
-from ai_assistant.tools.terminal import _drain_worker
+from ai_assistant.cancellation import _drain_worker
 from ai_assistant.storage.sessions import SessionError, SessionStorageError, session_storage
 from ai_assistant.runtime.observation import TurnObserver, TurnUsage
 
 RECOVERY_NOTICE = ('应用状态：上一轮未完成，已发生的文件或命令效果不会回滚。'
-                   '请先核实可能变化的工作区；不要恢复执行上一轮请求。')
-REOPEN_NOTICE = ('应用状态：本会话已重新打开，工作区及工具权限以当前配置为准。'
-                 '请重新核实工作区和当前可用工具，不恢复执行旧请求。')
+                   '不要自动重放上一轮动作；直接处理本轮请求，仅在本轮需要操作相关资源时核实状态。')
 
 
 @dataclass(frozen=True)
@@ -117,13 +115,15 @@ class AssistantSession:
                 await self.repository.start(self._thread)
             observer = TurnObserver(self.settings.model_call_limit, self.model_name)
             locator = self._complete or {'configurable': {'thread_id': self._thread}}
-            config = {**locator, 'callbacks': [observer],
+            # astream_events may insert LangGraph's generic 25-step default,
+            # overriding create_agent's 9_999-step setting. Middleware nodes
+            # consume steps too; model/tool/deadline limits remain authoritative.
+            config = {**locator, 'recursion_limit': 9_999, 'callbacks': [observer],
                       'metadata': {'assistant_model_profile': self.model_name}}
             inputs = []
             if self._failed:
                 inputs.append(HumanMessage(content=RECOVERY_NOTICE))
-            if self._reopened:
-                inputs.append(HumanMessage(content=REOPEN_NOTICE))
+            # 飞书每条消息均重新打开持久会话，重开不是用户的新任务。
             inputs.append(HumanMessage(content=text))
             activated_skills = set()
             graph_input = {'messages': inputs}
@@ -245,7 +245,7 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             include_terminal=config.tools.terminal is not None, retriever=retriever)
         if context.skills is not None:
             from ai_assistant.tools.skills import create_skill_tools
-            tools.extend(create_skill_tools(config.skills.dependency_install))
+            tools.extend(create_skill_tools())
         if caller.channel == 'feishu_group':
             tools = []
         if context.mcp is not None:

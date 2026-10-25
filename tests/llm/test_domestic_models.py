@@ -8,7 +8,7 @@ from unittest.mock import patch
 import httpx
 from pydantic import ValidationError
 
-from ai_assistant.config import AppConfig, ModelConfig, load_config
+from ai_assistant.config import AppConfig, ModelConfig
 from ai_assistant.llm.factory import create_model
 
 
@@ -45,7 +45,9 @@ class DomesticSDKTests(unittest.IsolatedAsyncioTestCase):
     async def test_requests_keys_tool_calls_usage_and_native_reasoning(self):
         for name, (host, path) in EXPECTED_PATHS.items():
             with self.subTest(provider=name):
-                config = load_config(ROOT / "assistant.example.toml")
+                config = AppConfig(default_model="deepseek", models={name: ModelConfig(
+                    provider=name, model="test-model", api_key="offline-key", parameters={"max_retries":0})
+                    for name in EXPECTED_PATHS})
                 profile = config.models[name]
 
                 def respond(request):
@@ -81,7 +83,9 @@ class DomesticSDKTests(unittest.IsolatedAsyncioTestCase):
     async def test_streaming_chat_completions_for_each_provider(self):
         for name, (host, path) in EXPECTED_PATHS.items():
             with self.subTest(provider=name):
-                config = load_config(ROOT / "assistant.example.toml")
+                config = AppConfig(default_model="deepseek", models={name: ModelConfig(
+                    provider=name, model="test-model", api_key="offline-key", parameters={"max_retries":0})
+                    for name in EXPECTED_PATHS})
 
                 def respond(request):
                     self.assertEqual((request.url.host, request.url.path), (host, path))

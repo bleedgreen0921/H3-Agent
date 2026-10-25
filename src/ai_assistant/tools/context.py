@@ -25,7 +25,6 @@ class ToolContext:
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
     retriever: BaseRetriever | None = None
     skills: object | None = None
-    skill_dependencies: object | None = None
     mcp: object | None = None
     caller: object | None = None
     operations: object | None = None
@@ -42,21 +41,18 @@ async def tool_context(config: AppConfig, *, retriever: BaseRetriever | None = N
     )
     lock = asyncio.Lock()
     terminal_settings = config.tools.terminal
-    terminal = TerminalService(workspace, profile=terminal_settings.profile,
-                               timeout=terminal_settings.timeout, lock=lock) if terminal_settings else None
+    terminal = TerminalService(workspace, timeout=terminal_settings.timeout, lock=lock,
+        allow_network=terminal_settings.allow_network,
+        env={k: v.get_secret_value() for k, v in terminal_settings.env.items()},
+        read_paths=[p.expanduser() if p.expanduser().is_absolute() else base / p
+                    for p in terminal_settings.read_paths]) if terminal_settings else None
     async with AsyncExitStack() as stack:
-        skills = dependencies = None
+        skills = None
         if config.skills is not None:
             from ai_assistant.skills.catalog import SkillCatalog, configured_roots
-            from ai_assistant.skills.dependencies import DependencyService
             skills = skill_snapshot or SkillCatalog(configured_roots(config))
             if skill_snapshot is None:
                 stack.callback(skills.close)
-            if config.skills.dependency_install:
-                dependencies = DependencyService(workspace.root, config.skills, lock=lock)
-            if terminal is not None:
-                terminal.skills_mode = True
-                terminal.npm_project = (workspace.root / config.skills.npm_project).resolve()
         settings = config.tools.web
         web = None
         if settings is not None:
@@ -67,4 +63,4 @@ async def tool_context(config: AppConfig, *, retriever: BaseRetriever | None = N
             stack.push_async_callback(terminal.aclose)
         yield ToolContext(workspace, web,
                           WritableWorkspace(workspace) if config.tools.files.enabled else None,
-                          terminal, lock, retriever, skills, dependencies)
+                          terminal, lock, retriever, skills)

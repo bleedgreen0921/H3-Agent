@@ -99,3 +99,35 @@ def test_state_cannot_be_inside_workspace(tmp_path):
         'app_id':'cli_fixture','app_secret':'secret','owner_open_id':'owner'}})
     with pytest.raises(ConfigError,match='outside'):
         TokenStore(c,tmp_path)
+
+
+def test_missing_user_info_is_not_reported_as_owner_mismatch(tmp_path):
+    store = tokens(tmp_path)
+    def mock(request):
+        if request.method == 'POST':
+            return httpx.Response(200,json={'access_token':'new','expires_in':3600})
+        return httpx.Response(200,json={'code':99991672,'msg':'PRIVATE'})
+    original = httpx.Client
+    with patch('ai_assistant.integrations.oauth.httpx.Client', side_effect=lambda **kw: original(transport=httpx.MockTransport(mock))):
+        with pytest.raises(ConfigError,match='user information') as error:
+            store.request_token({'grant_type':'authorization_code','code':'code'})
+    assert 'PRIVATE' not in str(error.value) and not store.path.exists()
+    assert not list(store.root.glob('feishu-owner-check-*'))
+
+
+def test_owner_mismatch_is_private_and_never_replaces_trusted_owner(tmp_path):
+    store = tokens(tmp_path)
+    def mock(request):
+        if request.method == 'POST':
+            return httpx.Response(200,json={'access_token':'SECRET_TOKEN','expires_in':3600})
+        return httpx.Response(200,json={'data':{'open_id':'different-owner'}})
+    original = httpx.Client
+    with patch('ai_assistant.integrations.oauth.httpx.Client', side_effect=lambda **kw: original(transport=httpx.MockTransport(mock))):
+        with pytest.raises(ConfigError) as error:
+            store.request_token({'grant_type':'authorization_code','code':'code'})
+    assert 'different-owner' not in str(error.value)
+    path = next(store.root.glob('feishu-owner-check-*'))
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert json.loads(path.read_text())['authorized_open_id'] == 'different-owner'
+    assert 'SECRET_TOKEN' not in path.read_text()
+    assert store.settings.owner_open_id == 'owner' and not store.path.exists()

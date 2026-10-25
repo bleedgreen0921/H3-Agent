@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from ai_assistant.config import ConfigError
+from ai_assistant.executables import executable, executable_env
 
 
 def capabilities():
@@ -61,14 +62,15 @@ class OfficialConnection:
         from fastmcp.client.transports import StdioTransport
         from langchain.mcp import MCPAdapter
         from ai_assistant.integrations.mcp import decline
-        env = {'PATH': os.defpath, 'LANG': 'C.UTF-8',
+        binary = executable('node')
+        env = {**executable_env(binary),
                'APP_ID': self.feishu.app_id,
                'APP_SECRET': self.feishu.app_secret.get_secret_value(),
                'LARK_TOOLS': ','.join(item['name'] for item in self.selected),
                'LARK_TOKEN_MODE': 'user_access_token' if self.tokens else 'tenant_access_token'}
         if self.tokens:
             env['USER_ACCESS_TOKEN'] = await self.tokens.access()
-        target = StdioTransport(command='node', args=[str(self.entrypoint), 'mcp', '-c', 'snake'],
+        target = StdioTransport(command=binary, args=[str(self.entrypoint), 'mcp', '-c', 'snake'],
                                 env=env, cwd=str(self.project), keep_alive=False, log_file=Path(os.devnull))
         client = Client(target, elicitation_handler=decline, timeout=self.config.mcp.call_timeout,
                         init_timeout=self.config.mcp.connect_timeout)

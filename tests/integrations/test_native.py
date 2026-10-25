@@ -28,6 +28,14 @@ from tests.runtime.test_session import ScriptedModel
 FIXTURE = str(Path(__file__).with_name('fixture_server.py'))
 
 
+def test_directory_bounds_description_without_changing_native_schema():
+    settings = MCPServer(transport='http', url='http://fixture', tools=['read'])
+    native = SimpleNamespace(description='D' * 20000)
+    entry = Entry('id', 'fixture', 'read', 'digest', native, settings)
+    assert len(Catalog([entry]).search()['items'][0]['description']) == 240
+    assert len(native.description) == 20000
+
+
 def message(name, args=None):
     return AIMessage(content='', tool_calls=[{'name': name, 'args': args or {}, 'id': str(uuid4())}])
 

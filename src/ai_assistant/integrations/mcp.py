@@ -4,10 +4,9 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 import json
-import os
-from pathlib import Path
 
 from ai_assistant.config import ConfigError
+from ai_assistant.executables import executable, executable_env
 from ai_assistant.integrations.policy import Caller
 
 
@@ -22,7 +21,7 @@ class Entry:
 
     def info(self):
         return dict(id=self.id, server=self.server, identity=self.settings.identity,
-                    name=self.original_name, description=self.tool.description,
+                    name=self.original_name, description=(self.tool.description or '')[:240],
                     schema_digest=self.digest, write=self.original_name in self.settings.write_tools)
 
 
@@ -89,9 +88,10 @@ async def mcp_resources(config, workspace, *, caller=None):
                 from ai_assistant.integrations.feishu import OfficialConnection
                 tools = await OfficialConnection(config, settings, workspace).discover()
             elif settings.transport == 'stdio':
-                env = {'PATH': os.defpath, 'LANG': 'C.UTF-8'}
-                env.update({k: v.get_secret_value() for k, v in settings.env.items()})
-                target = StdioTransport(command=settings.command, args=settings.args,
+                overrides = {k: v.get_secret_value() for k, v in settings.env.items()}
+                binary = executable(settings.command, path=overrides.get('PATH'))
+                env = {**executable_env(binary), **overrides}
+                target = StdioTransport(command=binary, args=settings.args,
                                         env=env, keep_alive=True)
             elif settings.transport == 'feishu_files':
                 import httpx
@@ -106,10 +106,6 @@ async def mcp_resources(config, workspace, *, caller=None):
             elif settings.transport == 'http':
                 target = StreamableHttpTransport(settings.url,
                     headers={k: v.get_secret_value() for k, v in settings.headers.items()})
-            else:
-                from ai_assistant.integrations.netease import create_server
-                target = create_server(settings.account,
-                    config.integrations.netease.accounts[settings.account], workspace)
             if tools is None:
                 client = Client(target, elicitation_handler=decline,
                                 timeout=config.mcp.call_timeout,

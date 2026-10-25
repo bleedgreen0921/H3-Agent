@@ -13,11 +13,22 @@ from ai_assistant.workspace.files import ReadOnlyWorkspace
 from tests.integrations.test_mcp import config
 
 
+def test_bot_failure_message_distinguishes_context_and_hides_details():
+    from ai_assistant.interfaces.feishu import failure_message
+    from ai_assistant.agents.context import ContextBudgetError
+    message = failure_message(ContextBudgetError('private-token'))
+    assert '上下文' in message and '/new' in message
+    assert 'private-token' not in message
+    assert '超时' in failure_message(TimeoutError('private-token'))
+    assert 'private-token' not in failure_message(RuntimeError('private-token'))
+
+
 def test_versioned_manifest_and_mutation_classification():
     items = capabilities()['tools']
     assert {x['domain'] for x in items} == {'im','docx','drive','wiki','bitable','calendar','task','contact'}
     assert len({x['name'] for x in items}) == len(items)
     assert not any('.permission.' in x['name'] for x in items)
+    assert not next(x for x in items if x['native_name'] == 'wiki_v2_space_getNode')['write']
     with pytest.raises(ConfigError,match='mutations'):
         allowed_capabilities(MCPServer(transport='feishu',identity='bot',tools=['im_v1_message_create']))
     with pytest.raises(ConfigError):

@@ -31,7 +31,7 @@ def add_commands(commands):
             command.add_argument('document_id')
         if action == 'check':
             command.add_argument('--database', action='store_true')
-            command.add_argument('--gpu', action='store_true')
+            command.add_argument('--services', action='store_true')
 
 
 async def execute(config, args):
@@ -42,12 +42,17 @@ async def execute(config, args):
     # All configured relative paths resolve against the TOML, not worker cwd.
     from ai_assistant.knowledge.config import resolve_knowledge_paths
     c = resolve_knowledge_paths(c, base)
-    if args.action == 'check' and not args.database and not args.gpu:
-        missing = [name for name in ('embedding_model', 'reranker_model') if not getattr(c, name).is_dir()]
-        if missing:
-            raise KnowledgeError('本地模型目录缺失：' + ', '.join(missing))
-        print('离线配置有效；未连接数据库或加载 GPU。')
-        return 0
+    if args.action == 'check':
+        if getattr(args, 'services', False):
+            from ai_assistant.knowledge.models import embedding, reranker
+            async with embedding(c) as model:
+                vector = await model.aembed_query('知识检索测试')
+            scores = await asyncio.to_thread(reranker(c).score, [('问题', '答案')])
+            print(f'模型服务检查通过：维数={len(vector)}，重排数={len(scores)}。')
+        if not args.database:
+            if not getattr(args, 'services', False):
+                print('配置有效；未连接数据库或模型服务。')
+            return 0
     from ai_assistant.storage.rag import RagStore
     store = RagStore(c)
     try:
@@ -100,13 +105,7 @@ async def execute(config, args):
                     if not {'attempt_number', 'error_code', 'error_message', 'diagnostic_path'} <= columns:
                         raise KnowledgeError('知识库 schema 需要更新，请显式运行 rag init。')
                 print('数据库及 schema 检查通过。')
-            if args.gpu:
-                from ai_assistant.knowledge.models import embedding, reranker
-                em = await asyncio.to_thread(embedding, c)
-                vector = await asyncio.to_thread(em.embed_query, '知识检索测试')
-                re = await asyncio.to_thread(reranker, c)
-                scores = await asyncio.to_thread(re.score, [('问题', '答案')])
-                print(f'本地模型检查通过：device={c.device}，维数={len(vector)}，重排数={len(scores)}。')
+
     finally:
         await store.close()
     return 0

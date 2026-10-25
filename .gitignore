@@ -10,14 +10,23 @@ dist/
 .data/
 models.toml
 assistant.toml
-docs/
 # Local immutable RAG inputs and explicit Compose credentials
 .rag/
 deploy/private/
 
-# Skills installer object cache and recoverable dependency journals
-.agents/.assistant-skills/
-.assistant-dependencies/
 
 # Deployed Node dependencies are installed with npm ci
 node_modules/
+assistant.office.toml
+
+# Host deployment and optional smoke outputs
+.python-path
+models.local.toml
+smoke-results*.json
+.DS_Store
+
+.pytest_cache/
+.ruff_cache/
+.pytest_cache/
+.ruff_cache/
+constraints/

@@ -1,14 +1,9 @@
 import asyncio
-from dataclasses import replace
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 import pytest
-from pydantic import ValidationError
 from langchain_core.tools import ToolException
-from ai_assistant.integrations.config import MCPServer, MailAccount
+from ai_assistant.integrations.config import MCPServer
 from ai_assistant.integrations.policy import Caller, authorize
-from ai_assistant.integrations.mcp import Catalog, mcp_resources, stable_id
+from ai_assistant.integrations.mcp import mcp_resources, stable_id
 from ai_assistant.config import AppConfig
 from ai_assistant.workspace.files import ReadOnlyWorkspace
 
@@ -57,16 +52,4 @@ def test_native_fixture(tmp_path):
             assert tools[0].name == 'echo'
             result = await tools[0].ainvoke({'value': 'local fixture'})
             assert 'local fixture' in str(result)
-    asyncio.run(run())
-
-
-def test_netease_server_schema(tmp_path):
-    pytest.importorskip('fastmcp')
-    from ai_assistant.integrations.netease import create_server
-    from fastmcp import Client
-    async def run():
-        account = MailAccount(address='test@163.com', authorization_code='secret')
-        async with Client(create_server('test', account, ReadOnlyWorkspace(tmp_path))) as client:
-            tools = await client.list_tools()
-            assert {t.name for t in tools} == {'folders','search','read','download','send','draft','update_draft','mark','move'}
     asyncio.run(run())

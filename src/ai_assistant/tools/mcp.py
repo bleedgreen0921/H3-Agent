@@ -26,7 +26,7 @@ def catalog(runtime):
 @tool
 async def search_mcp_tools(runtime: ToolRuntime[ToolContext], query: str = '',
                            offset: Annotated[int, Field(ge=0)] = 0,
-                           limit: Annotated[int, Field(ge=1, le=100)] = 20) -> dict:
+                           limit: Annotated[int, Field(ge=1, le=100)] = 10) -> dict:
     """Search the fixed MCP directory by name, description or domain, with explicit pagination."""
     return catalog(runtime).search(query, offset, limit)
 

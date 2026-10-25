@@ -380,7 +380,7 @@
       "name": "wiki.v2.space.getNode",
       "native_name": "wiki_v2_space_getNode",
       "domain": "wiki",
-      "write": true,
+      "write": false,
       "identities": [
         "bot",
         "user"

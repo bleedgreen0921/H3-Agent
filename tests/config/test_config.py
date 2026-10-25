@@ -42,7 +42,7 @@ class ConfigTests(unittest.TestCase):
         with patch("ai_assistant.llm.factory.init_chat_model", side_effect=AssertionError("No model creation")):
             config = load_config(path)
         self.assertEqual(config.default_model, "deepseek")
-        self.assertEqual(len(config.models), 9)
+        self.assertEqual(set(config.models), {"deepseek"})
 
     def test_default_path_is_cwd_without_parent_search(self):
         old = Path.cwd()

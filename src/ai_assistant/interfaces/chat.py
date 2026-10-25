@@ -2,6 +2,7 @@
 import asyncio
 import os
 import signal
+import stat
 import select
 import sys
 
@@ -97,7 +98,11 @@ async def chat(config, model_name=None, *, session_id=None):
         loop.add_signal_handler(signal.SIGINT, interrupt)
         try:
             try:
-                loop.add_reader(sys.stdin.fileno(), console.ready)
+                mode = os.fstat(sys.stdin.fileno()).st_mode
+                if stat.S_ISREG(mode) or (stat.S_ISCHR(mode) and not os.isatty(sys.stdin.fileno())):
+                    console.handle = loop.call_soon(console.poll)
+                else:
+                    loop.add_reader(sys.stdin.fileno(), console.ready)
             except PermissionError:
                 # epoll cannot register regular files or /dev/null. Read only
                 # when POSIX select reports readiness; still no input thread.

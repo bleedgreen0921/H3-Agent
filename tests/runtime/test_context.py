@@ -137,6 +137,28 @@ def test_request_budget_includes_system_and_tool_schemas():
         InputBudgetMiddleware(100).prepare(request)
 
 
+def test_large_task_schema_fits_followup_without_resetting_history():
+    from langchain.agents.middleware.types import ModelRequest
+    from langchain_core.messages.utils import count_tokens_approximately
+    @tool
+    def update_task(task_id: str, completed: bool):
+        """Update an existing task."""
+        return ''
+    # 模拟官方 task.patch 的大 schema 描述；不调用真实账号。
+    update_task = update_task.model_copy(update={'description': 'task field description ' * 500})
+    messages = [HumanMessage('近期任务'), call('list_tasks', 'list'),
+                ToolMessage(content='task_id=known-id; status=todo', tool_call_id='list'),
+                AIMessage(content='有一条待办任务'), HumanMessage('把它设为已完成')]
+    request = ModelRequest(model=ScriptedModel(responses=[AIMessage(content='ok')]),
+        messages=messages, tools=[update_task])
+    fitted = InputBudgetMiddleware(5000).prepare(request)
+    assert fitted.messages == messages
+    # schema 仍计入预算，过小的预算必须在模型调用前拒绝。
+    assert count_tokens_approximately([], tools=[update_task]) > 1000
+    with pytest.raises(ContextBudgetError):
+        InputBudgetMiddleware(1000).prepare(request)
+
+
 def test_selected_summary_profile_clients_usage_and_retry_parameters(tmp_path, monkeypatch):
     from contextlib import asynccontextmanager
     from ai_assistant.config import AppConfig, ModelConfig, WorkspaceConfig

@@ -135,7 +135,7 @@ class Skill:
 
     @property
     def sandbox_path(self):
-        return '/opt/assistant-skills/' + hashlib.sha256(self.id.encode()).hexdigest()[:24]
+        return str(self.path)
 
     def info(self):
         return dict(id=self.id, name=self.metadata['name'], description=self.metadata['description'],
@@ -157,13 +157,10 @@ class SkillCatalog:
                     if entry.name.startswith('.') or not entry.is_dir():
                         continue
                     identity = 'skill:' + hashlib.sha256(str(root / entry.name).encode()).hexdigest()[:24]
-                    destination = Path(self._temporary.name) / identity.replace(':', '-')
+                    destination = Path(self._temporary.name).resolve() / identity.replace(':', '-')
                     try:
                         digest = copy_package(entry, destination)
                         metadata, body = parse_skill(destination / 'SKILL.md')
-                        # Reserve the child mountpoint before the package becomes read-only.
-                        if not (destination / 'node_modules').exists():
-                            (destination / 'node_modules').mkdir()
                         warnings = []
                         if metadata['name'] != entry.name:
                             warnings.append('Directory name differs from skill name.')

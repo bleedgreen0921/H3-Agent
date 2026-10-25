@@ -1,162 +1,50 @@
-# Copy to assistant.toml and replace placeholders. Keep real credentials private.
+# 复制为 assistant.toml；相对路径以配置所在目录为基准。
 default_model = "deepseek"
-
-[models.primary]
-# Application input budget; leave room for output within the actual model window.
-max_input_tokens = 24000
-provider = "openai"
-model = "your-model-id"
-api_key = "your-api-key"
-
-[models.primary.parameters]
-timeout = 60
-max_retries = 0
-
-# A compatible server may accept a placeholder key; consult its documentation.
-[models.local]
-# Application input budget; leave room for output within the actual model window.
-max_input_tokens = 24000
-provider = "openai"
-model = "your-local-model-id"
-base_url = "http://127.0.0.1:8000/v1"
-api_key = "local-placeholder"
-
-[models.local.parameters]
-timeout = 120
-max_retries = 0
-
-[models.claude]
-# Application input budget; leave room for output within the actual model window.
-max_input_tokens = 24000
-provider = "anthropic"
-model = "your-anthropic-model-id"
-api_key = "your-anthropic-api-key"
-
-[models.gemini]
-# Application input budget; leave room for output within the actual model window.
-max_input_tokens = 24000
-provider = "google_genai"
-model = "your-gemini-model-id"
-api_key = "your-google-api-key"
-
-[models.ollama]
-# Application input budget; leave room for output within the actual model window.
-max_input_tokens = 24000
-provider = "ollama"
-model = "your-ollama-model-id"
-base_url = "http://127.0.0.1:11434"
-
-# Domestic providers: install .[domestic]. Model IDs are examples, not pinned versions.
-# Explicit base_url overrides the provider's public endpoint preset.
 [models.deepseek]
-# Application input budget; leave room for output within the actual model window.
-max_input_tokens = 24000
 provider = "deepseek"
-model = "deepseek-flash"
-api_key = "your-deepseek-api-key"
-
+model = "REPLACE_MODEL_ID"
+api_key = "REPLACE_API_KEY"
+max_input_tokens = 24000
 [models.deepseek.parameters]
 timeout = 60
 max_retries = 0
-
 [models.deepseek.parameters.extra_body.thinking]
 type = "disabled"
 
-[models.glm]
-# Application input budget; leave room for output within the actual model window.
-max_input_tokens = 24000
-provider = "glm"
-model = "glm-5.3"
-api_key = "your-glm-api-key"
-
-[models.glm.parameters]
-timeout = 120
-max_retries = 0
-
-[models.qwen]
-# Application input budget; leave room for output within the actual model window.
-max_input_tokens = 24000
-provider = "qwen"
-model = "qwen-plus"
-api_key = "your-dashscope-api-key"
-# Preset: Beijing public endpoint. Override for your region or workspace.
-
-[models.qwen.parameters]
-timeout = 120
-max_retries = 0
-
-# Vendor-specific request fields belong in extra_body, not model_kwargs.
-# Enable or disable thinking only when your chosen model supports this option.
-# [models.qwen.parameters.extra_body]
-# enable_thinking = false
-
-[models.kimi]
-# Application input budget; leave room for output within the actual model window.
-max_input_tokens = 24000
-provider = "kimi"
-model = "kimi-k3"
-api_key = "your-kimi-api-key"
-# For mainland accounts, use the endpoint specified in your Kimi console.
-
-[models.kimi.parameters]
-timeout = 120
-max_retries = 0
-
-# Read-only project access. Relative root is resolved against this file's directory.
+[sessions]
+database_url = "postgresql://user@127.0.0.1:55432/H3-Agent"
+[context]
 [workspace]
 root = "."
-exclude_patterns = []
-
-# Optional: standalone DeepSeek Search/Fetch. Remove this section to disable web tools.
-# Reuses only the API key, never model parameters or a custom model base_url.
-[tools.web]
-credential_profile = "deepseek"
-timeout = 30
-
-# Optional mutation capabilities. Omit these sections to keep read-only tools.
 [tools.files]
 enabled = false
 
-# Uncomment to enable Bubblewrap commands; permissions are chosen by the app.
-# project: writable project, read-only current venv, no network.
-# scratch: read-only project/venv, disposable working directory, no network.
-# maintenance: writable project/venv, host network (for dependency installation).
+# 本地 Skills 由用户手动放入 .agents/skills 或显式目录。
+# [skills]
+# roots = []
 # [tools.terminal]
-# profile = "project"
 # timeout = 120
+# allow_network = false
+# read_paths = [] # 显式额外只读目录；不会默认读取用户账号目录。
+# [tools.terminal.env]
+# SERVICE_API_KEY = "REPLACE_KEY" # 只传递明确授权给命令的凭据。
+# [tools.web]
+# credential_profile = "deepseek"
 
-# Optional; install the rag extra and run `rag init` explicitly before use.
+# 知识库：先显式初始化 schema，再 submit / worker / search。
+# chunk_size 和 chunk_overlap 的单位为字符。
 # [knowledge]
-# database_url = "postgresql+asyncpg://rag:REPLACE_WITH_PRIVATE_PASSWORD@127.0.0.1:55432/rag"
-# knowledge_base_id = "default"
-# materials_dir = ".rag/materials"
-# diagnostics_dir = ".rag/diagnostics"
-# device = "cuda"
-# embedding_batch = 4
-# reranker_batch = 4
+# database_url = "postgresql+asyncpg://user@127.0.0.1:55432/H3-Agent"
+# knowledge_base_id = "personal"
 # chunk_size = 512
 # chunk_overlap = 64
-# top_k = 5
+# [knowledge.embedding]
+# base_url = "http://127.0.0.1:1236/v1"
+# model = "qwen3-embedding-0.6b"
+# batch_size = 4
+# [knowledge.reranker]
+# base_url = "http://127.0.0.1:1235/v1"
+# model = "qwen3-reranker-0.6b"
+# batch_size = 4
 
-# 可选：每轮原生逻辑调用限额，不限制 SDK 内部网络重试次数。
-[agent]
-model_call_limit = 10
-tool_call_limit = 20
-knowledge_call_limit = 5
-turn_timeout_seconds = 300
-
-# Persistent chat requires the sessions extra and explicit `session init`.
-# This connection uses psycopg syntax, independent of the RAG URL.
-[sessions]
-database_url = "postgresql://postgres:REPLACE_WITH_PRIVATE_PASSWORD@127.0.0.1:55432/rag"
-
-[context]
-# Optional existing profile; omission reuses the selected chat model.
-# summary_model = "primary"
-
-# Optional community Agent Skills. Omit this section to preserve the old behavior.
-# [skills]
-# roots = [] # Extra roots resolve relative to this TOML; shared .agents/skills roots are automatic.
-# dependency_install = true
-# npm_project = "." # Workspace-relative existing npm project (package.json + lockfile v2/v3).
-# dependency_timeout_seconds = 120
+# 飞书的双身份、MCP 与机器人配置见 assistant.office.example.toml。

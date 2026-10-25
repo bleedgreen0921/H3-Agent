@@ -1,6 +1,5 @@
 import asyncio
 from pathlib import Path
-import shutil
 import sys
 from tempfile import TemporaryDirectory
 import time
@@ -19,7 +18,7 @@ from ai_assistant.tools import ToolContext, create_builtin_tools, tool_context
 def configuration(root, *, enabled=True, terminal=False):
     tools = {'files': {'enabled': enabled}}
     if terminal:
-        tools['terminal'] = {'profile': 'project', 'timeout': 5}
+        tools['terminal'] = {'timeout': 5}
     return AppConfig(default_model='local', models={'local': {'provider': 'ollama', 'model': 'unused'}},
                      workspace={'root': str(root)}, tools=tools)
 
@@ -72,7 +71,7 @@ class WriteToolTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((await invoke(app, context, name, args)).status, 'error')
             self.assertFalse((Path(directory) / 'no').exists())
 
-    @unittest.skipUnless(sys.platform == 'linux' and shutil.which('bwrap'), 'Linux Bubblewrap required')
+    @unittest.skipUnless(sys.platform == 'darwin', 'macOS Seatbelt required')
     async def test_terminal_messages_and_shared_lock(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

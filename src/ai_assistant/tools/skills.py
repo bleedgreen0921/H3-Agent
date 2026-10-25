@@ -51,7 +51,7 @@ async def load_skill(skill_id: str, runtime: ToolRuntime[ToolContext]) -> Comman
         raise ToolException(str(exc)) from None
     info = skill.info()
     info.update(loaded=True, workspace=str(runtime.context.workspace.root),
-                output='Write outputs to the workspace (scratch profile: /tmp).',
+                output='Write outputs to the configured workspace.',
                 execution='run_command' if runtime.context.terminal else 'Terminal disabled; scripts cannot execute.')
     return Command(update={'active_skills': {skill.id: skill.digest}, 'messages': [
         ToolMessage(content=str(info), tool_call_id=runtime.tool_call_id, name='load_skill')]})
@@ -80,21 +80,6 @@ async def read_skill_resource(skill_id: str, resource: str, runtime: ToolRuntime
         raise ToolException(str(exc)) from None
 
 
-@tool
-async def install_skill_dependencies(skill_id: str, manager: str, requirements: list[str],
-                                     runtime: ToolRuntime[ToolContext]) -> dict:
-    """Install a structured pip/npm requirement transaction, allowing only new dependencies."""
-    selected(runtime, skill_id)
-    if runtime.context.skill_dependencies is None:
-        raise ToolException('Controlled dependency installation is disabled.')
-    try:
-        return await runtime.context.skill_dependencies.install(manager, requirements)
-    except SkillError as exc:
-        raise ToolException(str(exc)) from None
-
-
-def create_skill_tools(dependencies=True):
+def create_skill_tools():
     items = [search_skills, load_skill, unload_skill, read_skill_resource]
-    if dependencies:
-        items.append(install_skill_dependencies)
     return [item.model_copy(update={'handle_tool_error': True}) for item in items]

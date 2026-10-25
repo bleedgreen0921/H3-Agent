@@ -21,7 +21,7 @@ def session(tmp_path, responses):
     catalog = SkillCatalog([tmp_path / 'skills'])
     model = ScriptedModel(responses=responses)
     settings = AgentSettings()
-    tools = create_skill_tools(False)
+    tools = create_skill_tools()
     agent = create_assistant_agent(model, tools, checkpointer=InMemorySaver(), settings=settings, skills_enabled=True)
     context = ToolContext(ReadOnlyWorkspace(tmp_path), skills=catalog)
     return AssistantSession(agent, context, settings), model
@@ -82,7 +82,7 @@ def test_request_body_protection_and_invalidation(tmp_path):
         model = RecordingModel(responses=[AIMessage(content='ok')])
         settings = AgentSettings()
         context = ToolContext(ReadOnlyWorkspace(tmp_path), skills=catalog)
-        agent = create_assistant_agent(model, create_skill_tools(False), checkpointer=InMemorySaver(),
+        agent = create_assistant_agent(model, create_skill_tools(), checkpointer=InMemorySaver(),
             settings=settings, skills_enabled=True, max_input_tokens=5000)
         s = AssistantSession(agent, context, settings)
         try:
@@ -95,7 +95,7 @@ def test_request_body_protection_and_invalidation(tmp_path):
         catalog = SkillCatalog([tmp_path / 'skills'])
         context = ToolContext(ReadOnlyWorkspace(tmp_path), skills=catalog)
         model = RecordingModel(responses=[call('load_skill', 'load', skill_id='example'), AIMessage(content='ok'), AIMessage(content='reopened')])
-        agent = create_assistant_agent(model, create_skill_tools(False), checkpointer=InMemorySaver(), settings=settings, skills_enabled=True)
+        agent = create_assistant_agent(model, create_skill_tools(), checkpointer=InMemorySaver(), settings=settings, skills_enabled=True)
         s = AssistantSession(agent, context, settings)
         try:
             await s.run_turn('load')
@@ -133,7 +133,7 @@ def test_active_body_survives_native_summary(tmp_path):
         settings = AgentSettings()
         model = RecordingModel(responses=[AIMessage(content='答' * 600)])
         summary = ScriptedModel(responses=[AIMessage(content='摘要：用户仍在处理任务。')])
-        agent = create_assistant_agent(model, create_skill_tools(False), checkpointer=InMemorySaver(), settings=settings,
+        agent = create_assistant_agent(model, create_skill_tools(), checkpointer=InMemorySaver(), settings=settings,
             skills_enabled=True, context_settings=ContextConfig(), summary_model=summary, max_input_tokens=5000,
             summary_max_input_tokens=10000, summary_profile='summary')
         s = AssistantSession(agent, ToolContext(ReadOnlyWorkspace(tmp_path), skills=catalog), settings)
@@ -163,7 +163,7 @@ def test_large_directory_uses_complete_search(tmp_path):
         catalog = SkillCatalog([tmp_path / 'skills'])
         settings = AgentSettings()
         model = RecordingModel(responses=[AIMessage(content='ok')])
-        agent = create_assistant_agent(model, create_skill_tools(False), checkpointer=InMemorySaver(), settings=settings, skills_enabled=True)
+        agent = create_assistant_agent(model, create_skill_tools(), checkpointer=InMemorySaver(), settings=settings, skills_enabled=True)
         s = AssistantSession(agent, ToolContext(ReadOnlyWorkspace(tmp_path), skills=catalog), settings)
         try:
             await s.run_turn('hello')

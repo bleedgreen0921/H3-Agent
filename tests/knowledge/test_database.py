@@ -309,14 +309,18 @@ def test_empty_build_pipeline_keeps_previous_evidence(tmp_path, phase):
             await store.publish(original)
             job_id = await store.submit(source_uri=source.as_uri(), digest=sha256(b'input').hexdigest(), snapshot=source,
                                         metadata={'source_name': 'sample.csv', 'media_type': 'text/csv'})
-            model = Mock(return_value=SimpleNamespace(native=SimpleNamespace(_client=SimpleNamespace(tokenizer=None))))
+            from contextlib import asynccontextmanager
+            @asynccontextmanager
+            async def fake_embeddings(config):
+                yield object()
+            model = Mock(side_effect=fake_embeddings)
             splitter = SimpleNamespace(split_documents=lambda docs: [] if phase == 'chunks' else docs)
             index = AsyncMock()
             engine = SimpleNamespace(close=AsyncMock())
             with patch('ai_assistant.knowledge.ingestion.parse_snapshot', AsyncMock(return_value=[
                     Document(page_content=' \t\n') if phase == 'document' else Document(page_content='  正文\n保留 ')])), \
                  patch('ai_assistant.knowledge.ingestion.embedding', model), \
-                 patch('langchain_text_splitters.RecursiveCharacterTextSplitter.from_huggingface_tokenizer', return_value=splitter), \
+                 patch('langchain_text_splitters.RecursiveCharacterTextSplitter', return_value=splitter), \
                  patch('ai_assistant.knowledge.ingestion.vector_store', AsyncMock(return_value=(engine, Mock()))), \
                  patch('langchain_classic.indexes.aindex', index):
                 assert await run_once(store)

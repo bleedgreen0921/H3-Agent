@@ -11,7 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from ai_assistant.tools.context import ToolContext
 from ai_assistant.tools.web import WebError
 from ai_assistant.workspace.files import WorkspaceError
-from ai_assistant.tools.terminal import TerminalError, _drain_worker
+from ai_assistant.tools.terminal import TerminalError
+from ai_assistant.cancellation import _drain_worker
 
 
 async def _file_call(runtime, method, *args):
@@ -132,7 +133,7 @@ async def edit_file(path: str, edits: Annotated[list[TextEdit], Field(min_length
 async def run_command(command: Annotated[str, Field(min_length=1, max_length=32000)],
                       runtime: ToolRuntime[ToolContext], cwd: str = '.',
                       timeout: Annotated[float | None, Field(gt=0, le=1800, allow_inf_nan=False)] = None) -> ToolMessage:
-    """在 Bubblewrap 内执行一次 Bash 命令；权限由应用固定，无跨调用状态或自动重试。"""
+    """在平台沙箱内执行一次 Bash 命令；权限由应用固定，无跨调用状态或自动重试。"""
     if runtime.context.terminal is None:
         raise ToolException('终端工具尚未启用。')
     try:

@@ -3,16 +3,31 @@ import asyncio
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass
 import json
-import os
+import logging
 from pathlib import Path
 from uuid import uuid4
 
 import httpx
 from ai_assistant.config import ConfigError
+from ai_assistant.executables import executable, executable_env
 from ai_assistant.integrations.policy import Caller
 from ai_assistant.runtime import assistant_session, final_text
 from ai_assistant.storage.integrations import operation_storage
 from ai_assistant.tools.context import tool_context
+
+logger = logging.getLogger(__name__)
+
+
+def failure_message(error):
+    """仅暴露错误类别，避免异常正文包含凭据或文档内容。"""
+    from ai_assistant.agents.context import ContextBudgetError
+    if isinstance(error, ContextBudgetError):
+        reason = '上下文超出预算。可发送 /new 开始新会话，或缩小本次请求范围。'
+    elif isinstance(error, TimeoutError):
+        reason = '本轮执行超时。'
+    else:
+        reason = f'本轮执行失败（{type(error).__name__}）。'
+    return reason + '本轮未自动重试；如涉及写入，请先查询操作回执。'
 
 
 @dataclass(frozen=True)
@@ -138,8 +153,10 @@ class BotWorker:
                         self.active.result()
                     except asyncio.CancelledError:
                         await self.enqueue_reply(self.active_row, '执行已取消；已发生的远端操作不会撤销，请核实操作回执。')
-                    except Exception:
-                        await self.enqueue_reply(self.active_row, '执行未完成。可能已产生外部操作，请查询操作回执后重新提出请求。')
+                    except Exception as exc:
+                        logger.error('Feishu turn failed: input_id=%s error_type=%s',
+                                     self.active_row['id'], type(exc).__name__)
+                        await self.enqueue_reply(self.active_row, failure_message(exc))
                     self.active = self.active_row = None
                 rows = await (await self.store.conn.execute("SELECT * FROM assistant_inbox WHERE status='received' ORDER BY received_at,id LIMIT 100")).fetchall()
                 for row in rows:
@@ -188,9 +205,10 @@ async def serve(config):
         resources = ProcessResources(directory, context.skills)
         client = await stack.enter_async_context(httpx.AsyncClient(timeout=30, trust_env=False))
         api = FeishuAPI(config.integrations.feishu, client)
-        process = await asyncio.create_subprocess_exec('node', str(receiver), cwd=str(project),
+        binary = executable('node')
+        process = await asyncio.create_subprocess_exec(binary, str(receiver), cwd=str(project),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            env={'PATH': os.defpath, 'LANG': 'C.UTF-8'})
+            env=executable_env(binary))
         payload = dict(app_id=config.integrations.feishu.app_id,
             app_secret=config.integrations.feishu.app_secret.get_secret_value(),
             owner_open_id=config.integrations.feishu.owner_open_id,

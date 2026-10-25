@@ -86,6 +86,9 @@ def main(argv: list[str] | None = None) -> int:
                 return asyncio.run(execute(config, args))
             except ConfigError:
                 raise
+            except SessionError as exc:
+                print(f"MCP 操作失败：{exc}", file=sys.stderr)
+                return 2
             except Exception:
                 print("MCP 操作失败：请检查可选依赖、配置、部署及迁移状态。", file=sys.stderr)
                 return 2

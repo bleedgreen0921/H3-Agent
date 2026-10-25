@@ -51,6 +51,15 @@ def test_context_and_new(tmp_path):
     asyncio.run(scenario())
 
 
+def test_reopened_session_does_not_inject_workspace_task(tmp_path):
+    async def scenario():
+        s = session(tmp_path, [AIMessage(content='直接回答')])
+        s._reopened = True
+        result = await s.run_turn('介绍一下你自己')
+        assert [m.content for m in result.messages if m.type == 'human'] == ['介绍一下你自己']
+    asyncio.run(scenario())
+
+
 def test_failed_branch_not_replayed(tmp_path):
     async def scenario():
         calls = []

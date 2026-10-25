@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 import importlib.util
 import importlib.metadata
-import os
 import shutil
 from ai_assistant.config import ConfigError
 from ai_assistant.workspace.files import ReadOnlyWorkspace
@@ -76,7 +75,7 @@ async def execute(config, args):
             problems.append('Install the mcp extra.')
         base = config.config_path.parent if config.config_path else Path.cwd()
         for key, settings in chosen.items():
-            if settings.transport == 'stdio' and shutil.which(settings.command, path=os.defpath) is None:
+            if settings.transport == 'stdio' and shutil.which(settings.command, path=settings.env['PATH'].get_secret_value() if 'PATH' in settings.env else None) is None:
                 problems.append(f'{key}: configured stdio executable is unavailable.')
             if settings.transport == 'feishu':
                 from ai_assistant.integrations.feishu import allowed_capabilities
@@ -92,7 +91,7 @@ async def execute(config, args):
                             actual = None
                         if actual != version:
                             problems.append(f'{key}: install locked Node package {package}@{version} with npm ci.')
-                    if shutil.which('node', path=os.defpath) is None:
+                    if shutil.which('node') is None:
                         problems.append(f'{key}: Node >=20 is required.')
         print(json.dumps({'ok': not problems, 'problems': problems, 'network': False}, ensure_ascii=False))
         return 2 if problems else 0
@@ -114,15 +113,6 @@ async def execute(config, args):
             async with asyncio.timeout(config.mcp.call_timeout):
                 async with httpx.AsyncClient(timeout=config.mcp.call_timeout, trust_env=False) as http:
                     for settings in chosen.values():
-                        if settings.transport == 'netease':
-                            from ai_assistant.integrations.netease import MailService
-                            service = MailService(settings.account, config.integrations.netease.accounts[settings.account], workspace)
-                            worker = asyncio.create_task(asyncio.to_thread(service.folders))
-                            try:
-                                await asyncio.shield(worker)
-                            except asyncio.CancelledError:
-                                await worker
-                                raise
                         if settings.transport in {'feishu', 'feishu_files'}:
                             tokens = TokenStore(config, workspace.root) if settings.identity == 'user' else None
                             api = FeishuAPI(config.integrations.feishu, http, tokens)

@@ -76,41 +76,41 @@ async def build(store, job):
         raise KnowledgeError('资料快照摘要不匹配。')
     docs = await parse_snapshot(path, timeout=c.parse_timeout)
     docs = require_content(docs, 'empty_document', '未提取到有效正文。')
-    model = await asyncio.to_thread(embedding, c)
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from langchain_classic.indexes import SQLRecordManager, aindex
-    identity = job['metadata'] | dict(knowledge_base_id=job['kb'], document_id=job['document_id'],
-        document_version_id=job['version_id'], source_uri=job['source_uri'],
-        parse_config_fingerprint=job['config_hash'], index_version=job['build_id'])
-    normalized = [normalize(doc, identity=identity, parser='unstructured') for doc in docs]
-    splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
-        model.native._client.tokenizer, chunk_size=c.chunk_size, chunk_overlap=c.chunk_overlap,
-        add_start_index=True, strip_whitespace=False,
-        separators=['\n\n', '\n', '。', '！', '？', '；', ' ', ''])
-    chunks = await asyncio.to_thread(splitter.split_documents, normalized)
-    chunks = require_content(chunks, 'empty_chunks', '未生成有效片段。')
-    for i, chunk in enumerate(chunks):
-        chunk.metadata['chunk_index'] = i
-    engine, vectors = await vector_store(c, model)
-    try:
-        # Unique namespace AND build metadata fence all full-cleanup operations.
-        manager = SQLRecordManager('rag:' + job['build_id'], engine=store.engine, async_mode=True)
-        await aindex(chunks, manager, vectors, batch_size=c.embedding_batch,
-                     cleanup='full', source_id_key='document_id', key_encoder='sha256')
-        # All GPU work and vector writes finish before keyword preparation/publication.
-        async with store.engine.connect() as conn:
-            rows = (await conn.execute(text('''SELECT langchain_id,content FROM rag_chunks
-                WHERE langchain_metadata->>'index_version'=:b'''), dict(b=job['build_id']))).all()
-        if not any(row.content.strip() for row in rows):
-            raise IngestionError('empty_index', '当前构建未写入有效片段，已停止发布。',
-                                 f'build_id={job["build_id"]}; stored_rows={len(rows)}')
-        values = await asyncio.to_thread(lambda: [dict(id=r.langchain_id, words=terms(r.content)) for r in rows])
-        async with store.engine.begin() as conn:
-            if values:
-                await conn.execute(text("UPDATE rag_chunks SET content_tsv=to_tsvector('pg_catalog.simple',:words) WHERE langchain_id=:id"), values)
-        await store.publish(job)
-    finally:
-        await engine.close()
+    async with embedding(c) as model:
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        from langchain_classic.indexes import SQLRecordManager, aindex
+        identity = job['metadata'] | dict(knowledge_base_id=job['kb'], document_id=job['document_id'],
+            document_version_id=job['version_id'], source_uri=job['source_uri'],
+            parse_config_fingerprint=job['config_hash'], index_version=job['build_id'])
+        normalized = [normalize(doc, identity=identity, parser='unstructured') for doc in docs]
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=c.chunk_size, chunk_overlap=c.chunk_overlap, length_function=len,
+            add_start_index=True, strip_whitespace=False,
+            separators=['\n\n', '\n', '。', '！', '？', '；', ' ', ''])
+        chunks = await asyncio.to_thread(splitter.split_documents, normalized)
+        chunks = require_content(chunks, 'empty_chunks', '未生成有效片段。')
+        for i, chunk in enumerate(chunks):
+            chunk.metadata['chunk_index'] = i
+        engine, vectors = await vector_store(c, model)
+        try:
+            # Unique namespace AND build metadata fence all full-cleanup operations.
+            manager = SQLRecordManager('rag:' + job['build_id'], engine=store.engine, async_mode=True)
+            await aindex(chunks, manager, vectors, batch_size=c.embedding.batch_size,
+                         cleanup='full', source_id_key='document_id', key_encoder='sha256')
+            # All embedding requests and vector writes finish before keyword preparation/publication.
+            async with store.engine.connect() as conn:
+                rows = (await conn.execute(text('''SELECT langchain_id,content FROM rag_chunks
+                    WHERE langchain_metadata->>'index_version'=:b'''), dict(b=job['build_id']))).all()
+            if not any(row.content.strip() for row in rows):
+                raise IngestionError('empty_index', '当前构建未写入有效片段，已停止发布。',
+                                     f'build_id={job["build_id"]}; stored_rows={len(rows)}')
+            values = await asyncio.to_thread(lambda: [dict(id=r.langchain_id, words=terms(r.content)) for r in rows])
+            async with store.engine.begin() as conn:
+                if values:
+                    await conn.execute(text("UPDATE rag_chunks SET content_tsv=to_tsvector('pg_catalog.simple',:words) WHERE langchain_id=:id"), values)
+            await store.publish(job)
+        finally:
+            await engine.close()
 
 
 async def run_once(store):

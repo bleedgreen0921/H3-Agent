@@ -85,9 +85,13 @@ class InputBudgetMiddleware(AgentMiddleware):
         self.budget = usable_budget(max_input_tokens)
 
     def prepare(self, request):
+        # 中文消息沿用保守估算；工具 JSON 含大量英文键和转义字符，
+        # 使用框架默认的 schema 估算，避免把每个 JSON 字符都当作 token。
+        tool_tokens = count_tokens_approximately([], tools=request.tools)
+
         def counter(messages):
             system = [request.system_message] if request.system_message else []
-            return count_tokens(system + list(messages), tools=request.tools)
+            return count_tokens(system + list(messages)) + tool_tokens
         messages = fit_messages(request.messages, self.budget, counter=counter)
         return request.override(messages=messages)
 

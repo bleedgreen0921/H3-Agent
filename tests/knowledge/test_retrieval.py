@@ -1,6 +1,7 @@
 import pytest
 pytest.importorskip("langchain_postgres")
 import asyncio
+from contextlib import asynccontextmanager
 from unittest.mock import patch
 from types import SimpleNamespace
 import pytest
@@ -29,10 +30,13 @@ def test_concurrent_queries_have_independent_hybrid_configs_and_shared_scope():
                 assert kwargs['hybrid_search_config'].fts_query != ''
                 return [Document(page_content=query)]
         async def vectors(*args): return Engine(), Vectors()
+        @asynccontextmanager
+        async def embeddings(c):
+            yield object()
         settings = SimpleNamespace(knowledge_base_id='kb', vector_k=20, keyword_k=20)
         retriever = SnapshotRetriever(settings=settings, filters={'tags': ['中文']})
         with patch('ai_assistant.knowledge.retrieval.RagStore', Store), \
-             patch('ai_assistant.knowledge.retrieval.embedding', lambda c: object()), \
+             patch('ai_assistant.knowledge.retrieval.embedding', embeddings), \
              patch('ai_assistant.knowledge.retrieval.vector_store', vectors):
             results = await asyncio.gather(retriever.ainvoke('中文检索'), retriever.ainvoke('another_query'))
         assert results[0][0].page_content == '中文检索'

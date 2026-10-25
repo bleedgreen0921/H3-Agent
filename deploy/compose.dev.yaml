@@ -1,0 +1,31 @@
+# Development only: passwordless access from this host and the isolated DB network.
+# Start with docker compose; data is kept in a named volume.
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: H3-Agent
+      POSTGRES_USER: user
+      POSTGRES_HOST_AUTH_METHOD: trust
+    command: [postgres, -c, hba_file=/etc/postgresql/pg_hba.dev.conf]
+    ports:
+      - "127.0.0.1:${H3_AGENT_DB_PORT:-55432}:5432"
+    volumes:
+      - h3_agent_data:/var/lib/postgresql/data
+      - type: bind
+        source: ./postgres.dev.pg_hba.conf
+        target: /etc/postgresql/pg_hba.dev.conf
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U user -d H3-Agent']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+networks:
+  default:
+    driver: bridge
+volumes:
+  h3_agent_data:

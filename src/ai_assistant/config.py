@@ -2,7 +2,7 @@
 
 from pathlib import Path
 import tomllib
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 from pydantic import field_validator, model_validator, PrivateAttr
@@ -84,7 +84,9 @@ class FilesConfig(BaseModel):
 
 class TerminalConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
-    profile: Literal["project", "scratch", "maintenance"] = "project"
+    allow_network: bool = False
+    env: dict[str, SecretStr] = Field(default_factory=dict)
+    read_paths: list[Path] = Field(default_factory=list)
     timeout: float = Field(default=120, gt=0, le=1800, allow_inf_nan=False)
 
 
@@ -130,9 +132,6 @@ class ContextConfig(BaseModel):
 class SkillsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     roots: list[str] = Field(default_factory=list)
-    dependency_install: bool = True
-    npm_project: str = Field(default=".", min_length=1)
-    dependency_timeout_seconds: float = Field(default=120, gt=0, le=1800, allow_inf_nan=False)
 
 
 from ai_assistant.integrations.config import MCPConfig, IntegrationsConfig, ChannelsConfig
@@ -180,9 +179,6 @@ class AppConfig(BaseModel):
                     raise ValueError('External writes require persistent sessions')
                 if server.transport in {'feishu', 'feishu_files'} and self.integrations.feishu is None:
                     raise ValueError('Feishu services require integrations.feishu')
-                if server.transport == 'netease' and (self.integrations.netease is None or
-                        server.account not in self.integrations.netease.accounts):
-                    raise ValueError('Unknown mailbox account')
         for group in self.channels.feishu.groups.values():
             for name in group.resources:
                 if self.mcp is None or name not in self.mcp.servers:
@@ -212,6 +208,16 @@ def load_config(path: str | Path = "assistant.toml") -> AppConfig:
         raise ConfigError("Invalid TOML or UTF-8 in the configuration file.") from None
     except OSError:
         raise ConfigError("Unable to read the configuration file.") from None
+    def table(value):
+        return value if isinstance(value, dict) else {}
+    integrations = table(data.get('integrations'))
+    servers = table(table(data.get('mcp')).get('servers'))
+    if ('netease' in integrations
+            or any(table(s).get('transport') == 'netease' for s in servers.values())
+            or {'dependency_install', 'npm_project', 'dependency_timeout_seconds'} & table(data.get('skills')).keys()
+            or 'profile' in table(table(data.get('tools')).get('terminal'))
+            or {'embedding_model', 'reranker_model', 'device'} & table(data.get('knowledge')).keys()):
+        raise ConfigError('配置包含已移除字段：请删除邮箱/Skills 安装/终端档位配置，并将知识模型改为 HTTP 服务配置。')
     try:
         config = AppConfig.model_validate(data)
         config._config_path = Path(path).absolute()

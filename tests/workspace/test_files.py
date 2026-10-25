@@ -80,3 +80,15 @@ class WorkspaceTests(unittest.TestCase):
             workspace = ReadOnlyWorkspace(root)
             self.assertTrue(workspace.search_text('x')['truncated'])
             self.assertTrue(workspace.list_directory()['truncated'])
+
+
+def test_config_aliases_and_unicode_files_on_actual_filesystem(tmp_path):
+    from ai_assistant.workspace.files import ReadOnlyWorkspace, WorkspaceError
+    import pytest
+    config=tmp_path/'PrivateConfig.toml';config.write_text('PRIVATE_MARKER')
+    workspace=ReadOnlyWorkspace(tmp_path,config_path=config)
+    alias=tmp_path/'privateconfig.toml'
+    if alias.exists():
+        with pytest.raises(WorkspaceError):workspace.read_text(alias.name)
+    source=tmp_path/'中文-é.txt';source.write_text('正文')
+    assert workspace.read_text(source.name)['content']=='1: 正文'

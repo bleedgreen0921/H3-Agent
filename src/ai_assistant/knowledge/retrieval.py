@@ -31,18 +31,18 @@ class SnapshotRetriever(BaseRetriever):
             builds = await store.active(self.filters)
             if not builds:
                 return []
-            model = await asyncio.to_thread(embedding, self.settings)
-            engine, vectors = await vector_store(self.settings, model)
-            hybrid = HybridSearchConfig(tsv_column='content_tsv', tsv_lang='pg_catalog.simple',
-                fts_query=await asyncio.to_thread(terms, query), fusion_function=reciprocal_rank_fusion,
-                fusion_function_parameters={'rrf_k': 60}, primary_top_k=self.settings.vector_k,
-                secondary_top_k=self.settings.keyword_k)
-            # Native integration otherwise substitutes raw query when tokenization is empty.
-            if not hybrid.fts_query:
-                hybrid.fts_query = 'rag_empty_query_token_93ad'
-            return await vectors.asimilarity_search(query, k=40,
-                filter={'$and': [{'knowledge_base_id': self.settings.knowledge_base_id},
-                                 {'index_version': {'$in': builds}}]}, hybrid_search_config=hybrid)
+            async with embedding(self.settings) as model:
+                engine, vectors = await vector_store(self.settings, model)
+                hybrid = HybridSearchConfig(tsv_column='content_tsv', tsv_lang='pg_catalog.simple',
+                    fts_query=await asyncio.to_thread(terms, query), fusion_function=reciprocal_rank_fusion,
+                    fusion_function_parameters={'rrf_k': 60}, primary_top_k=self.settings.vector_k,
+                    secondary_top_k=self.settings.keyword_k)
+                # Native integration otherwise substitutes raw query when tokenization is empty.
+                if not hybrid.fts_query:
+                    hybrid.fts_query = 'rag_empty_query_token_93ad'
+                return await vectors.asimilarity_search(query, k=40,
+                    filter={'$and': [{'knowledge_base_id': self.settings.knowledge_base_id},
+                                     {'index_version': {'$in': builds}}]}, hybrid_search_config=hybrid)
         except SQLAlchemyError as exc:
             raise KnowledgeError('知识库数据库检索失败。') from exc
         finally:
@@ -52,7 +52,7 @@ class SnapshotRetriever(BaseRetriever):
 
 
 class KnowledgeRetriever(BaseRetriever):
-    """Lazily assemble native compression so an unconfigured tool loads no GPU."""
+    """Lazily assemble native compression for configured HTTP services."""
     model_config = ConfigDict(arbitrary_types_allowed=True)
     settings: Any
     filters: dict = Field(default_factory=dict)
@@ -113,7 +113,7 @@ def knowledge_middleware(*, run_limit=5):
 
     def expected_error(error, request):
         if isinstance(error, KnowledgeError):
-            return '知识检索暂不可用，请检查知识库、本地模型及设备配置。'
+            return '知识检索暂不可用，请检查知识库及模型服务配置。'
         return None
 
     return [ToolCallLimitMiddleware(tool_name='search_knowledge', run_limit=run_limit),

@@ -13,7 +13,7 @@ const allowed = {
  contact: ['contact.v3.user.get','contact.v3.user.batchGetId'],
 };
 const scopes = {im:['im:message','im:message:readonly','im:chat:readonly'],docx:['docx:document'],drive:['drive:drive'],wiki:['wiki:wiki'],bitable:['bitable:app'],calendar:['calendar:calendar'],task:['task:task'],contact:['contact:user.base:readonly']};
-const read = new Set(['get','list','search','rawContent','batchGet','batchGetId','tasklists','tasks']);
+const read = new Set(['get','getNode','list','search','rawContent','batchGet','batchGetId','tasklists','tasks']);
 const tools = [];
 for (const [domain,names] of Object.entries(allowed)) for (const name of names) {
  const tool=AllTools.find(t=>t.name===name); if(!tool) throw Error('Missing official tool '+name);

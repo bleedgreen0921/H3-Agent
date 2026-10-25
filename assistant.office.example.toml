@@ -1,33 +1,25 @@
-# Standalone office configuration. Replace placeholders in a private copy.
-default_model = "chat"
-[models.chat]
-provider = "openai"
-model = "YOUR_MODEL"
-api_key = "REPLACE_MODEL_KEY"
-max_input_tokens = 32000
+# 飞书专项示例；基础配置与使用说明见 assistant.example.toml / README.md。
+# 复制到私有配置后替换占位值，勿覆盖已有真实配置。
+default_model = "deepseek"
+[models.deepseek]
+provider = "deepseek"
+model = "deepseek-flash"
+api_key = "REPLACE_DEEPSEEK_API_KEY"
+max_input_tokens = 24000
+[models.deepseek.parameters]
+timeout = 60
+max_retries = 0
+[models.deepseek.parameters.extra_body.thinking]
+type = "disabled"
 [workspace]
 root = "."
 [sessions]
-database_url = "postgresql://USER:PASSWORD@127.0.0.1:5432/assistant"
+database_url = "postgresql://user@127.0.0.1:55432/H3-Agent"
 [mcp]
 connect_timeout = 15
 call_timeout = 30
 # Must be outside workspace; ~ is expanded only for this explicit state path.
 state_dir = "~/.local/state/ai-assistant"
-[integrations.netease.accounts.personal]
-address = "owner@163.com"
-authorization_code = "REPLACE_CLIENT_AUTHORIZATION_CODE"
-# Optional TLS hosts: imap_host / smtp_host. Plaintext authentication is unsupported.
-[integrations.netease.accounts.personal.folders]
-sent = "REPLACE_EXACT_SENT_FOLDER"
-drafts = "REPLACE_EXACT_DRAFT_FOLDER"
-[mcp.servers.mail]
-transport = "netease"
-identity = "private"
-account = "personal"
-tools = ["folders", "search", "read", "download", "send", "draft", "update_draft", "mark", "move"]
-write_tools = ["send", "draft", "update_draft", "mark", "move"]
-allow_write = true
 [integrations.feishu]
 app_id = "cli_REPLACE"
 app_secret = "REPLACE_APP_SECRET"
@@ -38,13 +30,13 @@ node_project = "deploy/feishu"
 [mcp.servers.feishu_user]
 transport = "feishu"
 identity = "user"
-tools = ["docx_v1_document_get", "docx_v1_document_rawContent", "docx_v1_document_create", "calendar_v4_calendar_list", "calendar_v4_calendarEvent_list", "calendar_v4_calendarEvent_create", "calendar_v4_calendarEvent_patch", "calendar_v4_calendarEvent_delete", "task_v2_task_list", "task_v2_task_create", "task_v2_task_patch"]
+tools = ["docx_v1_document_get", "docx_v1_document_rawContent", "docx_v1_document_create", "calendar_v4_calendar_list", "calendar_v4_calendarEvent_list", "calendar_v4_calendarEvent_create", "calendar_v4_calendarEvent_patch", "calendar_v4_calendarEvent_delete", "task_v2_task_list", "task_v2_task_create", "task_v2_task_patch", "wiki_v2_space_getNode"]
 write_tools = ["docx_v1_document_create", "calendar_v4_calendarEvent_create", "calendar_v4_calendarEvent_patch", "calendar_v4_calendarEvent_delete", "task_v2_task_create", "task_v2_task_patch"]
 allow_write = true
 [mcp.servers.feishu_bot]
 transport = "feishu"
 identity = "bot"
-tools = ["im_v1_message_list", "im_v1_message_create", "docx_v1_document_get", "docx_v1_document_create", "wiki_v2_space_list", "wiki_v2_spaceNode_create", "bitable_v1_appTableRecord_list", "bitable_v1_appTableRecord_create", "drive_v1_file_list", "drive_v1_file_createFolder", "contact_v3_user_get"]
+tools = ["im_v1_message_list", "im_v1_message_create", "docx_v1_document_get", "docx_v1_document_create", "wiki_v2_space_list", "wiki_v2_spaceNode_create", "bitable_v1_appTableRecord_list", "bitable_v1_appTableRecord_create", "drive_v1_file_list", "drive_v1_file_createFolder", "contact_v3_user_get", "wiki_v2_space_getNode", "docx_v1_document_rawContent"]
 write_tools = ["im_v1_message_create", "docx_v1_document_create", "wiki_v2_spaceNode_create", "bitable_v1_appTableRecord_create", "drive_v1_file_createFolder"]
 allow_write = true
 [mcp.servers.feishu_bot.resource_arguments]
@@ -61,3 +53,5 @@ enabled = false
 # Explicitly enable only your test group after applying the schema and OAuth login.
 # [channels.feishu.groups.oc_REPLACE.resources]
 # feishu_bot = ["oc_REPLACE"]
+
+[context]
