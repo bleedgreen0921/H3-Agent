@@ -19,8 +19,8 @@ export async function persistInbox(db,input){
   await db.query('BEGIN');
   await db.query('SELECT pg_advisory_xact_lock(714160003)');
   if((await db.query('SELECT 1 FROM assistant_inbox WHERE id=$1',[input.id])).rowCount){await db.query('COMMIT');return 'duplicate';}
-  const count=Number((await db.query("SELECT count(*) FROM assistant_inbox WHERE status IN ('received','running')")).rows[0].count);
-  const busy=count>=100&&!['/cancel','/status'].includes(input.body.text);
+  const count=Number((await db.query("SELECT count(*) FROM assistant_inbox WHERE status IN ('received','running','waiting')")).rows[0].count);
+  const busy=count>=100&&!['/cancel','/status','/new'].includes(input.body.text);
   await db.query('INSERT INTO assistant_inbox(id,binding,body,status) VALUES($1,$2,$3,$4)',
    [input.id,input.binding,input.body,busy?'completed':'received']);
   if(busy)await db.query('INSERT INTO assistant_outbox(id,input_id,body) VALUES($1,$2,$3)',

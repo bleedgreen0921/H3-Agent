@@ -10,6 +10,27 @@ from pydantic import (
     field_validator,
 )
 from urllib.parse import urlsplit
+from typing import Literal
+
+
+class KnowledgeSource(BaseModel):
+    """只有显式配置的目录与云空间允许被递归扫描。"""
+    model_config = ConfigDict(extra='forbid', frozen=True)
+    kind: Literal['local_directory', 'feishu_wiki', 'feishu_folder']
+    path: Path | None = None
+    token: str | None = None
+    node_token: str | None = None
+    identity: Literal['user', 'bot'] = 'user'
+    include: list[str] = Field(default_factory=lambda: ['*'])
+    exclude: list[str] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def target(self):
+        if self.kind == 'local_directory' and self.path is None:
+            raise ValueError('local_directory requires path')
+        if self.kind != 'local_directory' and not self.token:
+            raise ValueError('Feishu source requires token')
+        return self
 
 
 class ModelService(BaseModel):
@@ -39,6 +60,9 @@ class ModelService(BaseModel):
 class KnowledgeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     database_url: SecretStr
+    sources: dict[str, KnowledgeSource] = Field(default_factory=dict)
+    sync_deadline_seconds: int = Field(default=14400, gt=0)
+    evidence_chars: int = Field(default=8000, ge=1000, le=20000)
     knowledge_base_id: str = Field(default="default", min_length=1)
     materials_dir: Path = Path(".rag/materials")
     diagnostics_dir: Path = Path(".rag/diagnostics")
@@ -67,6 +91,14 @@ class KnowledgeConfig(BaseModel):
     retry_seconds: int = Field(default=10, ge=0)
     parse_timeout: int = Field(default=600, gt=0)
 
+    @field_validator('sources')
+    @classmethod
+    def source_names(cls, value):
+        import re
+        if any(not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', key) for key in value):
+            raise ValueError('Source IDs require 1-64 ASCII letters, digits, underscores or hyphens')
+        return value
+
     @model_validator(mode="after")
     def limits(self):
         if self.chunk_overlap >= self.chunk_size:
@@ -81,8 +113,8 @@ class KnowledgeConfig(BaseModel):
         import hashlib, json
 
         data = dict(
-            schema=2,
-            parser="unstructured-local",
+            schema=3,
+            parser="native-files-and-feishu-v1",
             dimensions=1024,
             embedding_model=self.embedding.model,
             query_instruction=self.query_instruction,

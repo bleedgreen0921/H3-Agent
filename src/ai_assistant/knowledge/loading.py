@@ -136,6 +136,55 @@ async def parse_snapshot(path: Path, *, timeout: float):
 
 
 def _run_local_loader(path):
+    # 原生文本/PDF Loader 同样运行在可终止的解析子进程中。
+    suffix = Path(path).suffix.lower()
+    if suffix in ('.txt', '.md'):
+        from langchain_community.document_loaders import TextLoader
+        return TextLoader(str(path), encoding='utf-8').load()
+    if suffix == '.pdf':
+        from langchain_community.document_loaders import PyPDFLoader
+        docs = PyPDFLoader(str(path)).load()
+        for doc in docs:
+            if isinstance(doc.metadata.get('page'), int):
+                doc.metadata['page_number'] = doc.metadata['page'] + 1
+        return docs
+    if suffix == '.csv':
+        import csv
+        from langchain_core.documents import Document
+        with Path(path).open(encoding='utf-8-sig', newline='') as stream:
+            rows = csv.reader(stream)
+            header = next(rows, [])
+            return [Document(page_content=' | '.join(
+                f'{header[i] if i<len(header) else i+1}: {value}' for i,value in enumerate(row)),
+                metadata={'csv_record':index}) for index,row in enumerate(rows,1) if any(v.strip() for v in row)]
+    if suffix == '.xlsx':
+        from openpyxl import load_workbook
+        from openpyxl.utils import get_column_letter
+        from langchain_core.documents import Document
+        book = load_workbook(path, read_only=True, data_only=False)
+        values = load_workbook(path, read_only=True, data_only=True)
+        docs = []
+        try:
+            for sheet in book:
+                header = None
+                for index,(row,display) in enumerate(zip(sheet.iter_rows(values_only=True),
+                    values[sheet.title].iter_rows(values_only=True)),1):
+                    if header is None:
+                        header = row
+                    if not any(v is not None for v in row):
+                        continue
+                    parts = []
+                    for i,value in enumerate(row):
+                        shown = display[i] if i<len(display) and display[i] is not None else value
+                        part = f'{header[i] if i<len(header) else i+1}: {shown}'
+                        if isinstance(value,str) and value.startswith('='):
+                            part += f'（公式：{value}）'
+                        parts.append(part)
+                    docs.append(Document(page_content=' | '.join(parts),metadata={
+                        'sheet_name':sheet.title,'cell_range':f'A{index}:{get_column_letter(max(1,len(row)))}{index}'}))
+            return docs
+        finally:
+            book.close(); values.close()
     import socket
     def deny_network(*args, **kwargs):
         raise ParserNetworkBlocked('Parser network access is disabled')

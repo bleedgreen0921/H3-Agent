@@ -5,9 +5,10 @@ import signal
 import stat
 import select
 import sys
+from contextlib import nullcontext
 
 from langchain_core.messages import ToolMessage
-from ai_assistant.runtime import assistant_session, final_text
+from ai_assistant.runtime import assistant_session, final_text, WaitingTurn
 from ai_assistant.config import ConfigError
 from ai_assistant.storage.sessions import SessionError, SessionStorageError
 from ai_assistant.agents.context import ContextBudgetError, SummaryCallLimitError
@@ -74,7 +75,11 @@ def show_turn(turn):
 async def chat(config, model_name=None, *, session_id=None):
     if config.sessions is None or config.context is None:
         raise ConfigError('chat requires [sessions], [context] and model max_input_tokens; run session init first.')
-    async with assistant_session(config, model_name, session_id=session_id) as session:
+    workers = nullcontext()
+    if config.knowledge is not None:
+        from ai_assistant.knowledge.sync import background_worker
+        workers = background_worker(config)
+    async with workers, assistant_session(config, model_name, session_id=session_id) as session:
         print(f'会话：{session.session_id}')
         print(f'模型：{session.model_name}；工作区：{session.context.workspace.root}')
         print('工具：' + ', '.join(tool.name for tool in session.tools))
@@ -97,6 +102,19 @@ async def chat(config, model_name=None, *, session_id=None):
         old_handler = signal.getsignal(signal.SIGINT)
         loop.add_signal_handler(signal.SIGINT, interrupt)
         try:
+            if session._pending:
+                print('正在等待知识同步并续接；Ctrl+C 可取消等待。', flush=True)
+                active = asyncio.create_task(session.continue_waiting(on_event=show_event))
+                try:
+                    turn = await active
+                    while isinstance(turn, WaitingTurn):
+                        active = asyncio.create_task(session.continue_waiting(on_event=show_event))
+                        turn = await active
+                    show_turn(turn)
+                except asyncio.CancelledError:
+                    await session.cancel_waiting()
+                finally:
+                    active = None
             try:
                 mode = os.fstat(sys.stdin.fileno()).st_mode
                 if stat.S_ISREG(mode) or (stat.S_ISCHR(mode) and not os.isatty(sys.stdin.fileno())):
@@ -137,6 +155,13 @@ async def chat(config, model_name=None, *, session_id=None):
                         return 2
                     print(f'已开始新会话：{session.session_id}')
                     continue
+                if line == '/status':
+                    print('等待知识同步。' if session._pending else '会话空闲。')
+                    continue
+                if line == '/cancel':
+                    await session.cancel_waiting()
+                    print('已取消等待。')
+                    continue
                 if line == '/skills':
                     catalog = session.context.skills
                     if catalog is None:
@@ -155,11 +180,23 @@ async def chat(config, model_name=None, *, session_id=None):
                         continue
                     skill_ids, line = [parts[1]], parts[2]
                 interrupted = False
+                if config.knowledge is not None:
+                    from ai_assistant.knowledge.admission import admit_message
+                    import json
+                    admitted = await admit_message(config, line)
+                    if admitted:
+                        line += '\n应用状态：文档登记结果（failed 为失败，其他不代表索引完成）；成功项使用 search_knowledge 按 source_id 检索：' + json.dumps(admitted, ensure_ascii=False)
                 active = asyncio.create_task(session.run_turn(line, on_event=show_event, **({'skill_ids': skill_ids} if skill_ids else {})))
                 try:
                     turn = await active
+                    while isinstance(turn, WaitingTurn):
+                        print('正在同步知识来源，完成后自动回答；Ctrl+C 取消。', flush=True)
+                        active = asyncio.create_task(session.continue_waiting(on_event=show_event))
+                        turn = await active
                     show_turn(turn)
                 except asyncio.CancelledError:
+                    if session._pending:
+                        await session.cancel_waiting()
                     print('本轮已取消；已发生的文件或命令效果不会回滚。')
                 except TimeoutError:
                     print('本轮超时，未完成；已发生的文件或命令效果不会回滚。')

@@ -103,6 +103,7 @@ from ai_assistant.knowledge.config import KnowledgeConfig
 class AgentSettings(BaseModel):
     """Per-turn native graph limits."""
 
+    persona_file: Path | None = None
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True, protected_namespaces=())
     model_call_limit: int = Field(default=10, gt=0, strict=True)
     tool_call_limit: int = Field(default=20, gt=0, strict=True)
@@ -167,6 +168,9 @@ class AppConfig(BaseModel):
             raise ValueError("Model profile names must not be blank")
         if self.default_model not in self.models:
             raise ValueError("default_model must refer to an existing model profile")
+        if self.knowledge and any(s.kind != 'local_directory' for s in self.knowledge.sources.values()):
+            if self.integrations.feishu is None or self.mcp is None:
+                raise ValueError('Cloud knowledge sources require explicit Feishu integration and token state configuration')
         if self.context and self.context.summary_model is not None and self.context.summary_model not in self.models:
             raise ValueError("Unknown summary model profile")
         if self.tools.web is not None:

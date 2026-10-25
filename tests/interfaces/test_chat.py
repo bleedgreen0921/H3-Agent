@@ -15,6 +15,7 @@ from ai_assistant.runtime import AgentTurn
 def test_pipe_commands_eof_and_exit(monkeypatch, capsys, data):
     calls = []
     class Session:
+        _pending = None
         session_id = 'test-session'
         model_name = 'fake'
         context = SimpleNamespace(workspace=SimpleNamespace(root='/workspace'))
@@ -36,7 +37,7 @@ def test_pipe_commands_eof_and_exit(monkeypatch, capsys, data):
             monkeypatch.setattr(module.sys, 'stdin', reader)
             os.write(write_fd, data)
             os.close(write_fd)
-            return await module.chat(SimpleNamespace(sessions=True, context=True))
+            return await module.chat(SimpleNamespace(sessions=True, context=True, knowledge=None))
     monkeypatch.setattr(module, 'assistant_session', fake_session)
     assert asyncio.run(scenario()) == 0
     assert calls == ['new', 'hello', 'closed']
@@ -59,6 +60,7 @@ def test_sigint_waits_for_cleanup_then_continues(monkeypatch, capsys):
     import signal
     trace = []
     class Session:
+        _pending = None
         session_id = 'test-session'
         model_name = 'fake'
         context = SimpleNamespace(workspace=SimpleNamespace(root='/workspace'))
@@ -86,7 +88,7 @@ def test_sigint_waits_for_cleanup_then_continues(monkeypatch, capsys):
             monkeypatch.setattr(module.sys, 'stdin', reader)
             os.write(write_fd, b'cancel\nnext\n/exit\n')
             os.close(write_fd)
-            return await module.chat(SimpleNamespace(sessions=True, context=True))
+            return await module.chat(SimpleNamespace(sessions=True, context=True, knowledge=None))
     assert asyncio.run(scenario()) == 0
     assert trace == ['cleaned', 'next']
     assert '已取消' in capsys.readouterr().out
@@ -96,7 +98,7 @@ def test_idle_sigint_exit(monkeypatch):
     import signal
     @asynccontextmanager
     async def fake_session(*args, **kwargs):
-        yield SimpleNamespace(session_id='test-session', model_name='fake', tools=[], context=SimpleNamespace(
+        yield SimpleNamespace(_pending=None, session_id='test-session', model_name='fake', tools=[], context=SimpleNamespace(
             workspace=SimpleNamespace(root='/workspace')))
     monkeypatch.setattr(module, 'assistant_session', fake_session)
     async def scenario():
@@ -105,7 +107,7 @@ def test_idle_sigint_exit(monkeypatch):
             with os.fdopen(read_fd) as reader:
                 monkeypatch.setattr(module.sys, 'stdin', reader)
                 asyncio.get_running_loop().call_later(.01, os.kill, os.getpid(), signal.SIGINT)
-                return await module.chat(SimpleNamespace(sessions=True, context=True))
+                return await module.chat(SimpleNamespace(sessions=True, context=True, knowledge=None))
         finally:
             os.close(write_fd)
     assert asyncio.run(scenario()) == 130
@@ -114,7 +116,7 @@ def test_idle_sigint_exit(monkeypatch):
 def test_regular_file_eof(monkeypatch, tmp_path):
     @asynccontextmanager
     async def fake_session(*args, **kwargs):
-        yield SimpleNamespace(session_id='test-session', model_name='fake', tools=[], context=SimpleNamespace(
+        yield SimpleNamespace(_pending=None, session_id='test-session', model_name='fake', tools=[], context=SimpleNamespace(
             workspace=SimpleNamespace(root='/workspace')))
     monkeypatch.setattr(module, 'assistant_session', fake_session)
     source = tmp_path / 'input.txt'
@@ -122,5 +124,5 @@ def test_regular_file_eof(monkeypatch, tmp_path):
     async def scenario():
         with source.open() as reader:
             monkeypatch.setattr(module.sys, 'stdin', reader)
-            return await module.chat(SimpleNamespace(sessions=True, context=True))
+            return await module.chat(SimpleNamespace(sessions=True, context=True, knowledge=None))
     assert asyncio.run(scenario()) == 0

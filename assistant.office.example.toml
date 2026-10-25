@@ -55,3 +55,17 @@ enabled = false
 # feishu_bot = ["oc_REPLACE"]
 
 [context]
+
+# 办公入口也可启用长期知识库。先填写数据库并显式执行 rag init。
+# [knowledge]
+# database_url = "postgresql+asyncpg://USER:password@127.0.0.1:5432/assistant"
+# knowledge_base_id = "default"
+# [knowledge.sources.team_wiki]
+# kind = "feishu_wiki"
+# token = "SPACE_ID"
+# identity = "user"
+# Embedding/Reranker 默认使用本机 llama.cpp 1236/1235 端口。
+
+# 个人风格文件路径相对本配置文件；删除此项即可使用默认风格。
+[agent]
+persona_file = "PERSONA.md"

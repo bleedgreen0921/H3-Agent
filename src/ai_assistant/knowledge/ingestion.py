@@ -74,7 +74,12 @@ async def build(store, job):
     digest = await asyncio.to_thread(lambda: hashlib.sha256(path.read_bytes()).hexdigest())
     if digest != job['digest']:
         raise KnowledgeError('资料快照摘要不匹配。')
-    docs = await parse_snapshot(path, timeout=c.parse_timeout)
+    if path.suffix == '.ragjson':
+        import json
+        from langchain_core.documents import Document
+        docs = [Document(**item) for item in json.loads(await asyncio.to_thread(path.read_text, encoding='utf-8'))]
+    else:
+        docs = await parse_snapshot(path, timeout=c.parse_timeout)
     docs = require_content(docs, 'empty_document', '未提取到有效正文。')
     async with embedding(c) as model:
         from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -82,7 +87,12 @@ async def build(store, job):
         identity = job['metadata'] | dict(knowledge_base_id=job['kb'], document_id=job['document_id'],
             document_version_id=job['version_id'], source_uri=job['source_uri'],
             parse_config_fingerprint=job['config_hash'], index_version=job['build_id'])
-        normalized = [normalize(doc, identity=identity, parser='unstructured') for doc in docs]
+        parser = {'.ragjson':'feishu','.txt':'text','.md':'text','.pdf':'pypdf','.csv':'csv','.xlsx':'openpyxl'}.get(path.suffix,'unstructured')
+        normalized = [normalize(doc, identity=identity, parser=parser,
+            mapping={'page_start':'page_number','page_end':'page_number'} if parser=='pypdf' else None) for doc in docs]
+        if path.suffix in ('.ragjson','.csv','.xlsx'):
+            for doc, original in zip(normalized, docs):
+                doc.metadata.update(original.metadata)
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=c.chunk_size, chunk_overlap=c.chunk_overlap, length_function=len,
             add_start_index=True, strip_whitespace=False,
@@ -160,10 +170,16 @@ async def run_once(store):
     return True
 
 
-async def worker(store, *, once=False):
+async def worker(store, *, once=False, app_config=None):
     while True:
+        synced = False
+        if app_config is not None:
+            from ai_assistant.knowledge.sync import sync_once
+            synced = await sync_once(app_config, store)
         found = await run_once(store)
+        if app_config is not None:
+            await store.finish_syncs()
         if once:
             return
-        if not found:
+        if not found and not synced:
             await asyncio.sleep(1)

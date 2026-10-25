@@ -68,19 +68,38 @@ cp models.example.toml models.local.toml
 ./assistant.sh --help
 ```
 
-CLI 支持 `/help`、`/new`、`/skills`、`/skill ID 请求`、`/exit`。执行中 Ctrl+C 取消本轮并等待清理；空闲 Ctrl+C 退出。失败轮次不自动重放，文件或远端效果不会回滚。会话由原生 PostgreSQL checkpoint 持久化，上下文使用原生摘要、编辑与裁剪。
+CLI 支持 `/help`、`/new`、`/status`、`/cancel`、`/skills`、`/skill ID 请求`、`/exit`。执行中 Ctrl+C 取消本轮并等待清理；空闲 Ctrl+C 退出。失败轮次不自动重放，文件或远端效果不会回滚。会话由原生 PostgreSQL checkpoint 持久化，上下文使用原生摘要、编辑与裁剪。
 
 启用示例中的 knowledge 配置后：
 
 ```bash
 ./assistant.sh rag submit path/to/material.csv --tag personal
-./assistant.sh rag worker     # 独立终端；--once 只处理一个任务
+./assistant.sh rag worker     # 仅使用管理命令时需独立 Worker；chat/feishu serve 自动管理 Worker
 ./assistant.sh rag status JOB_ID
 ./assistant.sh rag search '具体问题' --tag personal
 ./assistant.sh rag check --services
+./assistant.sh rag sources
+./assistant.sh rag sync --source personal --wait
+./assistant.sh rag documents
 ```
 
 入库保留不可变快照、任务去重、租约、心跳与版本发布；检索使用原生向量/关键词混合检索和重排，返回可追踪来源。片段长度以字符计，默认 512/64。Embedding 输出固定为 1024 维。模型服务不可用或输出无效时明确失败，不回退模型、不跳过重排。排障使用 `rag status JOB_ID --diagnostics`。
+
+云文档与本地文档默认长期保存。扫描范围在 `[knowledge.sources.NAME]` 中明确配置，示例见配置模板；不默认扫描磁盘或整个飞书账号。支持 TXT/Markdown/文本型 PDF/DOCX/XLSX/PPTX/CSV、飞书新版文档、Wiki 文档、电子表格及多维表格。扫描件、图片理解、旧版云文档、全文总结和表格精确统计不在本阶段范围。
+
+每次跨库检索前重新枚举全部配置范围并刷新变化内容；指定文档时只检查目标。没有可靠版本号的云表格每轮重新读取后比较 hash。正文与定位保存在受控快照中，PostgreSQL 保存来源、版本、片段和 1024 维向量。未变内容不重复生成向量；新构建完整成功后才发布。删除、失权或移出范围的文档保留存档，但退出正常检索。暂时读取失败不误判为删除，本次回答排除未核实部分并说明缺口。
+
+CLI 与飞书主人私聊会自动登记发送的云文档链接；飞书文件附件也会登记。可直接说“把 path/to/file.pdf 加入知识库”，助手使用 `ingest_document`。`search_knowledge` 接受可选的 `source_id` 和 `document_id`，返回来源、版本、核实时间和页/块/单元格/记录定位。模型只接收最多约 8,000 字符的完整证据片段，不加载整份长文档。
+
+大量更新时，原生 LangGraph checkpoint 保存等待位置，先通知同步进度，完成后自动回答原问题；同一会话后续消息排队，其他会话继续。飞书 `/status` 查询、`/cancel` 取消本次等待、`/new` 取消旧等待并创建新会话；入库资料仍保留。CLI 等待期间 Ctrl+C 取消，退出后可用 `chat --session SESSION_ID` 续接。同步默认截止 4 小时，返回已核实部分；没有证据时明确说明。只有明确等待中的知识请求可自动恢复，普通失败或未知外部写入不自动重放。
+
+升级现有数据库需要显式运行以下命令；建议先备份。启动只检查 schema，不自动迁移。飞书来源需要实际授予对应的 Wiki/文档/电子表格/多维表格读取权限，配置本身不能授予平台权限。
+
+```bash
+./assistant.sh session init
+./assistant.sh rag init
+./assistant.sh chat                # 或 ./assistant.sh feishu serve
+```
 
 ## 本地 Skills 与终端
 
@@ -133,3 +152,9 @@ Node 需 >=20。OAuth 使用本机 loopback 回调；应用内主人 ID 必须�
 ```
 
 写操作须在 prompt 中明确指定测试目标；随后人工核对远端结果与 `mcp operations list` 回执。机器人入口另通过真实测试会话发送消息验证。自动测试使用 fixture/mock 和独立数据库，不读取真实凭据；数据库集成测试需显式设置 `SESSION_TEST_DATABASE_URL` 和 `RAG_TEST_DATABASE_URL`。未提供依赖时的跳过不代表真实业务验收通过。
+
+## 个人回答风格
+
+在 `[agent]` 中设置 `persona_file = "PERSONA.md"`，即可加载独立的个人风格文件。路径相对 TOML 配置文件解析，支持绝对路径。风格文件使用 UTF-8，最大 16 KiB；读取失败会明确报错。未配置则使用默认风格。
+
+CLI 建立会话时读取，修改后重新启动 CLI；飞书在处理每条消息时建立会话，因此修改文件后下一轮生效。首次启用需要重启现有机器人进程。风格作为系统提示的一部分参与上下文预算，不改变工具权限或证据要求。

@@ -18,7 +18,8 @@ class SessionStorageError(SessionError):
 DDL = '''CREATE TABLE IF NOT EXISTS assistant_sessions (
     id uuid PRIMARY KEY, workspace text NOT NULL, thread_id text NOT NULL,
     thread_ids text[] NOT NULL, complete jsonb,
-    status text NOT NULL CHECK(status IN ('ready','running','interrupted','deleting')),
+    status text NOT NULL CHECK(status IN ('ready','running','interrupted','deleting','waiting')),
+    pending jsonb, pending_input text,
     format_version integer NOT NULL DEFAULT 1,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
@@ -59,7 +60,7 @@ class SessionRepository:
     async def check_schema(self):
         row = await (await self.execute(
             'SELECT version FROM assistant_session_schema WHERE singleton = true')).fetchone()
-        if not row or row['version'] != 1:
+        if not row or row['version'] != 2:
             raise SessionError('Unsupported session schema; run session init with a compatible application.')
         # Also fail before any model calls if native Saver initialization is missing.
         for table in ('checkpoints', 'checkpoint_blobs', 'checkpoint_writes', 'checkpoint_migrations'):
@@ -146,6 +147,15 @@ class SessionRepository:
             raise SessionStorageError('Session deletion incomplete; retry session delete.') from None
         await self.execute('DELETE FROM assistant_sessions WHERE id=%s', (ident,))
 
+    async def waiting(self, pending, input_id):
+        from psycopg.types.json import Jsonb
+        await self.update_current("UPDATE assistant_sessions SET status='waiting',pending=%s,pending_input=%s WHERE id=%s",
+                                  (Jsonb(pending), input_id, self.current))
+
+    async def clear_waiting(self):
+        await self.update_current("UPDATE assistant_sessions SET status='ready',pending=NULL,pending_input=NULL WHERE id=%s",
+                                  (self.current,))
+
 
 @asynccontextmanager
 async def session_storage(settings, *, initialize=False):
@@ -178,10 +188,14 @@ async def session_storage(settings, *, initialize=False):
                                 await repo.execute('''CREATE TABLE IF NOT EXISTS assistant_session_schema (
                                     singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), version integer NOT NULL)''')
                                 row = await (await repo.execute('SELECT version FROM assistant_session_schema')).fetchone()
-                                if row and row['version'] != 1:
+                                if row and row['version'] not in (1, 2):
                                     raise SessionError('Unsupported session schema version.')
                                 await repo.execute(DDL)
-                                await repo.execute('INSERT INTO assistant_session_schema VALUES(true,1) ON CONFLICT DO NOTHING')
+                                await repo.execute('ALTER TABLE assistant_sessions ADD COLUMN IF NOT EXISTS pending jsonb')
+                                await repo.execute('ALTER TABLE assistant_sessions ADD COLUMN IF NOT EXISTS pending_input text')
+                                await repo.execute('ALTER TABLE assistant_sessions DROP CONSTRAINT IF EXISTS assistant_sessions_status_check')
+                                await repo.execute("ALTER TABLE assistant_sessions ADD CONSTRAINT assistant_sessions_status_check CHECK(status IN ('ready','running','interrupted','deleting','waiting'))")
+                                await repo.execute('INSERT INTO assistant_session_schema VALUES(true,2) ON CONFLICT(singleton) DO UPDATE SET version=2')
                         finally:
                             await repo.execute('SELECT pg_advisory_unlock(%s)', (SCHEMA_LOCK,))
                     await repo.check_schema()

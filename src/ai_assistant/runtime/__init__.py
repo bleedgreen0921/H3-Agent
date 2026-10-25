@@ -10,7 +10,7 @@ from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
-from ai_assistant.agents import create_assistant_agent
+from ai_assistant.agents import create_assistant_agent, load_persona
 from ai_assistant.config import ConfigError
 from ai_assistant.llm.factory import create_model
 from ai_assistant.llm.requests import model_session
@@ -32,6 +32,12 @@ class AgentTurn:
     skill_ids: list[str] = field(default_factory=list)
     input_id: str = ""
     operations: list[dict] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class WaitingTurn:
+    sync_id: str
+    input_id: str
 
 
 def final_text(messages):
@@ -61,6 +67,8 @@ class AssistantSession:
         self._complete = None
         self._failed = False
         self._reopened = False
+        self._pending = None
+        self._pending_input = None
 
     async def open(self, session_id=None):
         if self._closed:
@@ -74,6 +82,8 @@ class AssistantSession:
         self._session_id = str(row['id'])
         self._thread, self._complete = row['thread_id'], row['complete']
         self._failed = row['status'] in {'running', 'interrupted'}
+        self._pending = row.get('pending')
+        self._pending_input = row.get('pending_input')
         self._reopened = session_id is not None
         if self._complete is not None:
             state = await self.agent.aget_state(self._complete)
@@ -83,6 +93,8 @@ class AssistantSession:
     async def new_conversation(self):
         if self._running:
             raise RuntimeError('A turn is already running.')
+        if self._pending:
+            await self.cancel_waiting()
         await self.open()
 
     async def watch_connection(self):
@@ -97,14 +109,18 @@ class AssistantSession:
                 return
             await asyncio.sleep(1)
 
-    async def run_turn(self, text, *, skill_ids=None, on_event=None, input_id=None):
+    async def run_turn(self, text, *, skill_ids=None, on_event=None, input_id=None, resume=False):
         if self._closed:
             raise RuntimeError('Session is closed.')
         if self._running:
             raise RuntimeError('A turn is already running.')
         if self._storage_lost:
             raise SessionStorageError('Session connection lost; reopen the conversation.')
-        input_id = input_id or str(uuid4())
+        if self._pending and not resume:
+            raise SessionError('本会话正在等待知识同步，请先继续或取消等待。')
+        if resume and not self._pending:
+            raise SessionError('本会话没有可续接的知识请求。')
+        input_id = self._pending_input if resume else (input_id or str(uuid4()))
         turn_context = replace(self.context, input_id=input_id)
         self._running = True
         self._active_task = asyncio.current_task()
@@ -112,9 +128,12 @@ class AssistantSession:
             if self._complete is None and self._failed:
                 self._thread = str(uuid4())
             if self.repository is not None:
+                if resume:
+                    # 续接一旦开始便不再属于可安全自动恢复的等待状态。
+                    await self.repository.clear_waiting()
                 await self.repository.start(self._thread)
             observer = TurnObserver(self.settings.model_call_limit, self.model_name)
-            locator = self._complete or {'configurable': {'thread_id': self._thread}}
+            locator = self._pending['checkpoint'] if resume else (self._complete or {'configurable': {'thread_id': self._thread}})
             # astream_events may insert LangGraph's generic 25-step default,
             # overriding create_agent's 9_999-step setting. Middleware nodes
             # consume steps too; model/tool/deadline limits remain authoritative.
@@ -127,7 +146,14 @@ class AssistantSession:
             inputs.append(HumanMessage(content=text))
             activated_skills = set()
             graph_input = {'messages': inputs}
-            if skill_ids:
+            if resume:
+                from langgraph.types import Command
+                if self.context.operations:
+                    operations = await self.context.operations.list(input_id)
+                    if any(o['status'] in ('pending','unknown') for o in operations):
+                        raise SessionError('存在未确认的外部写入，请先核实操作回执，不自动续接。')
+                graph_input = Command(resume=True)
+            if skill_ids and not resume:
                 from ai_assistant.skills.catalog import SkillError
                 if self.context.skills is None:
                     raise SkillError('Skills are not configured.')
@@ -154,6 +180,18 @@ class AssistantSession:
                             await returned
                     if event['event'] == 'on_chain_end' and event['run_id'] == root_id:
                         result = event['data']['output']
+            state = await self.agent.aget_state({'configurable': {'thread_id': self._thread}})
+            interrupts = [item for task in state.tasks for item in task.interrupts]
+            if interrupts:
+                value = interrupts[0].value
+                if not isinstance(value, dict) or value.get('kind') != 'knowledge_sync':
+                    raise RuntimeError('Unsupported graph interruption.')
+                if self.repository is None:
+                    raise SessionError('后台知识检索需要持久会话。')
+                self._pending = {'sync_id': value['sync_id'], 'checkpoint': state.config}
+                self._pending_input = input_id
+                await self.repository.waiting(self._pending, input_id)
+                return WaitingTurn(value['sync_id'], input_id)
             if not result or not final_text(result['messages']):
                 raise RuntimeError('Agent returned no final answer.')
             if self._storage_lost:
@@ -169,11 +207,14 @@ class AssistantSession:
                 else:
                     await self.repository.complete(state.config)
             self._complete = state.config
+            self._pending = self._pending_input = None
             self._failed = self._reopened = False
             return AgentTurn(result['messages'], observer.sources, observer.usage,
                 sorted(activated_skills | {s.id for s in self.context.skills.active(result.get('active_skills', {}))}) if self.context.skills else [],
                 input_id, await self.context.operations.list(input_id) if self.context.operations else [])
-        except BaseException as exc:
+        except BaseException:
+            if resume:
+                self._pending = self._pending_input = None
             self._failed = True
             if self.repository is not None:
                 with suppress(SessionStorageError):
@@ -188,6 +229,18 @@ class AssistantSession:
             self._running = False
             self._active_task = None
 
+    async def cancel_waiting(self):
+        if self.repository:
+            await self.repository.clear_waiting()
+        self._pending = self._pending_input = None
+
+    async def continue_waiting(self, *, on_event=None):
+        if not self._pending:
+            raise SessionError('没有待续接请求。')
+        from ai_assistant.knowledge.sync import wait_sync
+        await wait_sync(self.context.knowledge_config, self._pending['sync_id'])
+        return await self.run_turn('', resume=True, on_event=on_event)
+
 
 def validate_context_config(config, selected):
     if config.context is None:
@@ -199,6 +252,7 @@ def validate_context_config(config, selected):
 
 @asynccontextmanager
 async def assistant_session(config, model_name=None, *, retriever=None, session_id=None, caller=None, resources=None):
+    persona = load_persona(config)
     from ai_assistant.integrations.policy import Caller
     caller = caller or Caller()
     if caller.channel == 'feishu_group':
@@ -226,6 +280,8 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         context = await stack.enter_async_context(tool_context(config, retriever=retriever,
             skill_snapshot=getattr(resources, "skills", None) if caller.channel != "feishu_group" else None))
         context = replace(context, caller=caller if caller.channel != "cli" else None)
+        if config.knowledge is not None:
+            context = replace(context, knowledge_config=config)
         if config.mcp is not None and config.mcp.servers:
             from ai_assistant.integrations.mcp import mcp_resources
             from ai_assistant.storage.integrations import operation_storage
@@ -243,6 +299,9 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         tools = create_builtin_tools(include_web=config.tools.web is not None,
             include_write=config.tools.files.enabled,
             include_terminal=config.tools.terminal is not None, retriever=retriever)
+        if config.knowledge is not None:
+            from ai_assistant.knowledge.tools import knowledge_tools
+            tools = [t for t in tools if t.name != 'search_knowledge'] + knowledge_tools()
         if context.skills is not None:
             from ai_assistant.tools.skills import create_skill_tools
             tools.extend(create_skill_tools())
@@ -252,7 +311,7 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             from ai_assistant.tools.mcp import discovery_tools
             tools.extend(discovery_tools())
             tools.extend(e.tool for e in context.mcp.entries.values())
-        agent = create_assistant_agent(model, tools, checkpointer=saver, settings=config.agent,
+        agent = create_assistant_agent(model, tools, checkpointer=saver, settings=config.agent, persona=persona,
             context_settings=config.context, summary_model=summary_model,
             max_input_tokens=config.models[selected].max_input_tokens,
             summary_max_input_tokens=config.models[summary_name].max_input_tokens,

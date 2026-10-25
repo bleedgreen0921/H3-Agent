@@ -70,6 +70,9 @@ def validate_filters(filters: dict | None) -> dict:
 
 def location(metadata: dict) -> str:
     parts = []
+    for key, label in (('sheet_name','工作表'),('cell_range','单元格'),('table_name','数据表'),('record_id','记录')):
+        if metadata.get(key):
+            parts.append(f'{label} {metadata[key]}')
     for name, label in (('page', '页'), ('line', '行'), ('block', '块')):
         if f'{name}_start' in metadata:
             parts.append(f'{label} {metadata[f"{name}_start"]}–{metadata.get(f"{name}_end", metadata[f"{name}_start"])}')

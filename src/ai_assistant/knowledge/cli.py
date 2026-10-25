@@ -10,12 +10,15 @@ from ai_assistant.workspace.files import ReadOnlyWorkspace
 def add_commands(commands):
     parser = commands.add_parser('rag', help='Local persistent knowledge retrieval')
     actions = parser.add_subparsers(dest='action', required=True)
-    for action in ('init', 'submit', 'status', 'worker', 'search', 'delete', 'rebuild', 'check'):
+    for action in ('init', 'submit', 'status', 'worker', 'search', 'delete', 'rebuild', 'check', 'sources', 'sync', 'documents'):
         command = actions.add_parser(action)
         command.add_argument('--config', default='assistant.toml')
         if action == 'submit':
             command.add_argument('path')
             command.add_argument('--tag', action='append', default=[])
+        if action == 'sync':
+            command.add_argument('--source')
+            command.add_argument('--wait', action='store_true')
         if action == 'status':
             command.add_argument('job_id')
             command.add_argument('--diagnostics', action='store_true')
@@ -24,6 +27,7 @@ def add_commands(commands):
         if action == 'search':
             command.add_argument('query')
             command.add_argument('--document-id')
+            command.add_argument('--source-id')
             command.add_argument('--media-type')
             command.add_argument('--source-name')
             command.add_argument('--tag', action='append', default=[])
@@ -59,12 +63,30 @@ async def execute(config, args):
         if args.action == 'init':
             await store.init()
             print('知识库 schema 已初始化。')
+        elif args.action in ('sources', 'documents'):
+            from ai_assistant.knowledge.sync import configure
+            await configure(config, store)
+            rows = await (store.source_list() if args.action == 'sources' else store.document_list())
+            print(json.dumps(rows, ensure_ascii=False, default=str))
+        elif args.action == 'sync':
+            from ai_assistant.knowledge.sync import configure, wait_sync
+            await configure(config,store)
+            ident = await store.request_sync({'source_id': args.source} if args.source else {})
+            print(ident, flush=True)
+            if args.wait:
+                print(json.dumps(await wait_sync(config,ident),ensure_ascii=False,default=str))
         elif args.action == 'submit':
+            if args.path.startswith('https://'):
+                from ai_assistant.knowledge.sync import register
+                print(json.dumps(await register(config,args.path),ensure_ascii=False))
+                return 0
             from ai_assistant.knowledge.ingestion import submit
             root = Path(config.workspace.root)
             workspace = ReadOnlyWorkspace(root if root.is_absolute() else base / root,
                 exclude_patterns=config.workspace.exclude_patterns, config_path=config.config_path)
             print(await submit(store, workspace, args.path, tags=args.tag))
+            from ai_assistant.knowledge.sync import register
+            await register(config,args.path)
         elif args.action == 'status':
             result = await store.status(args.job_id)
             if result is None:
@@ -77,14 +99,21 @@ async def execute(config, args):
                 print(detail, file=sys.stderr)
         elif args.action == 'worker':
             from ai_assistant.knowledge.ingestion import worker
-            await worker(store, once=args.once)
+            await worker(store, once=args.once, app_config=config)
         elif args.action == 'search':
             from ai_assistant.knowledge.retrieval import create_knowledge_retriever, render_evidence
             filters = {key: getattr(args, key) for key in ('document_id', 'media_type', 'source_name') if getattr(args, key)}
             if args.tag:
                 filters['tags'] = args.tag
-            docs = await create_knowledge_retriever(c, filters=filters).ainvoke(args.query)
+            from ai_assistant.knowledge.sync import configure,wait_sync
+            await configure(config,store)
+            scope = {key:getattr(args,key) for key in ('document_id','source_id') if getattr(args,key,None)}
+            ident = await store.request_sync(scope)
+            state = await wait_sync(config,ident)
+            docs = await create_knowledge_retriever(c, filters=filters, builds=state['builds']).ainvoke(args.query)
             print(render_evidence(docs))
+            if state['errors']:
+                print('本轮覆盖不完整：'+json.dumps(state['errors'],ensure_ascii=False))
         elif args.action == 'delete':
             print(f'退出查询范围的文档数：{await store.delete(args.document_id)}')
         elif args.action == 'rebuild':
@@ -97,7 +126,7 @@ async def execute(config, args):
             if args.database:
                 from sqlalchemy import text
                 async with store.engine.connect() as conn:
-                    for table in ('rag_documents', 'rag_versions', 'rag_jobs', 'rag_builds', 'rag_chunks', 'upsertion_record'):
+                    for table in ('rag_documents', 'rag_versions', 'rag_jobs', 'rag_builds', 'rag_chunks', 'upsertion_record', 'rag_sources', 'rag_sync_runs', 'rag_query_runs'):
                         if not (await conn.execute(text('SELECT to_regclass(:name)'), dict(name=table))).scalar():
                             raise KnowledgeError('缺少 schema，请显式运行 rag init。')
                     columns = set((await conn.execute(text("""SELECT attname FROM pg_attribute

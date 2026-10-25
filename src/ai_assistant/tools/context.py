@@ -29,6 +29,7 @@ class ToolContext:
     caller: object | None = None
     operations: object | None = None
     input_id: str | None = None
+    knowledge_config: object | None = None
 
 
 @asynccontextmanager

@@ -48,3 +48,24 @@ enabled = false
 # batch_size = 4
 
 # 飞书的双身份、MCP 与机器人配置见 assistant.office.example.toml。
+
+# 以下为可选来源示例；取消注释并填写真实范围后才会扫描。
+# 默认长期保存已提交文档；只在使用时刷新，不定期轮询。
+# [knowledge.sources.personal]
+# kind = "local_directory"
+# path = "/absolute/path/to/documents"
+# include = ["*.txt", "*.md", "*.pdf", "*.docx", "*.xlsx", "*.pptx", "*.csv"]
+# exclude = ["private/*"]
+# [knowledge.sources.team_wiki]
+# kind = "feishu_wiki"
+# token = "SPACE_ID"
+# identity = "user"
+# node_token = "OPTIONAL_SUBTREE_NODE_TOKEN"
+# [knowledge.sources.team_folder]
+# kind = "feishu_folder"
+# token = "FOLDER_TOKEN"
+# identity = "bot"
+
+# 个人风格文件路径相对本配置文件；删除此项即可使用默认风格。
+[agent]
+persona_file = "PERSONA.md"

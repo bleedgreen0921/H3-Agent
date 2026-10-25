@@ -15,6 +15,7 @@ class SnapshotRetriever(BaseRetriever):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     settings: Any
     filters: dict = Field(default_factory=dict)
+    builds: list[str] | None = None
 
     def _get_relevant_documents(self, query, *, run_manager):
         try:
@@ -28,7 +29,7 @@ class SnapshotRetriever(BaseRetriever):
         store = RagStore(self.settings)
         engine = None
         try:
-            builds = await store.active(self.filters)
+            builds = await store.eligible_builds(self.builds, self.filters) if self.builds is not None else await store.active(self.filters)
             if not builds:
                 return []
             async with embedding(self.settings) as model:
@@ -56,6 +57,7 @@ class KnowledgeRetriever(BaseRetriever):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     settings: Any
     filters: dict = Field(default_factory=dict)
+    builds: list[str] | None = None
 
     def _get_relevant_documents(self, query, *, run_manager):
         try:
@@ -69,20 +71,20 @@ class KnowledgeRetriever(BaseRetriever):
         from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
         model = await asyncio.to_thread(reranker, self.settings)
         native = ContextualCompressionRetriever(
-            base_retriever=SnapshotRetriever(settings=self.settings, filters=self.filters),
+            base_retriever=SnapshotRetriever(settings=self.settings, filters=self.filters, builds=self.builds),
             base_compressor=CrossEncoderReranker(model=model, top_n=self.settings.top_k))
         return await native.ainvoke(query, config={'callbacks': run_manager.get_child()})
 
 
-def create_knowledge_retriever(settings, *, filters=None) -> BaseRetriever:
-    return KnowledgeRetriever(settings=settings, filters=validate_filters(filters))
+def create_knowledge_retriever(settings, *, filters=None, builds=None) -> BaseRetriever:
+    return KnowledgeRetriever(settings=settings, filters=validate_filters(filters), builds=builds)
 
 
 def render_evidence(docs, *, limit=20000):
     parts = []
     for doc in docs:
         m = doc.metadata
-        parts.append(f"片段：{doc.id}\n来源：{m.get('source_name', '')} ({m.get('source_uri', '')})\n"
+        parts.append(f"片段：{doc.id}\n来源：{m.get('source_name', '')} ({m.get('source_url') or m.get('source_uri', '')})\n"
                      f"文档：{m.get('document_id', '')}；版本：{m.get('document_version_id', '')}；构建：{m.get('index_version', '')}\n"
                      f"定位：{location(m)}\n{doc.page_content}")
     content = '\n\n'.join(parts) or '未找到相关证据。'

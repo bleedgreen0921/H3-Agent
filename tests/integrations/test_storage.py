@@ -164,3 +164,26 @@ def test_effect_survives_checkpoint_pointer_failure(tmp_path,monkeypatch):
             result = await session.run_turn('same input',input_id=input_id)
             assert calls == [1] and result.operations[0]['status'] == 'succeeded'
     asyncio.run(run())
+
+
+def test_progress_preserves_inbox_and_unknown_progress_does_not_block_final(tmp_path):
+    async def run():
+        from psycopg.types.json import Jsonb
+        c=config(tmp_path,sessions={'database_url':URL})
+        await setup(c)
+        row={'id':str(uuid4()),'binding':str(uuid4()),'body':{'text':'query','chat_id':'chat'}}
+        async with operation_storage(c.sessions) as store:
+            await store.conn.execute("INSERT INTO assistant_inbox(id,binding,body,status) VALUES(%s,%s,%s,'waiting')",(row['id'],row['binding'],Jsonb(row['body'])))
+            api=AsyncMock();api.send_text.side_effect=[OSError('progress uncertain'),{'message_id':'final'}]
+            worker=BotWorker(c,store,ProcessResources(Catalog()),api)
+            await worker.enqueue_reply(row,'同步中',progress=True)
+            await worker.enqueue_reply(row,'同步中',progress=True)
+            await worker.send_pending()
+            waiting=await (await store.conn.execute('SELECT status,body FROM assistant_inbox WHERE id=%s',(row['id'],))).fetchone()
+            assert waiting['status']=='waiting' and waiting['body']
+            await worker.enqueue_reply(row,'最终答案')
+            await worker.send_pending()
+            done=await (await store.conn.execute('SELECT status,body FROM assistant_inbox WHERE id=%s',(row['id'],))).fetchone()
+            assert done=={'status':'delivered','body':None}
+            assert api.send_text.await_count==2
+    asyncio.run(run())

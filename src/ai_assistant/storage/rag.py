@@ -4,6 +4,7 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from ai_assistant.knowledge import IngestionError, LeaseLost
+from ai_assistant.storage.knowledge import SourceStore, DDL as SOURCE_DDL
 
 DDL = (
     'CREATE EXTENSION IF NOT EXISTS vector',
@@ -41,7 +42,7 @@ DDL = (
 )
 
 
-class RagStore:
+class RagStore(SourceStore):
     def __init__(self, config):
         self.config = config
         self.engine = create_async_engine(config.database_url.get_secret_value(), hide_parameters=True)
@@ -49,19 +50,32 @@ class RagStore:
     async def close(self):
         await self.engine.dispose()
 
+    async def check_schema(self):
+        from ai_assistant.knowledge import KnowledgeError
+        async with self.engine.connect() as conn:
+            for name in ('rag_documents','rag_source_documents','rag_sync_runs','rag_query_runs'):
+                if not (await conn.execute(text('SELECT to_regclass(:name)'),dict(name=name))).scalar():
+                    raise KnowledgeError('知识库 schema 需要更新，请显式运行 rag init。')
+
     async def init(self):
         # This is the only schema-mutating entry point.
         async with self.engine.begin() as conn:
             await conn.execute(text('SELECT pg_advisory_xact_lock(741268501)'))
-            for statement in DDL:
+            for statement in DDL + SOURCE_DDL:
                 await conn.execute(text(statement))
         from langchain_classic.indexes import SQLRecordManager
         manager = SQLRecordManager('rag:init', engine=self.engine, async_mode=True)
         await manager.acreate_schema()
 
-    async def submit(self, *, source_uri, digest, snapshot, metadata, force=False):
+    async def submit(self, *, source_uri, digest, snapshot, metadata, force=False, sync_run=None):
         c = self.config
         async with self.engine.begin() as conn:
+            if sync_run:
+                current = (await conn.execute(text('''SELECT id FROM rag_sync_runs WHERE id=:id AND token=:token
+                    AND state='running' AND lease_until>clock_timestamp() AND deadline>clock_timestamp() FOR UPDATE'''),
+                    dict(id=sync_run['id'],token=sync_run['token']))).scalar()
+                if current is None:
+                    raise LeaseLost('过期同步任务不能提交索引。')
             doc = str(uuid4())
             await conn.execute(text('''INSERT INTO rag_documents(id,kb,source_uri) VALUES(:id,:kb,:uri)
                 ON CONFLICT(kb,source_uri) DO NOTHING'''), dict(id=doc, kb=c.knowledge_base_id, uri=source_uri))
@@ -199,9 +213,10 @@ class RagStore:
                 # key is selected exclusively from the validated whitelist.
                 clauses.append(f"v.metadata->>'{key}'=:{key}")
         async with self.engine.connect() as conn:
-            return list((await conn.execute(text(
+            builds = list((await conn.execute(text(
                 'SELECT d.active_build FROM rag_documents d JOIN rag_builds b ON b.id=d.active_build '
                 'JOIN rag_versions v ON v.id=b.version_id WHERE ' + ' AND '.join(clauses)), params)).scalars())
+        return await self.eligible_builds(builds, filters)
 
     async def delete(self, document_id):
         async with self.engine.begin() as conn:

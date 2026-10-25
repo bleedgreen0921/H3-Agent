@@ -83,6 +83,24 @@ class MCPMiddleware(AgentMiddleware):
                     status = 'unknown' if structured['status'] == 'unknown' else 'failed' if structured['status'] == 'rejected' else 'succeeded'
                 await context.operations.finish(operation['id'], status,
                     {'content': result.content} if isinstance(result, ToolMessage) else {'receipt': str(result)})
+            if not writing and context.knowledge_config is not None and getattr(result, 'status', '') != 'error':
+                paths = {'docx_v1_document_get': ('docx','document_id'),
+                         'docx_v1_document_rawContent': ('docx','document_id'),
+                         'wiki_v2_space_getNode': ('wiki','token')}
+                selected = paths.get(entry.original_name)
+                if selected:
+                    kind, key = selected
+                    args = request.tool_call['args']
+                    token = (args.get('path') or {}).get(key) or (args.get('params') or {}).get(key)
+                    if isinstance(token, str) and token.isalnum():
+                        from ai_assistant.knowledge.sync import register
+                        try:
+                            await register(context.knowledge_config, f'https://docs.feishu.cn/{kind}/{token}',
+                                           identity=entry.settings.identity)
+                        except Exception:
+                            # 读取结果仍有效；入库失败不能悄悄描述成成功。
+                            if isinstance(result, ToolMessage):
+                                result = result.model_copy(update={'content': str(result.content) + '\n应用状态：本次读取成功，但长期入库登记失败，请检查 knowledge_status。'})
             return result
         except ToolException as exc:
             return ToolMessage(content=str(exc), status='error', tool_call_id=request.tool_call['id'], name=entry.id)
