@@ -5,7 +5,7 @@ default_model = "deepseek"
 provider = "deepseek"
 model = "deepseek-flash"
 api_key = "REPLACE_DEEPSEEK_API_KEY"
-max_input_tokens = 24000
+max_input_tokens = 1048576  # DeepSeek 官方 1M 上下文；应用另保留 10% 余量
 [models.deepseek.parameters]
 timeout = 60
 max_retries = 0
@@ -21,6 +21,7 @@ call_timeout = 30
 # Must be outside workspace; ~ is expanded only for this explicit state path.
 state_dir = "~/.local/state/ai-assistant"
 [integrations.feishu]
+default_task_assignee = "none" # 主人私聊可显式改为 owner
 app_id = "cli_REPLACE"
 app_secret = "REPLACE_APP_SECRET"
 owner_open_id = "REPLACE_OWNER_OPEN_ID"
@@ -30,8 +31,8 @@ node_project = "deploy/feishu"
 [mcp.servers.feishu_user]
 transport = "feishu"
 identity = "user"
-tools = ["docx_v1_document_get", "docx_v1_document_rawContent", "docx_v1_document_create", "calendar_v4_calendar_list", "calendar_v4_calendarEvent_list", "calendar_v4_calendarEvent_create", "calendar_v4_calendarEvent_patch", "calendar_v4_calendarEvent_delete", "task_v2_task_list", "task_v2_task_create", "task_v2_task_patch", "wiki_v2_space_getNode"]
-write_tools = ["docx_v1_document_create", "calendar_v4_calendarEvent_create", "calendar_v4_calendarEvent_patch", "calendar_v4_calendarEvent_delete", "task_v2_task_create", "task_v2_task_patch"]
+tools = ["docx_v1_document_get", "docx_v1_document_rawContent", "docx_v1_document_create", "calendar_v4_calendar_list", "calendar_v4_calendarEvent_list", "calendar_v4_calendarEvent_create", "calendar_v4_calendarEvent_patch", "calendar_v4_calendarEvent_delete", "task_v2_task_get", "task_v2_task_list", "task_v2_task_create", "task_v2_task_patch", "task_v2_task_addMembers", "wiki_v2_space_getNode"]
+write_tools = ["docx_v1_document_create", "calendar_v4_calendarEvent_create", "calendar_v4_calendarEvent_patch", "calendar_v4_calendarEvent_delete", "task_v2_task_create", "task_v2_task_patch", "task_v2_task_addMembers"]
 allow_write = true
 [mcp.servers.feishu_bot]
 transport = "feishu"
@@ -50,11 +51,17 @@ write_tools = ["upload_drive", "upload_message_file"]
 allow_write = true
 [channels.feishu]
 enabled = false
+streaming = false
+stream_interval_seconds = 1
+card_max_bytes = 24576
 # Explicitly enable only your test group after applying the schema and OAuth login.
 # [channels.feishu.groups.oc_REPLACE.resources]
 # feishu_bot = ["oc_REPLACE"]
 
 [context]
+summary_tokens = 1500
+tool_result_tokens = 4000
+mcp_schema_tokens = 6000
 
 # 办公入口也可启用长期知识库。先填写数据库并显式执行 rag init。
 # [knowledge]
@@ -68,4 +75,9 @@ enabled = false
 
 # 个人风格文件路径相对本配置文件；删除此项即可使用默认风格。
 [agent]
+timezone = "Asia/Shanghai"
 persona_file = "PERSONA.md"
+
+# 先配置 sessions、context、knowledge 本地向量和飞书主人，再显式 memory init。
+[memory]
+enabled = false

@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS assistant_outbox (
 );
 ALTER TABLE assistant_outbox ADD COLUMN IF NOT EXISTS part integer NOT NULL DEFAULT 0;
 ALTER TABLE assistant_sessions ADD COLUMN IF NOT EXISTS last_input_id text;
+ALTER TABLE assistant_outbox ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'text';
+ALTER TABLE assistant_outbox ADD COLUMN IF NOT EXISTS display_version bigint NOT NULL DEFAULT 0;
+ALTER TABLE assistant_outbox ADD COLUMN IF NOT EXISTS delivered_version bigint NOT NULL DEFAULT 0;
+ALTER TABLE assistant_outbox ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE assistant_outbox ADD COLUMN IF NOT EXISTS final_state text NOT NULL DEFAULT 'stage';
 '''
 
 

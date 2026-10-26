@@ -30,6 +30,15 @@ class ToolContext:
     operations: object | None = None
     input_id: str | None = None
     knowledge_config: object | None = None
+    memory: object | None = None
+    checkpoint_history: object | None = None
+    mcp_schema_tokens: int = 6000
+    timezone: str = 'Asia/Shanghai'
+    owner_open_id: str | None = None
+    default_task_assignee: str = 'none'
+    resolved_datetimes: set[tuple[str, bool]] = field(default_factory=set, compare=False)
+    task_outcomes: dict = field(default_factory=dict, compare=False)
+    usage_store: object | None = None
 
 
 @asynccontextmanager

@@ -1,0 +1,12 @@
+{
+  "date": "2026-10-26",
+  "configured_max_input_tokens": 24000,
+  "usable_input_budget": 21600,
+  "estimated_checkpoint_tokens": 9659,
+  "last_main_reported_input_tokens": 8058,
+  "summary_reported_input_tokens": 3818,
+  "summary_reported_output_tokens": 1137,
+  "summary_target_tokens": 1500,
+  "checkpoint_error": "ContextBudgetError: 摘要为空或超出摘要预算，本轮未提交。",
+  "scope": "修改已有任务成功后，下一轮创建考试任务在加载工具后失败；未自动重放写入"
+}

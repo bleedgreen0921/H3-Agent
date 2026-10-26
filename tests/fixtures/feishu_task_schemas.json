@@ -1,0 +1,1155 @@
+{
+  "version": "0.5.1",
+  "tools": {
+    "task_v2_task_get": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "params": {
+          "type": "object",
+          "properties": {
+            "user_id_type": {
+              "type": "string",
+              "description": "User ID type"
+            }
+          },
+          "additionalProperties": false
+        },
+        "path": {
+          "type": "object",
+          "properties": {
+            "task_guid": {
+              "type": "string",
+              "description": "GUID of task to get"
+            }
+          },
+          "required": [
+            "task_guid"
+          ],
+          "additionalProperties": false
+        },
+        "useUAT": {
+          "type": "boolean",
+          "description": "Use user access token, otherwise use tenant access token"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "task_v2_task_create": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string",
+              "description": "Task summary. Empty is not allowed; supports up to 3000 utf8 characters"
+            },
+            "description": {
+              "type": "string",
+              "description": "Task description. Supports up to 3000 utf8 characters"
+            },
+            "due": {
+              "type": "object",
+              "properties": {
+                "timestamp": {
+                  "type": "string",
+                  "description": "The timestamp of the due time/date, in milliseconds from 1970-01-01 00:00:00 UTC. If the expiration time is a date, you need to convert the date to timestamp and set is_all_day = true"
+                },
+                "is_all_day": {
+                  "type": "boolean",
+                  "description": "Whether to due on a date. If set to true, only the date part of the timestamp will be parsed and stored"
+                }
+              },
+              "additionalProperties": false,
+              "description": "Task due time"
+            },
+            "origin": {
+              "type": "object",
+              "properties": {
+                "platform_i18n_name": {
+                  "type": "object",
+                  "properties": {
+                    "en_us": {
+                      "type": "string",
+                      "description": "English"
+                    },
+                    "zh_cn": {
+                      "type": "string",
+                      "description": "Chinese"
+                    },
+                    "zh_hk": {
+                      "type": "string",
+                      "description": "Chinese (Hong Kong)"
+                    },
+                    "zh_tw": {
+                      "type": "string",
+                      "description": "Chinese (Taiwan)"
+                    },
+                    "ja_jp": {
+                      "type": "string",
+                      "description": "Japanese"
+                    },
+                    "fr_fr": {
+                      "type": "string",
+                      "description": "French"
+                    },
+                    "it_it": {
+                      "type": "string",
+                      "description": "Italian"
+                    },
+                    "de_de": {
+                      "type": "string",
+                      "description": "German"
+                    },
+                    "ru_ru": {
+                      "type": "string",
+                      "description": "Russian"
+                    },
+                    "th_th": {
+                      "type": "string",
+                      "description": "Thai"
+                    },
+                    "es_es": {
+                      "type": "string",
+                      "description": "Spanish"
+                    },
+                    "ko_kr": {
+                      "type": "string",
+                      "description": "Korean"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "The name of the task import source to display on the task center details page. A multilingual version is required"
+                },
+                "href": {
+                  "type": "object",
+                  "properties": {
+                    "url": {
+                      "type": "string",
+                      "description": "The address corresponding to the source link, if filled in, must start with https://or http://.**Note**: If you need to adjust the link opening method on the PC, you can adjust it in **Settings** > **Efficiency** > **Open links** of the Lark client"
+                    },
+                    "title": {
+                      "type": "string",
+                      "description": "The title corresponding to the source link"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "Source of task association Platform details page link"
+                }
+              },
+              "additionalProperties": false,
+              "description": "The third-party platform source information associated with the task is used to display the source information in the App Task UI. Origin can only be set when task is created and not changable. Please refer to the \"How to use origin?\" section in [Feature Overview]"
+            },
+            "extra": {
+              "type": "string",
+              "description": "Any data that the caller can pass in attached to the task. It will be returned as it is when getting the task details. If it is binary data, it can be encoded with Base64"
+            },
+            "completed_at": {
+              "type": "string",
+              "description": "The completion time timestamp (ms) of the task. Fill in or set to 0 to create an unfinished task; fill in a specific timestamp to create a completed task"
+            },
+            "members": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "Member ID"
+                  },
+                  "type": {
+                    "type": "string",
+                    "description": "The type of member, which can be user or app"
+                  },
+                  "role": {
+                    "type": "string",
+                    "description": "Member roles, which can be \"assignee\" or \"follower\""
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "Member name"
+                  }
+                },
+                "required": [
+                  "id",
+                  "role"
+                ],
+                "additionalProperties": false
+              },
+              "description": "A list of task members, including assignees and followers. If not filled in, the task has no members. Support up to 50 members per request after de-duplication.Please refer to the \" How to represent members of tasks and tasklists?\" section in [Feature Overview]"
+            },
+            "repeat_rule": {
+              "type": "string",
+              "description": "Task repeat rule. If set, the task is \"recurring task\". Please refer to the \"How to Use Recurring Tasks? \" section in [Task Feature Overview]"
+            },
+            "custom_complete": {
+              "type": "object",
+              "properties": {
+                "pc": {
+                  "type": "object",
+                  "properties": {
+                    "href": {
+                      "type": "string",
+                      "description": "Customize the completed redirect url"
+                    },
+                    "tip": {
+                      "type": "object",
+                      "properties": {
+                        "en_us": {
+                          "type": "string",
+                          "description": "English"
+                        },
+                        "zh_cn": {
+                          "type": "string",
+                          "description": "Chinese"
+                        },
+                        "zh_hk": {
+                          "type": "string",
+                          "description": "Chinese (Hong Kong)"
+                        },
+                        "zh_tw": {
+                          "type": "string",
+                          "description": "Chinese (Taiwan)"
+                        },
+                        "ja_jp": {
+                          "type": "string",
+                          "description": "Japanese"
+                        },
+                        "fr_fr": {
+                          "type": "string",
+                          "description": "French"
+                        },
+                        "it_it": {
+                          "type": "string",
+                          "description": "Italian"
+                        },
+                        "de_de": {
+                          "type": "string",
+                          "description": "German"
+                        },
+                        "ru_ru": {
+                          "type": "string",
+                          "description": "Russian"
+                        },
+                        "th_th": {
+                          "type": "string",
+                          "description": "Thai"
+                        },
+                        "es_es": {
+                          "type": "string",
+                          "description": "Spanish"
+                        },
+                        "ko_kr": {
+                          "type": "string",
+                          "description": "Korean"
+                        }
+                      },
+                      "additionalProperties": false,
+                      "description": "Custom completed pop-up prompt"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "pc client side custom configuration (including mac and windows)"
+                },
+                "ios": {
+                  "type": "object",
+                  "properties": {
+                    "href": {
+                      "type": "string",
+                      "description": "Customize the completed redirect url"
+                    },
+                    "tip": {
+                      "type": "object",
+                      "properties": {
+                        "en_us": {
+                          "type": "string",
+                          "description": "English"
+                        },
+                        "zh_cn": {
+                          "type": "string",
+                          "description": "Chinese"
+                        },
+                        "zh_hk": {
+                          "type": "string",
+                          "description": "Chinese (Hong Kong)"
+                        },
+                        "zh_tw": {
+                          "type": "string",
+                          "description": "Chinese (Taiwan)"
+                        },
+                        "ja_jp": {
+                          "type": "string",
+                          "description": "Japanese"
+                        },
+                        "fr_fr": {
+                          "type": "string",
+                          "description": "French"
+                        },
+                        "it_it": {
+                          "type": "string",
+                          "description": "Italian"
+                        },
+                        "de_de": {
+                          "type": "string",
+                          "description": "German"
+                        },
+                        "ru_ru": {
+                          "type": "string",
+                          "description": "Russian"
+                        },
+                        "th_th": {
+                          "type": "string",
+                          "description": "Thai"
+                        },
+                        "es_es": {
+                          "type": "string",
+                          "description": "Spanish"
+                        },
+                        "ko_kr": {
+                          "type": "string",
+                          "description": "Korean"
+                        }
+                      },
+                      "additionalProperties": false,
+                      "description": "The pop-up prompt for customization completion is"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "Custom completion configuration of ios"
+                },
+                "android": {
+                  "type": "object",
+                  "properties": {
+                    "href": {
+                      "type": "string",
+                      "description": "Customize the completed redirect url"
+                    },
+                    "tip": {
+                      "type": "object",
+                      "properties": {
+                        "en_us": {
+                          "type": "string",
+                          "description": "English"
+                        },
+                        "zh_cn": {
+                          "type": "string",
+                          "description": "Chinese"
+                        },
+                        "zh_hk": {
+                          "type": "string",
+                          "description": "Chinese (Hong Kong)"
+                        },
+                        "zh_tw": {
+                          "type": "string",
+                          "description": "Chinese (Taiwan)"
+                        },
+                        "ja_jp": {
+                          "type": "string",
+                          "description": "Japanese"
+                        },
+                        "fr_fr": {
+                          "type": "string",
+                          "description": "French"
+                        },
+                        "it_it": {
+                          "type": "string",
+                          "description": "Italian"
+                        },
+                        "de_de": {
+                          "type": "string",
+                          "description": "German"
+                        },
+                        "ru_ru": {
+                          "type": "string",
+                          "description": "Russian"
+                        },
+                        "th_th": {
+                          "type": "string",
+                          "description": "Thai"
+                        },
+                        "es_es": {
+                          "type": "string",
+                          "description": "Spanish"
+                        },
+                        "ko_kr": {
+                          "type": "string",
+                          "description": "Korean"
+                        }
+                      },
+                      "additionalProperties": false,
+                      "description": "The pop-up prompt for customization completion is"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "Custom completion configuration of android"
+                }
+              },
+              "additionalProperties": false,
+              "description": "Task custom complete configuration. Please refer to the \"How to use custom completion?\" section in [Task Feature Overview]"
+            },
+            "tasklists": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "tasklist_guid": {
+                    "type": "string",
+                    "description": "Specifies that a task is created in a manifest that requires editable permissions to the manifest. If not filled in, the task will not be created in the manifest"
+                  },
+                  "section_guid": {
+                    "type": "string",
+                    "description": "The GUID of the custom group in the manifest is used to specify that the task is added to a specific group while creating the task in a manifest. If the GUID of the manifest is filled in, but the GUID of the group is not filled in, it will be automatically added to the default group of the manifest"
+                  }
+                },
+                "additionalProperties": false
+              },
+              "description": "Information on the list of tasks"
+            },
+            "client_token": {
+              "type": "string",
+              "description": "Idempotent token. If provided triggers the dempotent behavior. Please refer to the \"Idempotent Invocation\" section in [Feature Overview]"
+            },
+            "start": {
+              "type": "object",
+              "properties": {
+                "timestamp": {
+                  "type": "string",
+                  "description": "The timestamp of the start time/date in milliseconds from 1970-01-01 00:00:00. If the start time is a date, you need to convert the date to timestamp and set is_all_day = true.If you set both the start time and the deadline for the task, the start time must be < = deadline, and the is_all_day settings for the start/deadline must be the same"
+                },
+                "is_all_day": {
+                  "type": "boolean",
+                  "description": "Whether to start on a date. If set to true, only the date part of the timestamp will be parsed and stored"
+                }
+              },
+              "additionalProperties": false,
+              "description": "Task start time (ms). Please refer to the \"How to use start and due time?\" section in [Feature Overview]"
+            },
+            "reminders": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "relative_fire_minute": {
+                    "type": "number",
+                    "description": "The number of minutes of reminder time relative to the deadline. The value must be greater than or equal to 0 (this interface can only be used to set the reminder time before the deadline). For example, 30 means 30 minutes before the deadline; 0 means the deadline reminder"
+                  }
+                },
+                "required": [
+                  "relative_fire_minute"
+                ],
+                "additionalProperties": false
+              },
+              "description": "Task reminders. To set reminders, you must also set the deadline for the task. A task can only set a maximum of 1 reminder"
+            },
+            "mode": {
+              "type": "number",
+              "description": "Task completion mode, 1: countersign tasks; 2: or-sign tasks"
+            },
+            "is_milestone": {
+              "type": "boolean",
+              "description": "Is it a milestone task"
+            },
+            "custom_fields": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "guid": {
+                    "type": "string",
+                    "description": "Custom field guid"
+                  },
+                  "number_value": {
+                    "type": "string",
+                    "description": "A custom field value of a number type, fill in the string representation of a valid number, or unset it by an empty string"
+                  },
+                  "member_value": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "description": "Indicates the id of member"
+                        },
+                        "type": {
+                          "type": "string",
+                          "description": "Type of member"
+                        },
+                        "name": {
+                          "type": "string",
+                          "description": "Member name"
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "description": "Custom field values for member types. One or more users can be set (following the member format, only user type is supported). Only one value can be entered when the field settings is set to \"multi=false\"). Unset the value by an empty array"
+                  },
+                  "datetime_value": {
+                    "type": "string",
+                    "description": "Datetime custom field value, you can enter a timestamp (in ms) string representing the date. Unset the value by an empty string"
+                  },
+                  "single_select_value": {
+                    "type": "string",
+                    "description": "single select field value, fill in the option_guid of a field option. Set to empty string means to unset the value"
+                  },
+                  "multi_select_value": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "multi_select type field value, you can fill in one or more option_guid of this field. Unset the value by an empty array"
+                  },
+                  "text_value": {
+                    "type": "string",
+                    "description": "text custom field value, up to 3000 characters. Use empty string \"\" to unset the value"
+                  }
+                },
+                "required": [
+                  "guid"
+                ],
+                "additionalProperties": false
+              },
+              "description": "Custom field values. One or multiple custom field values can be set at the same time as the task is created. The custom field to set the value must be associated with the tasklist to which the task is added (which is specified by `tasklist`), otherwise it cannot be set.The value needs to be set to the corresponding field according to the field type.* When `type` is \"number\", the `number_value` field should be used to represent the value of number custom field;* When \"type\" is \"member\", the `member_value` field should be used to represent the value of member custom field;* When `type` is \"datetime\", `datetime_value` field should be used to represent the value of the datetime custom field.* When `type` is \"single_select\", the `single_select_value` field should be used to represent the value of single_select custom field.* When `type` is \"multi_select\", the `multi_select_value` field should be used to represent the value of multi_select custom field"
+            },
+            "docx_source": {
+              "type": "object",
+              "properties": {
+                "token": {
+                  "type": "string",
+                  "description": "Token of associated document of the task. Note: if using tenant_access_token request, the requesting bot must have document edit permission; if using user_access_token, the requesting user must have document editi permission"
+                },
+                "block_id": {
+                  "type": "string",
+                  "description": "The block_id of the document associated with the task. The block_id must exist in the document corresponding to the token, and the block_id must not be bound to other tasks"
+                }
+              },
+              "required": [
+                "token",
+                "block_id"
+              ],
+              "additionalProperties": false,
+              "description": "Set this field if you want to set the task source as a document.- It is mutually exclusive with extra. An error will be reported if they are set at the same time.- It is mutually exclusive with origin. An error is reported when both are set.- It is mutually exclusive with custom_complete. An error is reported if both are set"
+            }
+          },
+          "required": [
+            "summary"
+          ],
+          "additionalProperties": false
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "user_id_type": {
+              "type": "string",
+              "description": "User ID type"
+            }
+          },
+          "additionalProperties": false
+        },
+        "useUAT": {
+          "type": "boolean",
+          "description": "Use user access token, otherwise use tenant access token"
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "task_v2_task_patch": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "task": {
+              "type": "object",
+              "properties": {
+                "summary": {
+                  "type": "string",
+                  "description": "Task summary. When updating, empty is not allowed. Supports up to 3000 utf8 characters"
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Task description. Supports up to 3000 utf8 characters"
+                },
+                "due": {
+                  "type": "object",
+                  "properties": {
+                    "timestamp": {
+                      "type": "string",
+                      "description": "The timestamp of the due time/date in milliseconds from 1970-01-01 00:00:00. If the expiration time is a date, you need to convert the date to timestamp and set is_all_day = true"
+                    },
+                    "is_all_day": {
+                      "type": "boolean",
+                      "description": "Whether to due on a date. If set to true, only the date part of the timestamp will be parsed and stored"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "Task due time. Please refer to the \"How to use start and due time?\" section in [Feature Overview]"
+                },
+                "extra": {
+                  "type": "string",
+                  "description": "Any data that the caller can pass in attached to the task. It will be returned as is when the task details are obtained"
+                },
+                "completed_at": {
+                  "type": "string",
+                  "description": "The completion time of the task timestamp (ms)"
+                },
+                "repeat_rule": {
+                  "type": "string",
+                  "description": "Task repeat rule. If set, the task is \"recurring task\". Please refer to the \"How to Use Recurring Tasks? \" section in [Task Feature Overview]"
+                },
+                "custom_complete": {
+                  "type": "object",
+                  "properties": {
+                    "pc": {
+                      "type": "object",
+                      "properties": {
+                        "href": {
+                          "type": "string",
+                          "description": "Customize the completed redirect url"
+                        },
+                        "tip": {
+                          "type": "object",
+                          "properties": {
+                            "en_us": {
+                              "type": "string",
+                              "description": "English"
+                            },
+                            "zh_cn": {
+                              "type": "string",
+                              "description": "Chinese"
+                            },
+                            "zh_hk": {
+                              "type": "string",
+                              "description": "Chinese (Hong Kong)"
+                            },
+                            "zh_tw": {
+                              "type": "string",
+                              "description": "Chinese (Taiwan)"
+                            },
+                            "ja_jp": {
+                              "type": "string",
+                              "description": "Japanese"
+                            },
+                            "fr_fr": {
+                              "type": "string",
+                              "description": "French"
+                            },
+                            "it_it": {
+                              "type": "string",
+                              "description": "Italian"
+                            },
+                            "de_de": {
+                              "type": "string",
+                              "description": "German"
+                            },
+                            "ru_ru": {
+                              "type": "string",
+                              "description": "Russian"
+                            },
+                            "th_th": {
+                              "type": "string",
+                              "description": "Thai"
+                            },
+                            "es_es": {
+                              "type": "string",
+                              "description": "Spanish"
+                            },
+                            "ko_kr": {
+                              "type": "string",
+                              "description": "Korean"
+                            }
+                          },
+                          "additionalProperties": false,
+                          "description": "The pop-up prompt for customization completion is"
+                        }
+                      },
+                      "additionalProperties": false,
+                      "description": "pc client side custom configuration (including mac and windows)"
+                    },
+                    "ios": {
+                      "type": "object",
+                      "properties": {
+                        "href": {
+                          "type": "string",
+                          "description": "Customize the completed redirect url"
+                        },
+                        "tip": {
+                          "type": "object",
+                          "properties": {
+                            "en_us": {
+                              "type": "string",
+                              "description": "English"
+                            },
+                            "zh_cn": {
+                              "type": "string",
+                              "description": "Chinese"
+                            },
+                            "zh_hk": {
+                              "type": "string",
+                              "description": "Chinese (Hong Kong)"
+                            },
+                            "zh_tw": {
+                              "type": "string",
+                              "description": "Chinese (Taiwan)"
+                            },
+                            "ja_jp": {
+                              "type": "string",
+                              "description": "Japanese"
+                            },
+                            "fr_fr": {
+                              "type": "string",
+                              "description": "French"
+                            },
+                            "it_it": {
+                              "type": "string",
+                              "description": "Italian"
+                            },
+                            "de_de": {
+                              "type": "string",
+                              "description": "German"
+                            },
+                            "ru_ru": {
+                              "type": "string",
+                              "description": "Russian"
+                            },
+                            "th_th": {
+                              "type": "string",
+                              "description": "Thai"
+                            },
+                            "es_es": {
+                              "type": "string",
+                              "description": "Spanish"
+                            },
+                            "ko_kr": {
+                              "type": "string",
+                              "description": "Korean"
+                            }
+                          },
+                          "additionalProperties": false,
+                          "description": "The pop-up prompt for customization completion is"
+                        }
+                      },
+                      "additionalProperties": false,
+                      "description": "Custom completion configuration of ios"
+                    },
+                    "android": {
+                      "type": "object",
+                      "properties": {
+                        "href": {
+                          "type": "string",
+                          "description": "Customize the redirect redirect url"
+                        },
+                        "tip": {
+                          "type": "object",
+                          "properties": {
+                            "en_us": {
+                              "type": "string",
+                              "description": "English"
+                            },
+                            "zh_cn": {
+                              "type": "string",
+                              "description": "Chinese"
+                            },
+                            "zh_hk": {
+                              "type": "string",
+                              "description": "Chinese (Hong Kong)"
+                            },
+                            "zh_tw": {
+                              "type": "string",
+                              "description": "Chinese (Taiwan)"
+                            },
+                            "ja_jp": {
+                              "type": "string",
+                              "description": "Japanese"
+                            },
+                            "fr_fr": {
+                              "type": "string",
+                              "description": "French"
+                            },
+                            "it_it": {
+                              "type": "string",
+                              "description": "Italian"
+                            },
+                            "de_de": {
+                              "type": "string",
+                              "description": "German"
+                            },
+                            "ru_ru": {
+                              "type": "string",
+                              "description": "Russian"
+                            },
+                            "th_th": {
+                              "type": "string",
+                              "description": "Thai"
+                            },
+                            "es_es": {
+                              "type": "string",
+                              "description": "Spanish"
+                            },
+                            "ko_kr": {
+                              "type": "string",
+                              "description": "Korean"
+                            }
+                          },
+                          "additionalProperties": false,
+                          "description": "The pop-up prompt for customization completion is"
+                        }
+                      },
+                      "additionalProperties": false,
+                      "description": "Custom completion configuration of android"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "Task custom complete configuration. Please refer to the \"How to use custom completion?\" section in [Task Feature Overview]"
+                },
+                "start": {
+                  "type": "object",
+                  "properties": {
+                    "timestamp": {
+                      "type": "string",
+                      "description": "The timestamp of the start time/date in milliseconds from 1970-01-01 00:00:00. If the start time is a date, you need to convert the date to timestamp and set is_all_day=true"
+                    },
+                    "is_all_day": {
+                      "type": "boolean",
+                      "description": "Whether to start on a date. If set to true, only the date part of the timestamp will be parsed and stored"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "Task start time. Please refer to the \"How to use start and due time?\" section in [Feature Overview]"
+                },
+                "mode": {
+                  "type": "number",
+                  "description": "The completion mode of the task. 1: countersign task; 2: or-sign task"
+                },
+                "is_milestone": {
+                  "type": "boolean",
+                  "description": "Whether is a milestone task or not"
+                },
+                "custom_fields": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "guid": {
+                        "type": "string",
+                        "description": "Custom field guid"
+                      },
+                      "number_value": {
+                        "type": "string",
+                        "description": "A custom field value of a number type, fill in the string representation of a valild number. Or unset the value with an empty string"
+                      },
+                      "member_value": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "description": "Indicates the id of member"
+                            },
+                            "type": {
+                              "type": "string",
+                              "description": "Type of member"
+                            },
+                            "name": {
+                              "type": "string",
+                              "description": "Member name"
+                            }
+                          },
+                          "additionalProperties": false
+                        },
+                        "description": "Custom field values for member types. The one or multiple users can be added (following the member format, only user type is supported). Only one value can be passed in when the field setting is \"multi=false\". Value can be unset with an empty array"
+                      },
+                      "datetime_value": {
+                        "type": "string",
+                        "description": "Date type Custom field value, you can enter a millisecond string representing the date. Set to empty string means set to empty"
+                      },
+                      "single_select_value": {
+                        "type": "string",
+                        "description": "single_select field value, you can fill in a option_guid of the field options, or unset it with an empty string"
+                      },
+                      "multi_select_value": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "description": "multi_select type field value, you can fill in one or more option_guid of this field, or unset it with an empty array"
+                      },
+                      "text_value": {
+                        "type": "string",
+                        "description": "Text custom field value, up to 3000 characters. Use empty string \"\" to unset the value"
+                      }
+                    },
+                    "required": [
+                      "guid"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "description": "Custom field values. If updted, the value needs to be set to the corresponding field according to the field type.* When `type` is \"number\", the `number_value` field should be used to represent the value of number custom field;* When \"type\" is \"member\", the `member_value` field should be used to represent the value of member custom field;* When `type` is \"datetime\", `datetime_value` field should be used to represent the value of the datetime custom field.* When `type` is \"single_select\", the `single_select_value` field should be used to represent the value of single_select custom field.* When `type` is \"multi_select\", the `multi_select_value` field should be used to represent the value of multi_select custom field.* When `type` is \"text\", the `text_value` field should be used to represent the value of text custom field"
+                }
+              },
+              "additionalProperties": false,
+              "description": "To update the task data, just set the field that appears in the `update_fields`. If update_fields sets a field name to be changed, but no new value is set in the task, the field will be cleared"
+            },
+            "update_fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Set the fields that need to be modified<md-enum><md-enum-item key=\"summary\">Task summary</md-enum-item><md-enum-item key=\"description\">Task description</md-enum-item><md-enum-item key=\"start\">Task start time </md-enum-item><md-enum-item key=\"due\">Task due time </md-enum-item><md-enum-item key = \"completed_at\">Task completion time</md-enum-item><md-enum-item key=\"extra\">Task attached custom data</md-enum-item><md-enum-item key=\"custom_complete\"> Task custom completion config</md-enum-item><md-enum-item key=\"repeat_rule\">Task repeat rule</md-enum-item ></md-enum>"
+            }
+          },
+          "required": [
+            "update_fields"
+          ],
+          "additionalProperties": false
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "user_id_type": {
+              "type": "string",
+              "description": "User ID type"
+            }
+          },
+          "additionalProperties": false
+        },
+        "path": {
+          "type": "object",
+          "properties": {
+            "task_guid": {
+              "type": "string",
+              "description": "GUID of task to update"
+            }
+          },
+          "required": [
+            "task_guid"
+          ],
+          "additionalProperties": false
+        },
+        "useUAT": {
+          "type": "boolean",
+          "description": "Use user access token, otherwise use tenant access token"
+        }
+      },
+      "required": [
+        "data",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "task_v2_task_addMembers": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "object",
+          "properties": {
+            "members": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "Indicates the id of member"
+                  },
+                  "type": {
+                    "type": "string",
+                    "description": "Member type, optional value as follow* user* app"
+                  },
+                  "role": {
+                    "type": "string",
+                    "description": "The role of the member, optional value as follow* assignee* follower"
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "Member name"
+                  }
+                },
+                "required": [
+                  "id",
+                  "role"
+                ],
+                "additionalProperties": false
+              },
+              "description": "Members to add. Supports up to 50 members per request after de-duplication. For the format of member, please refer to the \" How to represent members of tasks and tasklists?\" section in [Feature Overview]"
+            },
+            "client_token": {
+              "type": "string",
+              "description": "Idempotent token. If provided, api supports idempotent invocation. Please refer to the \"Idempotent Invocation\" section in [Function Overview] for details"
+            }
+          },
+          "required": [
+            "members"
+          ],
+          "additionalProperties": false
+        },
+        "params": {
+          "type": "object",
+          "properties": {
+            "user_id_type": {
+              "type": "string",
+              "description": "User ID type"
+            }
+          },
+          "additionalProperties": false
+        },
+        "path": {
+          "type": "object",
+          "properties": {
+            "task_guid": {
+              "type": "string",
+              "description": "GUID of task to add members"
+            }
+          },
+          "required": [
+            "task_guid"
+          ],
+          "additionalProperties": false
+        },
+        "useUAT": {
+          "type": "boolean",
+          "description": "Use user access token, otherwise use tenant access token"
+        }
+      },
+      "required": [
+        "data",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "task_v2_task_list": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "params": {
+          "type": "object",
+          "properties": {
+            "page_size": {
+              "type": "number",
+              "description": "Number of tasks per page"
+            },
+            "page_token": {
+              "type": "string",
+              "description": "Page identifier. It is not filled in the first request, indicating traversal from the beginning when there will be more groups, the new page_token will be returned at the same time, and the next traversal can use the page_token to get more groups"
+            },
+            "completed": {
+              "type": "boolean",
+              "description": "Whether or not to filter by task completion. Filling in true means only completed tasks are listed; filling in false means only uncompleted tasks are listed. Fill in means no filtering"
+            },
+            "type": {
+              "type": "string",
+              "description": "The type of column task currently only supports \"my_tasks\", that is, \"Owned\" tasks"
+            },
+            "user_id_type": {
+              "type": "string",
+              "description": "User ID type"
+            }
+          },
+          "additionalProperties": false
+        },
+        "useUAT": {
+          "type": "boolean",
+          "description": "Use user access token, otherwise use tenant access token"
+        }
+      },
+      "additionalProperties": false
+    },
+    "contact_v3_user_get": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "params": {
+          "type": "object",
+          "properties": {
+            "user_id_type": {
+              "type": "string",
+              "enum": [
+                "open_id",
+                "union_id",
+                "user_id"
+              ],
+              "description": "User ID type"
+            },
+            "department_id_type": {
+              "type": "string",
+              "enum": [
+                "department_id",
+                "open_department_id"
+              ],
+              "description": "Specifies the type of department ID in query results. For a detailed introduction to department ID, please refer to [Department ID Description]. Options:department_id(Supports user-defined configured department IDs. The deleted department_id can be reused when customizing the configuration, so department_id is unique within the scope of the department that has not been deleted.),open_department_id(Department ID automatically generated by the system. The ID prefix is fixed to od- and is globally unique within the tenant.)"
+            }
+          },
+          "additionalProperties": false
+        },
+        "path": {
+          "type": "object",
+          "properties": {
+            "user_id": {
+              "type": "string",
+              "description": "User ID. The ID type is consistent with the query parameter `user_id_type`"
+            }
+          },
+          "required": [
+            "user_id"
+          ],
+          "additionalProperties": false
+        },
+        "useUAT": {
+          "type": "boolean",
+          "description": "Use user access token, otherwise use tenant access token"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "docx_v1_document_get": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "object",
+          "properties": {
+            "document_id": {
+              "type": "string",
+              "description": "The unique identification of the document. Click [here] to learn how to get `document_id`"
+            }
+          },
+          "required": [
+            "document_id"
+          ],
+          "additionalProperties": false
+        },
+        "useUAT": {
+          "type": "boolean",
+          "description": "Use user access token, otherwise use tenant access token"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "descriptions": {
+    "task_v2_task_addMembers": "[Feishu/Lark]-Tasks-Task-Add members to task-Add assignees or followers to a task. Multiple members can be added at once. The list of task members after adding is returned in the `task` field of response.* For the format of member, please refer to the \" How to represent members of tasks and tasklists?\" section in [Feature Overview] .* Available member types: \"user\", \"app\"* Available member roles: \"assigee\", \"follower\"* If the member to be added is already in the task, it is automatically ignored",
+    "task_v2_task_create": "[Feishu/Lark]-Tasks-Task-Create Task-This API can create a task. When creating a task, it supports filling in the basic information of the task (such as title, description, person in charge, etc.). In addition, it can also set the start time of the task, deadline reminders and other conditions. In addition, you can pass in the tasklists field to add new tasks to multiple lists.When creating a task, \"assignees\" and \"followers\" can be added by specifying `members` fields. For the format of member, please refer to the \" How to represent members of tasks and tasklists?\" section in [Feature Overview] .When setting task start or due time, you need to follow the specification and constraints of task time. Please refer to the \"How to use start and due time?\" section in [Feature Overview] .This api supports \"idempotent invocation\" by specifying `client_token` field. Please refer to the \"Idempotent Invocation\" section in [Feature Overview] .To create a subtask of a task, you need to use the [Create Subtask] API.Creating tasks allows setting custom field values at the same time. However, according to the authorization model of custom fields, only values of fields associated with tasklists can only be added to tasks. Please refer to [Custom Field Feature Overview] for details",
+    "task_v2_task_get": "[Feishu/Lark]-Tasks-Task-Get Task Details-This api is used to obtain task details, including task summary, description, time, members and other information",
+    "task_v2_task_list": "[Feishu/Lark]-Tasks-Task-List tasks-List all tasks of a specific type based on the calling identity. Paging is supported.Currently, only tasks of \"my_tasks\" are supported. The returned task data is in the order in which the tasks are list by \"custom\" order in the \"Owned\" in Task Center",
+    "task_v2_task_patch": "[Feishu/Lark]-Tasks-Task-Patch Task-This api is used to update the summary, description, due, etc. of a task.To update a task, fill in all the field names to be updated in the `update_fields` field, and fill in the new value of the field to update in the `task` field. If the field name to be changed is included in the `update_fields`, but no new value is set in `task`, the field will be cleaned to empty. For update api specification, please refer to the \"About Resource Update\" section in [Feature Overview] .This api can be used to complete tasks by updating `completed_at` of task to a timestamp and restore tasks to uncompleted by setting `completed_at` to 0 . However, at present, regardless of whether the task itself is a countersign task or a or-sign task, the oapi can only support overall completion\" of the task, and does not support individual completion. Besides, cannot complete a task that has bee completed. But a completed task can be restored to uncompleted by setting `completed_at` to \"0\".If you want to update the repeat_rule of a task, you must not also update the `completed_at` of the task or unset the due. See \"How to use recuring rule of task?\" section in [Tasklist Features Overview] .Task member/reminder/tasklist data cannot be updated by this api.* To add/remove task members, use [Add Task Member]And [Remove Task Member].* To modify the task reminder, use the [Add Task Reminder] and [Remove Task Reminder].* To change the tasklist where the task belongs to, use [Add Task to Tasklist] and [Remove Task from Tasklist]",
+    "contact_v3_user_get": "[Feishu/Lark]-Contacts-User-Obtain single user's information-Call this interface to obtain the information of a user in the address book, including user ID, name, email, mobile phone number, status, department and other information",
+    "docx_v1_document_get": "[Feishu/Lark]-Docs-Document-Document-Obtain the basic information of a document-Obtains the document title and the latest revision ID"
+  }
+}

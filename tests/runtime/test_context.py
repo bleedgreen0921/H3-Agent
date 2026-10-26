@@ -73,10 +73,9 @@ def test_empty_summary_and_unknown_error_propagate(tmp_path):
         for output, error in [('', ContextBudgetError), ('FAIL', RuntimeError)]:
             summary = ScriptedModel(responses=[AIMessage(content=output)])
             s = managed(tmp_path, [AIMessage(content='答' * 300)], summary=summary)
-            await s.run_turn('问' * 300)
-            await s.run_turn('问' * 300)
             with pytest.raises(error):
-                await s.run_turn('问' * 300)
+                for _ in range(4):
+                    await s.run_turn('问' * 300)
             # One attempt, no framework summary retry.
             assert summary.i == (1 if output == 'FAIL' else 0)
     asyncio.run(run())
@@ -190,3 +189,94 @@ def test_selected_summary_profile_clients_usage_and_retry_parameters(tmp_path, m
     asyncio.run(run())
     assert opened == [('main', {'max_retries': 2}), ('summary', {'max_retries': 1, 'num_predict': 1000})]
     assert closed == ['summary', 'main']
+
+
+def test_fifty_mixed_turns_keep_constraints_pairs_and_bound_input(tmp_path):
+    async def run():
+        @tool
+        async def lookup():
+            """Read a bounded fixture."""
+            return 'resource_id=fixture; status=succeeded; ' + '资料' * 60
+        summary = ScriptedModel(responses=[AIMessage(content='目标：持续维护项目。约束：不得自动重放写入。资源 ID fixture。')])
+        responses = []
+        for i in range(50):
+            responses.extend([call('lookup', str(i)), AIMessage(content='已确认 ' + '答' * 100)])
+        session = managed(tmp_path, responses, tools=[lookup], summary=summary, budget=2400)
+        summaries = 0
+        for i in range(50):
+            turn = await session.run_turn('目标持续维护项目；不得自动重放写入。' + str(i) + '问' * 100)
+            validate_tool_pairs(turn.messages)
+            summaries += turn.usage.summary_model_calls
+            assert count_tokens(turn.messages) < 2400
+            assert '不得自动重放写入' in ' '.join(m.text for m in turn.messages)
+        assert summaries > 0
+    asyncio.run(run())
+
+
+def test_oversized_current_request_is_not_summarized_away(tmp_path):
+    async def run():
+        summary = ScriptedModel(responses=[AIMessage(content='FAIL')])
+        session = managed(tmp_path, [AIMessage(content='unexpected')], summary=summary)
+        with pytest.raises(ContextBudgetError, match='当前请求'):
+            await session.run_turn('大' * 2000)
+        assert session._complete is None
+    asyncio.run(run())
+
+
+def test_million_context_keeps_large_history_and_read_bodies():
+    """百万窗口有空间时，不能仍把所有工具正文合计压到 4K。"""
+    from langchain.agents.middleware.types import ModelRequest
+    body = '合成资料' * 20000
+    messages = [HumanMessage('读取历史资料'), call('read', 'long-read'),
+                ToolMessage(body, tool_call_id='long-read', name='read'),
+                AIMessage('资料已读取'), HumanMessage('根据此前资料回答')]
+    request = ModelRequest(model=ScriptedModel(responses=[AIMessage('ok')]),
+                           messages=messages, tools=[])
+    fitted = InputBudgetMiddleware(1048576).prepare(request)
+    assert count_tokens(fitted.messages) > 24000
+    assert fitted.messages == messages
+    assert fitted.messages[2].content == body
+
+
+def test_summary_target_is_not_a_hard_output_limit(tmp_path):
+    """复现服务只报告 1137 token、字符估算却超过 1500 的合法摘要。"""
+    async def run():
+        import json
+        failure = json.loads((Path(__file__).parents[1] / 'fixtures/context_summary_failure.json').read_text())
+        input_tokens = failure['summary_reported_input_tokens']
+        output_tokens = failure['summary_reported_output_tokens']
+        summary = ScriptedModel(responses=[AIMessage('摘要' * 900, usage_metadata={
+            'input_tokens': input_tokens, 'output_tokens': output_tokens,
+            'total_tokens': input_tokens + output_tokens})])
+        session = managed(tmp_path, [AIMessage('答' * 4000), AIMessage('后续回答')],
+                          summary=summary, budget=10000)
+        await session.run_turn('旧请求' + '问' * 4000)
+        turn = await session.run_turn('新的业务请求')
+        assert turn.usage.summary_model_calls == 1
+        assert any(is_summary(m) and '摘要' * 900 in m.content for m in turn.messages)
+        assert turn.messages[-1].content == '后续回答'
+    asyncio.run(run())
+
+
+def test_summary_still_cannot_exceed_the_complete_request_budget(tmp_path):
+    async def run():
+        summary = ScriptedModel(responses=[AIMessage('摘' * 9500)])
+        session = managed(tmp_path, [AIMessage('答' * 4000), AIMessage('不会执行')],
+                          summary=summary, budget=10000)
+        await session.run_turn('问' * 4000)
+        complete = session._complete
+        with pytest.raises(ContextBudgetError, match='必要上下文'):
+            await session.run_turn('新的业务请求')
+        assert session._complete == complete
+    asyncio.run(run())
+
+
+def test_million_context_does_not_summarize_at_old_24k_threshold(tmp_path):
+    async def run():
+        session = managed(tmp_path, [AIMessage('已读取'), AIMessage('正常回答')], budget=1048576)
+        await session.run_turn('唯一合成资料' * 10000)
+        turn = await session.run_turn('继续讨论之前的资料')
+        assert turn.usage.summary_model_calls == 0
+        assert not any(is_summary(m) for m in turn.messages)
+        assert any(m.content == '唯一合成资料' * 10000 for m in turn.messages)
+    asyncio.run(run())

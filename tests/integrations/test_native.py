@@ -30,9 +30,10 @@ FIXTURE = str(Path(__file__).with_name('fixture_server.py'))
 
 def test_directory_bounds_description_without_changing_native_schema():
     settings = MCPServer(transport='http', url='http://fixture', tools=['read'])
-    native = SimpleNamespace(description='D' * 20000)
+    from langchain_core.tools import StructuredTool
+    native = StructuredTool.from_function(name='read', description='D' * 20000, func=lambda: '')
     entry = Entry('id', 'fixture', 'read', 'digest', native, settings)
-    assert len(Catalog([entry]).search()['items'][0]['description']) == 240
+    assert len(Catalog([entry]).search()['items'][0]['description']) == 80
     assert len(native.description) == 20000
 
 

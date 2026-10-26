@@ -144,3 +144,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("未检查连通性", result.stdout)
         self.assertNotIn("SENTINEL_PRIVATE_KEY", result.stdout + result.stderr)
+
+
+def test_agent_timezone_and_task_default_validation():
+    import pytest
+    from ai_assistant.config import AgentSettings
+    from ai_assistant.integrations.config import FeishuConfig
+    from pydantic import ValidationError
+    assert AgentSettings().timezone == 'Asia/Shanghai'
+    with pytest.raises(ValidationError):
+        AgentSettings(timezone='Invalid/Zone')
+    assert FeishuConfig(app_id='cli_fixture', app_secret='fixture', owner_open_id='fixture').default_task_assignee == 'none'
+    with pytest.raises(ValidationError):
+        FeishuConfig(app_id='cli_fixture', app_secret='fixture', owner_open_id='fixture', default_task_assignee='anyone')

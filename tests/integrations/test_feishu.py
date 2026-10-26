@@ -17,7 +17,7 @@ def test_bot_failure_message_distinguishes_context_and_hides_details():
     from ai_assistant.interfaces.feishu import failure_message
     from ai_assistant.agents.context import ContextBudgetError
     message = failure_message(ContextBudgetError('private-token'))
-    assert '上下文' in message and '/new' in message
+    assert '上下文' in message and '分页' in message
     assert 'private-token' not in message
     assert '超时' in failure_message(TimeoutError('private-token'))
     assert 'private-token' not in failure_message(RuntimeError('private-token'))

@@ -40,10 +40,6 @@ def _print_result(result) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m ai_assistant")
     commands = parser.add_subparsers(dest="command", required=True)
-    chat_parser = commands.add_parser("chat", help="Interactive assistant")
-    chat_parser.add_argument("--config", default="assistant.toml", metavar="PATH")
-    chat_parser.add_argument("--model", metavar="NAME")
-    chat_parser.add_argument("--session", metavar="SESSION_ID")
     config_parser = commands.add_parser("config", help="Application configuration")
     config_commands = config_parser.add_subparsers(dest="action", required=True)
     check = config_commands.add_parser("check", help="Validate configuration without network access")
@@ -64,12 +60,23 @@ def main(argv: list[str] | None = None) -> int:
     add_skills(commands)
     from ai_assistant.integrations.cli import add_commands as add_mcp
     add_mcp(commands)
+    from ai_assistant.interfaces.memory import add_commands as add_memory
+    add_memory(commands)
     feishu_parser = commands.add_parser("feishu", help="Feishu owner bot")
     feishu_commands = feishu_parser.add_subparsers(dest="action", required=True)
     feishu_commands.add_parser("serve").add_argument("--config", default="assistant.toml")
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
+        if args.command == "memory":
+            from ai_assistant.interfaces.memory import execute
+            try:
+                return asyncio.run(execute(config, args))
+            except ConfigError:
+                raise
+            except Exception:
+                print("记忆管理失败：请检查依赖、数据库与显式初始化状态。", file=sys.stderr)
+                return 2
         if args.command == "feishu":
             from ai_assistant.interfaces.feishu import serve
             try:
@@ -120,15 +127,6 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
         if args.model is not None and args.model not in config.models:
             raise ConfigError("Unknown model profile.")
-        if args.command == "chat":
-            from ai_assistant.interfaces.chat import chat
-            try:
-                return asyncio.run(chat(config, args.model, session_id=args.session))
-            except ConfigError:
-                raise
-            except (ImportError, OSError, ValueError):
-                print("助理启动失败：请检查可选依赖及工作区。", file=sys.stderr)
-                return 2
         if args.command == "model":
             from ai_assistant.llm.checks import check_model
             selected = config.default_model if args.model is None else args.model

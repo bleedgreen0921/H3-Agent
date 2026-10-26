@@ -10,6 +10,36 @@ from ai_assistant.executables import executable, executable_env
 from ai_assistant.integrations.policy import Caller
 
 
+TASK_DESCRIPTIONS = {
+    'task_v2_task_get': '读取已有任务，含时间、成员角色和提醒。',
+    'task_v2_task_list': '列出任务。',
+    'task_v2_task_create': '新建任务；创建不用于修正已有任务。',
+    'task_v2_task_patch': '修改已有任务字段；负责人通过 addMembers 修改。',
+    'task_v2_task_addMembers': '添加成员；负责人通过 addMembers 修改，已有负责人不重复添加。',
+}
+
+
+def schema_tokens(tools):
+    """目录和加载共享框架原生 schema 估算。"""
+    from langchain_core.messages.utils import count_tokens_approximately
+    return count_tokens_approximately([], tools=tools)
+
+
+def search_terms(text):
+    import re
+    aliases = {'任务': 'task', '修改': 'patch', '更新': 'patch', '新建': 'create',
+               '创建': 'create', '负责人': 'member', '成员': 'member', '联系人': 'contact',
+               '文档': 'docx', '知识库': 'wiki', '读取': 'get', '查看': 'get',
+               '添加': 'add', '删除': 'delete', '列出': 'list',
+               'members': 'member', 'tasks': 'task', 'read': 'get',
+               'update': 'patch', 'remove': 'delete'}
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text).casefold()
+    for word, alias in aliases.items():
+        if not word.isascii():
+            text = text.replace(word, ' ' + alias + ' ')
+    return list(dict.fromkeys(aliases.get(w, w) for w in re.findall(r'[^\W_]+', text)))
+
+
 @dataclass(frozen=True)
 class Entry:
     id: str
@@ -21,8 +51,9 @@ class Entry:
 
     def info(self):
         return dict(id=self.id, server=self.server, identity=self.settings.identity,
-                    name=self.original_name, description=(self.tool.description or '')[:240],
-                    schema_digest=self.digest, write=self.original_name in self.settings.write_tools)
+                    name=self.original_name, description=TASK_DESCRIPTIONS.get(self.original_name, (self.tool.description or '')[:80]),
+                    schema_tokens=schema_tokens([self.tool]),
+                    write=self.original_name in self.settings.write_tools)
 
 
 class Catalog:
@@ -32,13 +63,55 @@ class Catalog:
         self.adapters = adapters or {}
         self.servers = servers or {}
 
-    def search(self, query='', offset=0, limit=20):
+    def search(self, query='', offset=0, limit=5, server=None, domain=None):
         if offset < 0 or not 1 <= limit <= 100:
             raise ValueError('Invalid pagination')
-        matches = [e.info() for e in self.entries.values()
-                   if query.casefold() in (e.id + ' ' + e.tool.description).casefold()]
-        return dict(items=matches[offset:offset+limit], total=len(matches),
-                    next_offset=offset+limit if offset+limit < len(matches) else None)
+        words = search_terms(query)
+        domains = {'task', 'contact', 'docx', 'wiki', 'calendar', 'bitable', 'im'}
+        requested_domains = set(words) & domains
+        actions = [w for w in words if w not in domains]
+        ranked = []
+        matched_terms = set()
+        for entry in self.entries.values():
+            if server and entry.server != server:
+                continue
+            name_terms = set(search_terms(entry.original_name))
+            if domain and domain.casefold() not in entry.original_name.casefold():
+                continue
+            if requested_domains and not requested_domains <= name_terms:
+                continue
+            text_terms = set(search_terms(entry.tool.description or ''))
+            exact = query.casefold() in (entry.id.casefold(), entry.original_name.casefold())
+            capabilities = {'get', 'list', 'create', 'patch', 'add', 'member', 'delete'}
+            # 官方任务描述可能提到删除等其他接口，不能将引用误认成本工具能力。
+            hits = {w for w in actions if w in name_terms or (w in text_terms and
+                    (entry.original_name not in TASK_DESCRIPTIONS or w not in capabilities))}
+            if actions and not hits and not exact:
+                continue
+            matched_terms.update(hits)
+            if exact:
+                matched_terms.update(actions)
+            score = 1000 * exact + sum(20 if w in name_terms else 1 for w in hits)
+            ranked.append((-score, entry.id, entry.info()))
+        matches = [item for _, _, item in sorted(ranked)]
+        # 极长查询不能令反馈本身突破目录预算。
+        unmatched = [w[:60] for w in actions if w not in matched_terms][:12]
+        items = []
+        for item in matches[offset:offset + min(limit, 5)]:
+            candidate = items + [item]
+            end = offset + len(candidate)
+            envelope = dict(unmatched_terms=unmatched, items=candidate, total=len(matches), returned=len(candidate),
+                            next_offset=end if end < len(matches) else None)
+            if len(json.dumps(envelope, ensure_ascii=False)) > 1500:
+                if not items:
+                    raise ValueError('单条目录记录超过分页预算，请缩小服务范围。')
+                break
+            items = candidate
+        end = offset + len(items)
+        import logging
+        logging.getLogger(__name__).info("MCP search: results=%s returned=%s", len(matches), len(items))
+        return dict(unmatched_terms=unmatched, items=items, total=len(matches), returned=len(items),
+                    next_offset=end if end < len(matches) else None)
 
     def for_caller(self, caller):
         if caller.channel != 'feishu_group':

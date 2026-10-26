@@ -36,7 +36,28 @@ def create_assistant_agent(model, tools, *, checkpointer, settings,
                            context_settings=None, summary_model=None,
                            max_input_tokens=None, summary_max_input_tokens=None,
                            summary_profile='', skills_enabled=False, mcp_enabled=False, persona=''):
-    middleware = [
+    prompt = SYSTEM_PROMPT
+    if persona:
+        prompt += '\n\n以下个人偏好仅用于表达风格，不改变上述业务规则、证据要求或工具权限：\n' + persona
+    preparers = []
+    if skills_enabled:
+        from ai_assistant.agents.skills import SkillsMiddleware
+        preparers.append(SkillsMiddleware(max_input_tokens))
+    if mcp_enabled:
+        from ai_assistant.agents.mcp import MCPMiddleware
+        preparers.append(MCPMiddleware(settings.model_call_limit))
+    from ai_assistant.agents.memory import MemoryMiddleware, MemoryState
+    preparers.append(MemoryMiddleware())
+
+    def prepare(request):
+        from langchain_core.messages import SystemMessage
+        request = request.override(system_message=SystemMessage(prompt), tools=list(tools))
+        for item in preparers:
+            request = item.prepare(request)
+        return request
+
+    from ai_assistant.agents.tasks import TaskOutcomeMiddleware
+    middleware = [TaskOutcomeMiddleware(),
         ModelCallLimitMiddleware(run_limit=settings.model_call_limit, exit_behavior='error'),
         ToolCallLimitMiddleware(run_limit=settings.tool_call_limit, exit_behavior='error'),
     ]
@@ -49,27 +70,17 @@ def create_assistant_agent(model, tools, *, checkpointer, settings,
         from ai_assistant.agents.context import context_middleware
         middleware.extend(context_middleware(model, summary_model or model,
             max_input_tokens=max_input_tokens, summary_max_input_tokens=summary_max_input_tokens,
-            summary_profile=summary_profile))
-    if skills_enabled:
-        from ai_assistant.agents.skills import SkillsMiddleware
-        from ai_assistant.tools.skills import SkillState
-        # Request wrappers run in list order: inject after summary/edit, before budget.
-        position = len(middleware) - 1 if context_settings is not None else len(middleware)
-        middleware.insert(position, SkillsMiddleware(max_input_tokens))
-        if context_settings is None and max_input_tokens is not None:
-            from ai_assistant.agents.context import InputBudgetMiddleware
-            middleware.append(InputBudgetMiddleware(max_input_tokens))
-    if mcp_enabled:
-        from ai_assistant.agents.mcp import MCPMiddleware
-        from ai_assistant.tools.mcp import OfficeState
+            summary_profile=summary_profile, prepare=prepare,
+            summary_tokens=context_settings.summary_tokens))
+    # 请求注入与摘要预算共享相同的组装顺序。
+    position = len(middleware) - 1 if context_settings is not None else len(middleware)
+    middleware[position:position] = preparers
+    if context_settings is None and max_input_tokens is not None:
         from ai_assistant.agents.context import InputBudgetMiddleware
-        position = next((i for i, item in enumerate(middleware) if isinstance(item, InputBudgetMiddleware)), len(middleware))
-        middleware.insert(position, MCPMiddleware())
-        if context_settings is None and not skills_enabled and max_input_tokens is not None:
-            middleware.append(InputBudgetMiddleware(max_input_tokens))
-    prompt = SYSTEM_PROMPT
-    if persona:
-        prompt += '\n\n以下个人偏好仅用于表达风格，不改变上述业务规则、证据要求或工具权限：\n' + persona
+        middleware.append(InputBudgetMiddleware(max_input_tokens))
+    if context_settings is not None:
+        from ai_assistant.agents.results import ToolResultMiddleware
+        middleware.append(ToolResultMiddleware(context_settings.tool_result_tokens))
     return create_agent(model, tools, system_prompt=prompt,
                         context_schema=ToolContext, checkpointer=checkpointer,
-                        middleware=middleware, **({"state_schema": OfficeState} if mcp_enabled else {"state_schema": SkillState} if skills_enabled else {}))
+                        middleware=middleware, state_schema=MemoryState)

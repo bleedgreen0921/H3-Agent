@@ -62,6 +62,8 @@ class SessionRepository:
             'SELECT version FROM assistant_session_schema WHERE singleton = true')).fetchone()
         if not row or row['version'] != 2:
             raise SessionError('Unsupported session schema; run session init with a compatible application.')
+        await self.execute('SELECT call_id FROM assistant_model_usage LIMIT 0')
+        await self.execute('SELECT enabled_at FROM assistant_usage_schema LIMIT 0')
         # Also fail before any model calls if native Saver initialization is missing.
         for table in ('checkpoints', 'checkpoint_blobs', 'checkpoint_writes', 'checkpoint_migrations'):
             await self.execute(f'SELECT 1 FROM {table} LIMIT 0')
@@ -191,6 +193,11 @@ async def session_storage(settings, *, initialize=False):
                                 if row and row['version'] not in (1, 2):
                                     raise SessionError('Unsupported session schema version.')
                                 await repo.execute(DDL)
+                                from ai_assistant.storage.usage import DDL as USAGE_DDL
+                                await repo.execute(USAGE_DDL)
+                                await repo.execute('CREATE INDEX IF NOT EXISTS assistant_model_usage_session ON assistant_model_usage(session_id)')
+                                await repo.execute('CREATE TABLE IF NOT EXISTS assistant_usage_schema (singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), enabled_at timestamptz NOT NULL DEFAULT clock_timestamp())')
+                                await repo.execute('INSERT INTO assistant_usage_schema(singleton) VALUES(true) ON CONFLICT DO NOTHING')
                                 await repo.execute('ALTER TABLE assistant_sessions ADD COLUMN IF NOT EXISTS pending jsonb')
                                 await repo.execute('ALTER TABLE assistant_sessions ADD COLUMN IF NOT EXISTS pending_input text')
                                 await repo.execute('ALTER TABLE assistant_sessions DROP CONSTRAINT IF EXISTS assistant_sessions_status_check')

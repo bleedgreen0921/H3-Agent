@@ -2,9 +2,9 @@
 default_model = "deepseek"
 [models.deepseek]
 provider = "deepseek"
-model = "REPLACE_MODEL_ID"
+model = "deepseek-flash"
 api_key = "REPLACE_API_KEY"
-max_input_tokens = 24000
+max_input_tokens = 1048576  # DeepSeek 官方 1M 上下文；应用另保留 10% 余量
 [models.deepseek.parameters]
 timeout = 60
 max_retries = 0
@@ -14,6 +14,9 @@ type = "disabled"
 [sessions]
 database_url = "postgresql://user@127.0.0.1:55432/H3-Agent"
 [context]
+summary_tokens = 1500
+tool_result_tokens = 4000
+mcp_schema_tokens = 6000
 [workspace]
 root = "."
 [tools.files]
@@ -68,4 +71,9 @@ enabled = false
 
 # 个人风格文件路径相对本配置文件；删除此项即可使用默认风格。
 [agent]
+timezone = "Asia/Shanghai"
 persona_file = "PERSONA.md"
+
+# 先配置 sessions、context、knowledge 本地向量和飞书主人，再显式 memory init。
+[memory]
+enabled = false

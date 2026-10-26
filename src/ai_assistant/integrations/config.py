@@ -46,6 +46,7 @@ class MCPConfig(Settings):
 
 
 class FeishuConfig(Settings):
+    default_task_assignee: Literal['none', 'owner'] = 'none'
     app_id: str = Field(pattern=r'^cli_[A-Za-z0-9]+$')
     app_secret: SecretStr
     owner_open_id: str = Field(min_length=1)
@@ -64,6 +65,9 @@ class GroupConfig(Settings):
 
 class FeishuChannel(Settings):
     enabled: bool = False
+    streaming: bool = False
+    stream_interval_seconds: float = Field(default=1, ge=0.1, allow_inf_nan=False)
+    card_max_bytes: int = Field(default=24576, ge=1024, le=24576)
     groups: dict[str, GroupConfig] = Field(default_factory=dict)
 
 

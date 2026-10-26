@@ -12,7 +12,12 @@ def merge_skills(current, updates):
 from ai_assistant.tools.context import ToolContext
 
 
+def merge_outcome(current, updates):
+    return {} if updates is None else {**(current or {}), **updates}
+
+
 class OfficeState(AgentState):
+    turn_outcome: Annotated[dict | None, merge_outcome]
     active_skills: Annotated[dict[str, str | None], merge_skills]
     active_mcp_tools: Annotated[dict[str, str | None], merge_skills]
 
@@ -26,20 +31,51 @@ def catalog(runtime):
 @tool
 async def search_mcp_tools(runtime: ToolRuntime[ToolContext], query: str = '',
                            offset: Annotated[int, Field(ge=0)] = 0,
-                           limit: Annotated[int, Field(ge=1, le=100)] = 10) -> dict:
+                           limit: Annotated[int, Field(ge=1, le=100)] = 5, server: str | None = None,
+                           domain: str | None = None) -> dict:
     """Search the fixed MCP directory by name, description or domain, with explicit pagination."""
-    return catalog(runtime).search(query, offset, limit)
+    return catalog(runtime).search(query, offset, limit, server=server, domain=domain)
 
 
 @tool
 async def load_mcp_tools(tool_ids: list[str], runtime: ToolRuntime[ToolContext]) -> Command:
-    """Activate MCP tools for subsequent model requests. This grants no additional permissions."""
+    """Select the complete MCP tool set for subsequent requests; releases previous selections. This grants no additional permissions."""
     directory = catalog(runtime)
     if any(key not in directory.entries for key in tool_ids):
         raise ToolException('Unknown MCP tool ID; search the current directory.')
-    updates = {key: directory.entries[key].digest for key in tool_ids}
+    import json
+    import logging
+    from ai_assistant.integrations.mcp import schema_tokens
+    budget = getattr(runtime.context, 'mcp_schema_tokens', 6000)
+    keys = sorted(set(tool_ids))
+    selected = [directory.entries[key].tool for key in keys]
+    total = schema_tokens(selected)
+    costs = [{'id': key, 'schema_tokens': schema_tokens([directory.entries[key].tool])} for key in keys]
+    logging.getLogger(__name__).info('MCP load: tools=%s tokens=%s budget=%s',
+        [(directory.entries[item['id']].original_name, item['schema_tokens']) for item in costs], total, budget)
+    if total > budget:
+        feedback = {'error': 'schema 超限，请分批选择工具；原激活集合未改变',
+                    'budget': budget, 'selected_tokens': total, 'costs': []}
+        reduced = [k for k in keys if directory.entries[k].original_name != 'task_v2_task_create']
+        names = {directory.entries[k].original_name for k in keys}
+        if {'task_v2_task_get', 'task_v2_task_patch', 'task_v2_task_addMembers', 'task_v2_task_create'} <= names:
+            suggested = [k for k in reduced if directory.entries[k].original_name in {
+                'task_v2_task_get', 'task_v2_task_patch', 'task_v2_task_addMembers'}]
+            if schema_tokens([directory.entries[k].tool for k in suggested]) <= budget:
+                feedback.update(suggestion='修改已有任务请移除 create', suggested_tool_ids=suggested)
+        for cost in costs:
+            candidate = {**feedback, 'costs': feedback['costs'] + [cost], 'omitted_costs': len(costs)}
+            if len(json.dumps(candidate, ensure_ascii=False)) > 1500:
+                break
+            feedback['costs'].append(cost)
+        feedback['omitted_costs'] = len(costs) - len(feedback['costs'])
+        logging.getLogger(__name__).warning('MCP load rejected: category=schema_budget')
+        raise ToolException(json.dumps(feedback, ensure_ascii=False))
+    # 每次选择替换旧集合，显式清除 reducer 中之前激活的工具。
+    updates = {key: None for key in runtime.state.get('active_mcp_tools', {})}
+    updates.update({key: directory.entries[key].digest for key in tool_ids})
     return Command(update={'active_mcp_tools': updates, 'messages': [ToolMessage(
-        content=str([directory.entries[key].info() for key in tool_ids]),
+        content=str({'loaded': tool_ids}),
         tool_call_id=runtime.tool_call_id, name='load_mcp_tools')]})
 
 

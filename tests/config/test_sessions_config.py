@@ -31,12 +31,14 @@ def test_database_url_is_not_in_safe_errors():
     assert 'password' not in str(exc.value)
 
 
-def test_old_config_cli_check_works_but_chat_requires_persistence(tmp_path, capsys):
+def test_old_config_cli_check_works_and_interactive_chat_is_removed(tmp_path, capsys):
     path = tmp_path / 'assistant.toml'
     path.write_text('default_model="fake"\n[models.fake]\nprovider="ollama"\nmodel="fake"\n')
     assert main(['config', 'check', '--config', str(path)]) == 0
-    assert main(['chat', '--config', str(path)]) == 2
-    assert '[sessions]' in capsys.readouterr().err
+    with pytest.raises(SystemExit) as error:
+        main(['chat', '--config', str(path)])
+    assert error.value.code == 2
+    assert 'invalid choice' in capsys.readouterr().err
 
 
 def test_session_cli_dispatch_does_not_construct_models(monkeypatch):

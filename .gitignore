@@ -13,7 +13,7 @@ assistant.toml
 # Local immutable RAG inputs and explicit Compose credentials
 .rag/
 deploy/private/
-
+docs/
 
 # Deployed Node dependencies are installed with npm ci
 node_modules/

@@ -96,9 +96,9 @@ def test_tool_chain_events_and_per_turn_limit(tmp_path):
         result = await s.run_turn('go', on_event=events.append)
         assert len([m for m in result.messages if isinstance(m, ToolMessage)]) == 2
         assert len([e for e in events if e['event'] == 'on_tool_end']) == 2
-        from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
+        from ai_assistant.storage.sessions import SessionError
         s = session(tmp_path, [call('step', 'a'), AIMessage(content='done')], [step], AgentSettings(model_call_limit=1))
-        with pytest.raises(ModelCallLimitExceededError):
+        with pytest.raises(SessionError, match='本轮未记录远端写入'):
             await s.run_turn('go')
         assert final_text((await s.run_turn('new')).messages) == 'done'
     asyncio.run(scenario())
@@ -139,9 +139,8 @@ def test_global_tool_batch_limit(tmp_path):
     asyncio.run(scenario())
 
 
-def test_artifacts_and_error_progress(tmp_path, capsys):
+def test_artifacts_survive_tool_execution(tmp_path):
     from langchain_core.documents import Document
-    from ai_assistant.interfaces.chat import show_event
     async def scenario():
         @tool(response_format='content_and_artifact')
         async def evidence():
@@ -151,10 +150,6 @@ def test_artifacts_and_error_progress(tmp_path, capsys):
         assert [d.id for d in (await s.run_turn('go')).sources] == ['a']
         assert (await s.run_turn('next')).sources == []
     asyncio.run(scenario())
-    show_event(dict(event='on_tool_end', run_id='id', name='step', data=dict(
-        output=ToolMessage(content='private', tool_call_id='id', status='error'))))
-    out = capsys.readouterr().out
-    assert '失败' in out and 'private' not in out
 
 
 def test_settings_validation_and_disabled_tools():

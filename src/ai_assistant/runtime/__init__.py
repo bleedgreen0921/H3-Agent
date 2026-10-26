@@ -1,6 +1,8 @@
 """Native turns, durable completion pointers and resource ownership."""
 import asyncio
 import inspect
+import logging
+from time import monotonic
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -20,8 +22,15 @@ from ai_assistant.cancellation import _drain_worker
 from ai_assistant.storage.sessions import SessionError, SessionStorageError, session_storage
 from ai_assistant.runtime.observation import TurnObserver, TurnUsage
 
+logger = logging.getLogger(__name__)
+
 RECOVERY_NOTICE = ('应用状态：上一轮未完成，已发生的文件或命令效果不会回滚。'
                    '不要自动重放上一轮动作；直接处理本轮请求，仅在本轮需要操作相关资源时核实状态。')
+
+
+class TurnIncompleteError(SessionError):
+    """仅包含运行时生成的安全状态说明，可直接交付各入口。"""
+
 
 
 @dataclass(frozen=True)
@@ -109,7 +118,8 @@ class AssistantSession:
                 return
             await asyncio.sleep(1)
 
-    async def run_turn(self, text, *, skill_ids=None, on_event=None, input_id=None, resume=False):
+    async def run_turn(self, text, *, skill_ids=None, on_event=None, on_output=None,
+                       input_id=None, resume=False, user_source=None):
         if self._closed:
             raise RuntimeError('Session is closed.')
         if self._running:
@@ -121,7 +131,21 @@ class AssistantSession:
         if resume and not self._pending:
             raise SessionError('本会话没有可续接的知识请求。')
         input_id = self._pending_input if resume else (input_id or str(uuid4()))
-        turn_context = replace(self.context, input_id=input_id)
+        turn_context = replace(self.context, input_id=input_id, resolved_datetimes=set(), task_outcomes={})
+        started = monotonic()
+        timings = {}
+        observer = None
+
+        async def emit_output(kind, **data):
+            if kind == 'stage':
+                timings.setdefault('first_status_seconds', monotonic() - started)
+            if kind == 'delta' and data.get('text'):
+                timings.setdefault('first_body_seconds', monotonic() - started)
+            if on_output:
+                returned = on_output({'kind': kind, **data})
+                if inspect.isawaitable(returned):
+                    await returned
+
         self._running = True
         self._active_task = asyncio.current_task()
         try:
@@ -132,7 +156,11 @@ class AssistantSession:
                     # 续接一旦开始便不再属于可安全自动恢复的等待状态。
                     await self.repository.clear_waiting()
                 await self.repository.start(self._thread)
-            observer = TurnObserver(self.settings.model_call_limit, self.model_name)
+            await emit_output('stage', text='正在处理')
+            if turn_context.memory is not None:
+                await turn_context.memory.recall(text)
+            observer = TurnObserver(self.settings.model_call_limit, self.model_name,
+                self.context.usage_store, self.session_id)
             locator = self._pending['checkpoint'] if resume else (self._complete or {'configurable': {'thread_id': self._thread}})
             # astream_events may insert LangGraph's generic 25-step default,
             # overriding create_agent's 9_999-step setting. Middleware nodes
@@ -143,9 +171,15 @@ class AssistantSession:
             if self._failed:
                 inputs.append(HumanMessage(content=RECOVERY_NOTICE))
             # 飞书每条消息均重新打开持久会话，重开不是用户的新任务。
-            inputs.append(HumanMessage(content=text))
+            from datetime import datetime, timezone
+            inputs.append(HumanMessage(content=text, id=str(uuid4()), additional_kwargs={
+                'user_source': text if user_source is None else user_source,
+                'user_timestamp': datetime.now(timezone.utc).isoformat()}))
             activated_skills = set()
-            graph_input = {'messages': inputs}
+            graph_input = {'messages': inputs, 'turn_outcome': None}
+            if not resume:
+                snapshot = await self.agent.aget_state(locator)
+                graph_input['active_mcp_tools'] = {key: None for key in snapshot.values.get('active_mcp_tools', {})}
             if resume:
                 from langgraph.types import Command
                 if self.context.operations:
@@ -169,7 +203,21 @@ class AssistantSession:
                 ):
                     if root_id is None:
                         root_id = event['run_id']
-                    if event['event'] == 'on_tool_end' and event.get('name') == 'load_skill' and self.context.skills:
+                    metadata = event.get('metadata', {})
+                    if metadata.get('langgraph_node') == 'model' and metadata.get('lc_source') != 'summarization':
+                        if event['event'] == 'on_chat_model_start':
+                            await emit_output('replace', text='')
+                        elif event['event'] == 'on_chat_model_stream':
+                            chunk = event.get('data', {}).get('chunk')
+                            if isinstance(chunk, AIMessage) and chunk.text:
+                                await emit_output('delta', text=chunk.text)
+                        elif event['event'] == 'on_chat_model_end':
+                            answer = event.get('data', {}).get('output')
+                            if isinstance(answer, AIMessage) and answer.tool_calls:
+                                await emit_output('stage', text='正在执行工具')
+                    if event['event'] == 'on_tool_start':
+                        await emit_output('stage', text='正在执行工具')
+                    if event['event'] == 'on_tool_end'  and event.get('name') == 'load_skill' and self.context.skills:
                         from langgraph.types import Command
                         output = event.get('data', {}).get('output')
                         if isinstance(output, Command) and isinstance(output.update, dict):
@@ -191,6 +239,7 @@ class AssistantSession:
                 self._pending = {'sync_id': value['sync_id'], 'checkpoint': state.config}
                 self._pending_input = input_id
                 await self.repository.waiting(self._pending, input_id)
+                await emit_output('stage', text='正在同步知识来源，完成后继续回答')
                 return WaitingTurn(value['sync_id'], input_id)
             if not result or not final_text(result['messages']):
                 raise RuntimeError('Agent returned no final answer.')
@@ -201,18 +250,49 @@ class AssistantSession:
             state = await self.agent.aget_state({'configurable': {'thread_id': self._thread}})
             if state.next:
                 raise RuntimeError('Agent has pending execution.')
+            operations = await self.context.operations.list(input_id) if self.context.operations else []
             if self.repository is not None:
-                if self.context.mcp is not None or self.context.caller is not None:
-                    await self.repository.complete(state.config, input_id=input_id)
-                else:
-                    await self.repository.complete(state.config)
+                # 成功指针与待提交记忆任务共用事务；失败分支不会登记候选。
+                async with self.repository.conn.transaction() if turn_context.memory is not None else AsyncExitStack():
+                    if turn_context.memory is not None:
+                        await turn_context.memory.register(state.values.get('pending_memories', []), self.repository.conn)
+                    if self.context.mcp is not None or self.context.caller is not None:
+                        await self.repository.complete(state.config, input_id=input_id)
+                    else:
+                        await self.repository.complete(state.config)
             self._complete = state.config
             self._pending = self._pending_input = None
             self._failed = self._reopened = False
+            with suppress(Exception):
+                await emit_output('failed' if result.get('turn_outcome') else 'complete', text=final_text(result['messages']))
             return AgentTurn(result['messages'], observer.sources, observer.usage,
                 sorted(activated_skills | {s.id for s in self.context.skills.active(result.get('active_skills', {}))}) if self.context.skills else [],
-                input_id, await self.context.operations.list(input_id) if self.context.operations else [])
-        except BaseException:
+                input_id, operations)
+        except BaseException as error:
+            from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
+            if isinstance(error, ModelCallLimitExceededError):
+                try:
+                    operations = await turn_context.operations.list(input_id) if turn_context.operations else []
+                except Exception:
+                    operations = None
+                lines = ['未完成：本轮主模型调用次数已达上限。']
+                if operations is None:
+                    lines.append('操作记录读取失败，远端写入状态未知；请核实，未自动重放。')
+                elif not operations:
+                    lines.append('本轮未记录远端写入。')
+                for operation in operations or []:
+                    stored = operation.get('result') or {}
+                    detail = stored.get('business_outcome')
+                    status = operation['status']
+                    lines.append(f"操作 {operation['id']}：{status}；" + (
+                        '业务核对未通过' if detail else '远端回执成功，本轮整体仍未完成' if status == 'succeeded'
+                        else '需要核实，未自动重放'))
+                if any(o['status'] == 'succeeded' and not (o.get('result') or {}).get('business_outcome')
+                       for o in operations or []):
+                    lines.insert(1, '部分完成：已有成功回执，其他步骤未完成或未确认。')
+                error = TurnIncompleteError('\n'.join(lines))
+            with suppress(Exception):
+                await emit_output('cancelled' if isinstance(error, asyncio.CancelledError) else 'failed', text=str(error) if isinstance(error, TurnIncompleteError) else '本轮未完成')
             if resume:
                 self._pending = self._pending_input = None
             self._failed = True
@@ -224,8 +304,14 @@ class AssistantSession:
                 self._storage_lost = True
             if self._storage_lost:
                 raise SessionStorageError('Session connection lost; current turn did not complete.') from None
-            raise
+            raise error
         finally:
+            if observer is not None:
+                observer.usage.total_seconds = monotonic() - started
+                observer.usage.first_status_seconds = timings.get('first_status_seconds')
+                observer.usage.first_body_seconds = timings.get('first_body_seconds')
+                from dataclasses import asdict
+                logger.info('Turn metrics: input_id=%s metrics=%s', input_id, asdict(observer.usage))
             self._running = False
             self._active_task = None
 
@@ -234,12 +320,12 @@ class AssistantSession:
             await self.repository.clear_waiting()
         self._pending = self._pending_input = None
 
-    async def continue_waiting(self, *, on_event=None):
+    async def continue_waiting(self, *, on_event=None, on_output=None):
         if not self._pending:
             raise SessionError('没有待续接请求。')
         from ai_assistant.knowledge.sync import wait_sync
         await wait_sync(self.context.knowledge_config, self._pending['sync_id'])
-        return await self.run_turn('', resume=True, on_event=on_event)
+        return await self.run_turn('', resume=True, on_event=on_event, on_output=on_output)
 
 
 def validate_context_config(config, selected):
@@ -276,10 +362,22 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             raise ConfigError('Knowledge integration is unavailable; install the rag extras.') from None
     async with AsyncExitStack() as stack:
         repository = await stack.enter_async_context(session_storage(config.sessions)) if config.sessions else None
+        usage_store = None
+        if repository:
+            from ai_assistant.storage.usage import usage_storage
+            usage_store = await stack.enter_async_context(usage_storage(config.sessions))
         saver = repository.saver if repository else InMemorySaver()
         context = await stack.enter_async_context(tool_context(config, retriever=retriever,
             skill_snapshot=getattr(resources, "skills", None) if caller.channel != "feishu_group" else None))
-        context = replace(context, caller=caller if caller.channel != "cli" else None)
+        context = replace(context, usage_store=usage_store, timezone=config.agent.timezone,
+                          owner_open_id=config.integrations.feishu.owner_open_id if config.integrations.feishu else None,
+                          default_task_assignee=config.integrations.feishu.default_task_assignee if config.integrations.feishu else 'none',
+                          caller=caller if caller.channel != "cli" else None,
+                          mcp_schema_tokens=config.context.mcp_schema_tokens if config.context else 6000)
+        if config.memory.enabled and caller.channel == 'feishu_private' and caller.owner:
+            from ai_assistant.storage.memory import memory_storage
+            memory = await stack.enter_async_context(memory_storage(config))
+            context = replace(context, memory=memory)
         if config.knowledge is not None:
             context = replace(context, knowledge_config=config)
         if config.mcp is not None and config.mcp.servers:
@@ -302,11 +400,23 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         if config.knowledge is not None:
             from ai_assistant.knowledge.tools import knowledge_tools
             tools = [t for t in tools if t.name != 'search_knowledge'] + knowledge_tools()
+        if config.context is not None:
+            from ai_assistant.agents.results import read_tool_result
+            tools.append(read_tool_result)
+        if context.memory is not None:
+            from ai_assistant.tools.memory import remember_memory, manage_memory
+            tools.extend([remember_memory, manage_memory])
         if context.skills is not None:
             from ai_assistant.tools.skills import create_skill_tools
             tools.extend(create_skill_tools())
         if caller.channel == 'feishu_group':
             tools = []
+        from ai_assistant.tools.datetime import resolve_datetime, get_current_identity
+        if caller.channel != 'feishu_group' or (context.mcp and any(
+                e.original_name.startswith('task_v2_task_') for e in context.mcp.entries.values())):
+            tools.append(resolve_datetime.model_copy(update={'handle_tool_error': True}))
+        if caller.channel == 'feishu_private' and caller.owner:
+            tools.append(get_current_identity.model_copy(update={'handle_tool_error': True}))
         if context.mcp is not None:
             from ai_assistant.tools.mcp import discovery_tools
             tools.extend(discovery_tools())
@@ -316,9 +426,12 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             max_input_tokens=config.models[selected].max_input_tokens,
             summary_max_input_tokens=config.models[summary_name].max_input_tokens,
             summary_profile=summary_name, skills_enabled=context.skills is not None, mcp_enabled=context.mcp is not None)
+        context = replace(context, checkpoint_history=agent.aget_state_history)
         session = AssistantSession(agent, context, config.agent, model_name=selected,
                                    tools=tools, repository=repository)
         await session.open(session_id)
+        if usage_store:
+            await usage_store.abandon(session.session_id)
         watcher = asyncio.create_task(session.watch_connection()) if repository else None
         try:
             yield session

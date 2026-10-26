@@ -271,7 +271,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "capability",
-        choices=("models", "rag", "chat", "skills", "terminal", "web", "feishu"),
+        choices=("models", "rag", "agent", "skills", "terminal", "web", "feishu"),
     )
     parser.add_argument("--config", default="assistant.toml")
     parser.add_argument("--model")

@@ -16,6 +16,12 @@ BASE = 'https://open.feishu.cn/open-apis'
 MAX_BYTES = 25 * 1024**2
 
 
+class FeishuRejected(ConfigError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(f'飞书明确拒绝请求（code {code}）。')
+
+
 class FeishuAPI:
     def __init__(self, settings, client, tokens=None):
         self.settings, self.client, self.tokens = settings, client, tokens
@@ -44,13 +50,22 @@ class FeishuAPI:
         response.raise_for_status()
         data = response.json()
         if data.get('code', 0) != 0:
-            raise ConfigError('Feishu API rejected operation (code ' + str(data.get('code')) + ').')
+            raise FeishuRejected(data.get('code'))
         return data.get('data', data)
 
     async def send_text(self, chat_id, text, operation_id):
         return await self.request('POST', '/im/v1/messages', params={'receive_id_type': 'chat_id'},
             json={'receive_id': chat_id, 'msg_type': 'text',
                   'content': json.dumps({'text': text}, ensure_ascii=False), 'uuid': operation_id})
+
+    async def send_card(self, chat_id, card, operation_id):
+        return await self.request('POST', '/im/v1/messages', params={'receive_id_type': 'chat_id'},
+            json={'receive_id': chat_id, 'msg_type': 'interactive',
+                  'content': json.dumps(card, ensure_ascii=False), 'uuid': operation_id})
+
+    async def update_card(self, message_id, card):
+        return await self.request('PATCH', '/im/v1/messages/' + quote(message_id, safe=''),
+                                  json={'content': json.dumps(card, ensure_ascii=False)})
 
 
 class FileBridge:
