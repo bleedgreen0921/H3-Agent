@@ -280,3 +280,21 @@ def test_million_context_does_not_summarize_at_old_24k_threshold(tmp_path):
         assert not any(is_summary(m) for m in turn.messages)
         assert any(m.content == '唯一合成资料' * 10000 for m in turn.messages)
     asyncio.run(run())
+
+
+def test_summary_budget_is_independent_of_expanded_main_allowance():
+    from ai_assistant.config import AgentSettings
+    async def run():
+        settings = AgentSettings(model_call_limit=30, summary_call_limit=2)
+        observer = TurnObserver(settings.summary_call_limit)
+        model = ScriptedModel(responses=[AIMessage(content='ok')])
+        main = {'callbacks': [observer]}
+        summary = {'callbacks': [observer], 'metadata': {'lc_source': 'summarization'}}
+        for _ in range(11):
+            await model.ainvoke('main', config=main)
+        for _ in range(2):
+            await model.ainvoke('summary', config=summary)
+        with pytest.raises(SummaryCallLimitError):
+            await model.ainvoke('summary blocked', config=summary)
+        assert observer.usage.main_model_calls == 11 and observer.usage.summary_model_calls == 2
+    asyncio.run(run())

@@ -158,8 +158,10 @@ class AssistantSession:
                 await self.repository.start(self._thread)
             await emit_output('stage', text='正在处理')
             if turn_context.memory is not None:
+                turn_context.memory.session_id = self.session_id
+                turn_context.memory.search_source = None
                 await turn_context.memory.recall(text)
-            observer = TurnObserver(self.settings.model_call_limit, self.model_name,
+            observer = TurnObserver(self.settings.summary_call_limit, self.model_name,
                 self.context.usage_store, self.session_id)
             locator = self._pending['checkpoint'] if resume else (self._complete or {'configurable': {'thread_id': self._thread}})
             # astream_events may insert LangGraph's generic 25-step default,
@@ -176,7 +178,7 @@ class AssistantSession:
                 'user_source': text if user_source is None else user_source,
                 'user_timestamp': datetime.now(timezone.utc).isoformat()}))
             activated_skills = set()
-            graph_input = {'messages': inputs, 'turn_outcome': None}
+            graph_input = {'messages': inputs, 'turn_outcome': None, 'memory_results': None, 'memory_reads': None}
             if not resume:
                 snapshot = await self.agent.aget_state(locator)
                 graph_input['active_mcp_tools'] = {key: None for key in snapshot.values.get('active_mcp_tools', {})}
@@ -196,6 +198,8 @@ class AssistantSession:
                 activated_skills.update(s.id for s in chosen)
             result = None
             root_id = None
+            from ai_assistant.agents.memory import MemoryPreview
+            memory_preview = MemoryPreview() if turn_context.memory is not None else None
             async with asyncio.timeout(self.settings.turn_timeout_seconds):
                 async for event in self.agent.astream_events(
                     graph_input, config=config, context=turn_context,
@@ -206,12 +210,20 @@ class AssistantSession:
                     metadata = event.get('metadata', {})
                     if metadata.get('langgraph_node') == 'model' and metadata.get('lc_source') != 'summarization':
                         if event['event'] == 'on_chat_model_start':
+                            if memory_preview is not None:
+                                memory_preview = MemoryPreview()
                             await emit_output('replace', text='')
                         elif event['event'] == 'on_chat_model_stream':
                             chunk = event.get('data', {}).get('chunk')
                             if isinstance(chunk, AIMessage) and chunk.text:
-                                await emit_output('delta', text=chunk.text)
+                                visible = memory_preview.feed(chunk.text) if memory_preview else chunk.text
+                                if visible:
+                                    await emit_output('delta', text=visible)
                         elif event['event'] == 'on_chat_model_end':
+                            if memory_preview is not None:
+                                trailing = memory_preview.finish()
+                                if trailing:
+                                    await emit_output('delta', text=trailing)
                             answer = event.get('data', {}).get('output')
                             if isinstance(answer, AIMessage) and answer.tool_calls:
                                 await emit_output('stage', text='正在执行工具')
@@ -261,10 +273,22 @@ class AssistantSession:
                     else:
                         await self.repository.complete(state.config)
             self._complete = state.config
+            if turn_context.memory is not None and state.values.get('pending_memories'):
+                # 已确认登记后才清理候选；清理失败时仍有旧成功指针与幂等任务可恢复。
+                try:
+                    cleaned = await self.agent.aupdate_state(state.config, {'pending_memories': []})
+                    await self.repository.complete(cleaned, input_id=input_id)
+                    self._complete = cleaned
+                except Exception:
+                    logger.warning('Memory candidates registered; checkpoint cleanup deferred.')
             self._pending = self._pending_input = None
             self._failed = self._reopened = False
             with suppress(Exception):
-                await emit_output('failed' if result.get('turn_outcome') else 'complete', text=final_text(result['messages']))
+                await emit_output('failed' if result.get('turn_outcome') or any(
+                    r.get('status') not in {'saved', 'unchanged'}
+                    for r in (result.get('memory_results') or {}).values()) or next(
+                    reversed((result.get('memory_reads') or {}).values()), {}).get('status') in {
+                        'unavailable', 'failed', 'rejected', 'unknown', 'conflict'} else 'complete', text=final_text(result['messages']))
             return AgentTurn(result['messages'], observer.sources, observer.usage,
                 sorted(activated_skills | {s.id for s in self.context.skills.active(result.get('active_skills', {}))}) if self.context.skills else [],
                 input_id, operations)
@@ -404,8 +428,8 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             from ai_assistant.agents.results import read_tool_result
             tools.append(read_tool_result)
         if context.memory is not None:
-            from ai_assistant.tools.memory import remember_memory, manage_memory
-            tools.extend([remember_memory, manage_memory])
+            from ai_assistant.tools.memory import remember_memory, manage_memory, search_memories, select_memory_project
+            tools.extend([search_memories, select_memory_project, remember_memory, manage_memory])
         if context.skills is not None:
             from ai_assistant.tools.skills import create_skill_tools
             tools.extend(create_skill_tools())

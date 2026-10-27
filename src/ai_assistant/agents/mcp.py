@@ -10,7 +10,7 @@ from ai_assistant.integrations.policy import authorize
 
 
 class MCPMiddleware(AgentMiddleware):
-    def __init__(self, model_call_limit=10):
+    def __init__(self, model_call_limit=20):
         self.model_call_limit = model_call_limit
 
     def prepare(self, request):

@@ -223,3 +223,34 @@ def test_context_exit_waits_for_active_tool_before_closing_resources(tmp_path, m
             await s.run_turn('after close')
     asyncio.run(run())
     assert trace == ['tool cleaned', 'client closed']
+
+
+def test_expanded_model_and_tool_budgets_are_enforced(tmp_path):
+    async def run():
+        from ai_assistant.storage.sessions import SessionError
+        from langchain.agents.middleware.tool_call_limit import ToolCallLimitExceededError
+        observed = []
+        @tool
+        async def step():
+            """Record a fixture tool call."""
+            observed.append(1)
+            return 'ok'
+        settings = AgentSettings()
+        assert (settings.model_call_limit, settings.tool_call_limit, settings.summary_call_limit) == (20, 40, 10)
+        responses = [call('step', str(i)) for i in range(20)] + [AIMessage(content='must not reach')]
+        s = session(tmp_path, responses, [step], settings)
+        with pytest.raises(SessionError):
+            await s.run_turn('reach model budget')
+        assert len(observed) == 20
+        observed.clear()
+        batch = AIMessage(content='', tool_calls=[dict(name='step', args={}, id=str(i)) for i in range(40)])
+        s = session(tmp_path, [batch, AIMessage(content='done')], [step], settings)
+        turn = await s.run_turn('forty tools')
+        assert len(observed) == 40 and turn.usage.main_model_calls == 2 and turn.usage.tool_calls == 40
+        observed.clear()
+        too_many = batch.model_copy(update={'tool_calls': [dict(name='step', args={}, id=str(i)) for i in range(41)]})
+        s = session(tmp_path, [too_many], [step], settings)
+        with pytest.raises(ToolCallLimitExceededError):
+            await s.run_turn('tool budget')
+        assert not observed
+    asyncio.run(run())

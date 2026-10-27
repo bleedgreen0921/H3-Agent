@@ -170,10 +170,10 @@ class BotWorker:
                     argument = parts[2] if len(parts) > 2 else None
                     try:
                         answer = await session.context.memory.manage(action,
-                            argument if action == 'delete' else None,
+                            argument if action in {'delete', 'detail', 'history'} else None,
                             int(argument) if action == 'list' and argument else 0)
                     except (ValueError, TypeError):
-                        answer = '用法：/memory [list OFFSET|delete ID|clear|pause|resume]'
+                        answer = '用法：/memory [list OFFSET|detail ID|history ID|delete ID|clear|pause|resume]'
                     await self.enqueue_reply(row, answer)
                 return
             skill_ids = None
@@ -394,7 +394,10 @@ async def serve(config):
         if memory_repo is not None:
             async def maintain_memory():
                 while True:
-                    await memory_repo.drain()
+                    try:
+                        await memory_repo.drain()
+                    except Exception:
+                        logger.warning('Memory background commit failed; candidates retained.')
                     await asyncio.sleep(1)
             memory_worker = asyncio.create_task(maintain_memory())
         try:

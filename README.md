@@ -6,6 +6,8 @@
 
 业务与部署环境分离：模型通过 HTTP 服务调用；硬件推理由服务管理；平台差异集中在启动配置与终端隔离层。CLI 和飞书共用同一 Agent；tools 负责业务适配，runtime 负责轮次和取消，interfaces 负责入口，storage 负责持久化。开发约定见 [AGENTS.md](AGENTS.md)。
 
+项目持续发现的问题、当前优先级与验收标准统一维护在 [待修复汇总](TODO.md)。同一问题在原条目更新，不按开发日期重复追加。
+
 ## 首次配置
 
 需要 Python 3.12。指定已有解释器，不需要 activate 或新建环境：
@@ -160,6 +162,8 @@ Node 需 >=20。OAuth 使用本机 loopback 回调；应用内主人 ID 必须�
 
 ## 上下文、个人记忆与流式回复
 
+每轮默认预算为主模型20次、工具40次、摘要10次、超时300秒；分别配置 `[agent].model_call_limit`、`tool_call_limit`、`summary_call_limit`、`turn_timeout_seconds`。摘要与主模型独立计数，达到任一预算不会自动放宽或重放动作。知识检索预算保留已有显式配置（缺省5次）。
+
 `models.<名称>.max_input_tokens` 是应用输入窗口配置，必须与实际模型能力匹配；当前 DeepSeek Flash 示例使用官方 1,048,576 token 上下文，不再限制为 24,000。输入预算保留 10% 余量，先扣除系统提示、PERSONA、Skills、已选 MCP schema 和个人记忆；消息达到剩余预算的 75% 时通过原生摘要压缩。这里使用本地保守估算，服务实际计费 token 单独统计。历史能放入窗口时完整保留，不因累计工具正文超过 4,000 token 就提前收起。摘要约 1,500 token 是压缩目标，有效摘要超过目标不会单独导致失败，最终完整请求仍须通过总预算检查。MCP 目录每页最多 5 项、1,500 字符；`load_mcp_tools` 每次替换选择集合，schema 总预算默认 6,000 token。普通工具单次返回默认最多 4,000 token，完整内容保存在 checkpoint artifact，可用 `read_tool_result` 分页；单次工具分页不等同于会话上下文窗口。必需回执无法容纳时明确报错。
 
 旧配置默认关闭个人记忆和飞书流式显示。先备份数据库及配置，再显式升级；这些管理命令不通过模型开放：
@@ -185,14 +189,29 @@ card_max_bytes = 24576
 ```bash
 ./assistant.sh session init
 ./assistant.sh mcp init       # 显式扩展 outbox
-./assistant.sh memory init    # 原生 AsyncPostgresStore 与版本表
+./assistant.sh memory init    # 首次新库初始化
+# 旧格式必须显式清理当前主人的记忆（保留聊天、任务和知识库）：
+# ./assistant.sh memory init --reset-existing
 ./assistant.sh config check
 ./assistant.sh feishu serve
 ```
 
-个人记忆只在主人私聊中使用，按配置中的应用 ID 和主人 ID 隔离；群聊不读取、不写入。普通短对话没有额外提取调用；压缩时一次结构化调用同时生成摘要与候选，校验用户原话及消息 ID 后保存在 checkpoint，整轮成功才登记后台持久化任务。自动候选只接受用户原话的连续内容，冲突事实不会自动覆盖。明确说“记住”时调用工具并等待持久化回执。保存失败不能声称已记住；向量召回失败时降级读取近期偏好。
+个人记忆格式为 3，只在主人私聊中使用，按应用和主人隔离。旧格式必须显式初始化，不自动转换。自然的稳定陈述可在当前轮使用记忆工具保存，无需“记住”等关键词，也不增加默认提取调用。`search_memories` 查询稳定项目、属性 ID、当前记录与 revision；`remember_memory` 支持新增、单值替换、多值增删和失效。事实使用 `values` 保存最小规范值，属性 `cardinality` 必填 single/multiple；正文由程序生成。规范值与原话证据分开保存，当前消息 ID 由运行时绑定，模型只提供当前原话片段；更新沿用 UUID；措辞、标点或证据变化不会增加事实版本。多值追加/删除由程序计算集合差异，整体替换必须明确 `replace_all=true`。目录和历史不参与正文向量索引。
 
-飞书支持 `/memory`、`/memory list OFFSET`、`/memory delete ID`、`/memory clear`、`/memory pause`、`/memory resume`，也可用自然语言请求管理。本机对应命令为 `memory list --offset N`、`memory delete ID`、`memory clear/pause/resume`。更正、删除和暂停更新版本及提取水位，旧任务失效；恢复不回扫旧消息。`/new` 保留个人记忆；删除记忆不删除会话历史。
+范围支持 global、project、session。当前指令优先，会话例外高于已选择项目规则，再使用全局默认；`/new` 不继承项目选择和会话例外。项目名称明确时按完整名称自动建档。主模型确认简称唯一匹配时，`select_memory_project` 可关联别名并选择项目；多个合理候选需要澄清。`search_memories` 是纯查询，不修改项目选择或别名。query 实际执行基础文本词项匹配，项目/属性/范围/状态/有效时间过滤生效；空 query 列举候选，各目录与事实分别分页。历史与未来陈述必须明确生效区间，时间包含时区；到期例外停止生效，永久替换后的旧值不会因新值到期自动恢复。一次性脚本等临时工作只留聊天，不保存为记忆。
+
+写工具返回 saved、unchanged、needs_clarification、rejected、conflict、failed 或 unknown，以及原因码和中文摘要；读取区分 found、deleted、not_found、unavailable。删除由非正文屏障证明，不能解释成索引延迟。detail 返回 history_count，不返回未加载的空历史；history 独立分页。更新要求目标 ID 和 expected_revision，写入前必须先查找。当前来源和前文指代证据分别校验；删除后的旧授权不能重放。正文、历史和幂等回执通过同连接原生 Store `abatch` 与策略事务提交；普通更新不推进全局 epoch，清空才建立全局屏障。摘要候选仍只在成功轮次登记，确认登记后清理 checkpoint 候选。
+
+飞书和本机均支持 list、detail、history、delete、clear、pause、resume；例如 `/memory history ID`、`./assistant.sh memory history ID`。delete 删除记录及全部关联历史，clear 仅清空当前主人的记忆目录、历史、候选正文和向量，聊天、任务、业务回执、知识库及其他用户保留。pause 暂停自动候选，显式新请求仍可保存；resume 不回扫旧消息。
+
+独立真实模型验收入口（会产生模型费用，不连接真实飞书）：
+
+```bash
+SESSION_TEST_DATABASE_URL=postgresql://USER@HOST:PORT/TEST_DB \
+  "$(cat .python-path)" -m scripts.accept_memory --config assistant.toml
+```
+
+验收会在指定测试服务创建并删除随机数据库，需要建库权限；保留原12类并增加6个多轮场景，共18类，每例执行一次，失败不自动重跑。报告写入新的 `.data/memory-v3-acceptance-时间戳.json`，保留历史报告。预算读取当前配置，不再硬编码调用次数。当前读视图采用范围、时间、偏好优先的分页扫描；完整语义排序、异步索引及后台吞吐治理仍未完成。
 
 流式回复使用一张可更新卡片，按约 1 秒合并正文预览；只显示主模型正文，工具前的预览会替换为执行状态。完成校验及 checkpoint 提交后才显示“已完成”，失败或取消显示“未完成”。正文超出 24 KiB 卡片预算时，完整答案按现有文本分段交付。创建结果未知保留 outbox 回执，不重复发送；明确拒绝卡片时回退文本。重启只恢复已确认结果的投递，不重跑业务动作。卡片接口见[飞书官方消息 API](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1)。
 

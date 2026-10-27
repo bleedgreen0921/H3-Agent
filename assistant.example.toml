@@ -71,6 +71,10 @@ enabled = false
 
 # 个人风格文件路径相对本配置文件；删除此项即可使用默认风格。
 [agent]
+model_call_limit = 20
+tool_call_limit = 40
+summary_call_limit = 10
+turn_timeout_seconds = 300
 timezone = "Asia/Shanghai"
 persona_file = "PERSONA.md"
 

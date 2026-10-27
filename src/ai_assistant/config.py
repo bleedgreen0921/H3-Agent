@@ -117,8 +117,9 @@ class AgentSettings(BaseModel):
 
     persona_file: Path | None = None
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True, protected_namespaces=())
-    model_call_limit: int = Field(default=10, gt=0, strict=True)
-    tool_call_limit: int = Field(default=20, gt=0, strict=True)
+    model_call_limit: int = Field(default=20, gt=0, strict=True)
+    tool_call_limit: int = Field(default=40, gt=0, strict=True)
+    summary_call_limit: int = Field(default=10, gt=0, strict=True)
     knowledge_call_limit: int = Field(default=5, gt=0, strict=True)
     turn_timeout_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
 
