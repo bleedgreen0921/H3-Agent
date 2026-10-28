@@ -63,6 +63,7 @@ async def read_tool_result(result_id: str, runtime: ToolRuntime[ToolContext], of
     """Read a bounded page of a full result artifact, including after history compression.
 
     A history_cursor searches another page of checkpoints in this conversation only.
+    It never searches another session or replays the original tool.
     """
     if offset < 0:
         return 'offset 必须大于等于 0。'

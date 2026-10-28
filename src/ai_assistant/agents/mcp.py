@@ -173,7 +173,7 @@ class MCPMiddleware(AgentMiddleware):
                         from ai_assistant.knowledge.sync import register
                         try:
                             await register(context.knowledge_config, f'https://docs.feishu.cn/{kind}/{token}',
-                                           identity=entry.settings.identity)
+                                           identity=entry.settings.identity, restore=False)
                         except Exception:
                             # 读取结果仍有效；入库失败不能悄悄描述成成功。
                             if isinstance(result, ToolMessage):

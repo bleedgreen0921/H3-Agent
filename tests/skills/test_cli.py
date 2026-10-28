@@ -20,11 +20,9 @@ def test_cli_local_inspection_and_removed_commands(tmp_path, capsys):
     assert main(['skill', 'list', *args]) == 0
     listed = json.loads(capsys.readouterr().out)
     identity = next(s['id'] for s in listed['skills'] if s['name'] == 'example')
-    assert main(['skill', 'inspect', identity, *args]) == 0
-    assert 'source' not in json.loads(capsys.readouterr().out)
     assert main(['skill', 'check', identity, *args]) == 0
     assert json.loads(capsys.readouterr().out)['check']['format'] == 'valid'
-    for command in ['install', 'discover', 'update', 'remove', 'deps']:
+    for command in ['inspect', 'install', 'discover', 'update', 'remove', 'deps']:
         with pytest.raises(SystemExit):
             main(['skill', command, *args])
     assert source.is_dir()
@@ -49,3 +47,26 @@ def test_disabled_skills_cli_does_not_scan(tmp_path, capsys):
     package(tmp_path / '.agents/skills/example')
     assert main(['skill', 'list', '--config', str(config)]) == 2
     assert 'Configure [skills]' in capsys.readouterr().err
+
+
+def test_project_disabled_skill_is_absent_from_cli_and_runtime(tmp_path, monkeypatch, capsys):
+    import asyncio
+    from ai_assistant.config import load_config
+    from ai_assistant.tools.context import tool_context
+    path = configuration(tmp_path)
+    path.write_text(path.read_text() + 'disabled=["blocked"]\n')
+    package(tmp_path / 'extra/blocked', name='blocked')
+    package(tmp_path / 'extra/kept', name='kept')
+    # 仅扫描 fixture，不接入宿主机共享目录。
+    from ai_assistant.skills import cli
+    monkeypatch.setattr(cli, 'configured_roots', lambda config: [tmp_path / 'extra'])
+    monkeypatch.setattr('ai_assistant.skills.catalog.configured_roots', lambda config: [tmp_path / 'extra'])
+    assert main(['skill', 'list', '--config', str(path)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert [skill['name'] for skill in result['skills']] == ['kept']
+    assert main(['skill', 'check', 'blocked', '--config', str(path)]) == 2
+    capsys.readouterr()
+    async def run():
+        async with tool_context(load_config(path)) as context:
+            assert [skill.metadata['name'] for skill in context.skills.skills.values()] == ['kept']
+    asyncio.run(run())

@@ -34,7 +34,7 @@ def test_database_url_is_not_in_safe_errors():
 def test_old_config_cli_check_works_and_interactive_chat_is_removed(tmp_path, capsys):
     path = tmp_path / 'assistant.toml'
     path.write_text('default_model="fake"\n[models.fake]\nprovider="ollama"\nmodel="fake"\n')
-    assert main(['config', 'check', '--config', str(path)]) == 0
+    assert main(['mcp', 'list', '--config', str(path)]) == 0
     with pytest.raises(SystemExit) as error:
         main(['chat', '--config', str(path)])
     assert error.value.code == 2
@@ -51,10 +51,9 @@ def test_session_cli_dispatch_does_not_construct_models(monkeypatch):
         seen.append(args.action)
         return 0
     monkeypatch.setattr('ai_assistant.interfaces.sessions.execute', execute)
-    assert main(['session', 'init']) == 0
     assert main(['session', 'list']) == 0
     assert main(['session', 'delete', '00000000-0000-0000-0000-000000000000']) == 0
-    assert seen == ['init', 'list', 'delete']
+    assert seen == ['list', 'delete']
 
 
 def test_config_import_does_not_load_optional_database_or_gpu_modules():

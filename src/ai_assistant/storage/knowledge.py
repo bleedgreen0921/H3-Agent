@@ -3,9 +3,25 @@
 import hashlib
 import json
 from uuid import uuid4
+from contextlib import asynccontextmanager
 from sqlalchemy import text
 
+
+@asynccontextmanager
+async def transaction(engine, conn=None):
+    """复用调用方事务，确保业务效果与管理回执一起提交。"""
+    if conn is not None:
+        yield conn
+    else:
+        async with engine.begin() as connection:
+            yield connection
+
+
 DDL = (
+    """CREATE TABLE IF NOT EXISTS rag_management_operations (
+        kb text NOT NULL,principal text NOT NULL,input_id text NOT NULL,
+        action text NOT NULL,target text,result jsonb NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(kb,principal,input_id))""",
     """CREATE TABLE IF NOT EXISTS rag_sources (
         kb text NOT NULL,id text NOT NULL,config jsonb NOT NULL,enabled boolean NOT NULL DEFAULT true,
         checked_at timestamptz,error text,PRIMARY KEY(kb,id))""",
@@ -48,10 +64,16 @@ class SourceStore:
                     dict(kb=kb, id=name, c=packed(source)),
                 )
 
-    async def add_submission(self, uri, descriptor):
+    async def add_submission(self, uri, descriptor, *, restore=True, conn=None):
         source = "submitted:" + hashlib.sha256(uri.encode()).hexdigest()[:24]
         kb = self.config.knowledge_base_id
-        async with self.engine.begin() as conn:
+        async with transaction(self.engine, conn) as conn:
+            # 与同步提交、移除使用相同文档行锁，避免并发绕过移除标记。
+            removed = (await conn.execute(text(
+                "SELECT deleted FROM rag_documents WHERE kb=:kb AND source_uri=:uri FOR UPDATE"
+            ), dict(kb=kb, uri=uri))).scalar()
+            if removed and not restore:
+                return None
             await conn.execute(
                 text("""INSERT INTO rag_sources(kb,id,config)
                 VALUES(:kb,:id,CAST(:c AS jsonb)) ON CONFLICT(kb,id) DO UPDATE SET enabled=true"""),
@@ -60,14 +82,14 @@ class SourceStore:
             await conn.execute(
                 text("""INSERT INTO rag_source_documents(kb,source_id,uri,descriptor)
                 VALUES(:kb,:id,:uri,CAST(:d AS jsonb)) ON CONFLICT(kb,source_id,uri)
-                DO UPDATE SET descriptor=EXCLUDED.descriptor"""),
+                DO UPDATE SET descriptor=rag_source_documents.descriptor || EXCLUDED.descriptor"""),
                 dict(kb=kb, id=source, uri=uri, d=packed(descriptor)),
             )
             await conn.execute(
                 text(
-                    "UPDATE rag_documents SET deleted=false WHERE kb=:kb AND source_uri=:uri"
+                    "UPDATE rag_documents SET deleted=false WHERE kb=:kb AND source_uri=:uri AND :restore"
                 ),
-                dict(kb=kb, uri=uri),
+                dict(kb=kb, uri=uri, restore=restore),
             )
         return source
 
@@ -132,11 +154,11 @@ class SourceStore:
                 ),
             )
 
-    async def request_sync(self, filters=None, request_key=None):
+    async def request_sync(self, filters=None, request_key=None, *, conn=None):
         filters = filters or {}
         scope = hashlib.sha256(packed(filters).encode()).hexdigest()
         kb = self.config.knowledge_base_id
-        async with self.engine.begin() as conn:
+        async with transaction(self.engine, conn) as conn:
             await conn.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:k,0))"),
                 dict(k=kb + scope),
@@ -314,8 +336,11 @@ class SourceStore:
                 dict(r)
                 for r in (
                     await conn.execute(
-                        text("""SELECT d.id,d.source_uri,d.deleted,d.active_build,
-                v.metadata FROM rag_documents d LEFT JOIN rag_versions v ON v.id=d.desired_version
+                        text("""SELECT d.id,d.source_uri,d.deleted,d.active_build,j.state AS index_state,
+                v.metadata, ARRAY(SELECT m.source_id FROM rag_source_documents m
+                    WHERE m.kb=d.kb AND m.uri=d.source_uri ORDER BY m.source_id) AS source_ids
+                FROM rag_documents d LEFT JOIN rag_versions v ON v.id=d.desired_version
+                LEFT JOIN rag_jobs j ON j.id=d.desired_job
                 WHERE d.kb=:kb ORDER BY d.source_uri"""),
                         dict(kb=self.config.knowledge_base_id),
                     )

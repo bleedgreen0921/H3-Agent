@@ -8,17 +8,27 @@ from ai_assistant.config import ConfigError
 from ai_assistant.workspace.files import ReadOnlyWorkspace
 
 
+def _safe_operation(row):
+    """终端诊断只展示安全摘要；运行时仍保留完整业务回执用于核对。"""
+    result = {key: row[key] for key in ('id', 'input_id', 'principal', 'tool', 'status', 'created_at', 'updated_at') if key in row}
+    needs_verification = row.get('needs_verification') or bool((row.get('result') or {}).get('business_outcome'))
+    result.update(kind='tool_operation', target=row.get('tool'), receipt=(
+        '业务核对未通过，需人工核实' if needs_verification else
+        {'succeeded': '已有成功回执', 'failed': '操作失败，未自动重放',
+         'unknown': '结果未知，需核实', 'pending': '尚未确认完成'}.get(row['status'], '请核实状态')))
+    return result
+
+
 def add_commands(commands):
     root = commands.add_parser('mcp', help='Office MCP configuration and diagnostics')
     actions = root.add_subparsers(dest='action', required=True)
-    for action in ['init', 'list', 'inspect', 'check', 'tools']:
+    for action in ['list', 'check', 'tools']:
         parser = actions.add_parser(action)
         parser.add_argument('--config', default='assistant.toml')
-        if action in {'inspect', 'tools'}:
+        if action == 'tools':
             parser.add_argument('server')
-        if action == 'check':
+        if action in {'list', 'check'}:
             parser.add_argument('server', nargs='?')
-            parser.add_argument('--network', action='store_true')
     auth = actions.add_parser('auth').add_subparsers(dest='auth_service', required=True)
     feishu = auth.add_parser('feishu').add_subparsers(dest='auth_action', required=True)
     for action in ['login', 'status', 'logout']:
@@ -43,20 +53,34 @@ async def execute(config, args):
         else:
             print(json.dumps(tokens.status() if args.auth_action == 'status' else tokens.logout()))
         return 0
-    if args.action == 'init':
-        from ai_assistant.storage.sessions import session_storage
-        from ai_assistant.storage.integrations import operation_storage
-        if config.sessions is None:
-            raise ConfigError('mcp init requires [sessions].')
-        async with session_storage(config.sessions, initialize=True):
-            async with operation_storage(config.sessions, initialize=True):
-                pass
-        print('MCP integration schema initialized.')
-        return 0
     if args.action == 'operations':
         from ai_assistant.storage.integrations import operation_storage
         async with operation_storage(config.sessions) as store:
-            result = {'tools': await store.list(), 'channel_replies': await store.replies()} if args.operation_action == 'list' else await store.inspect(args.operation_id)
+            result = {'tools': [_safe_operation(row) for row in await store.list()], 'channel_replies': await store.replies(), 'management_commands': await store.commands()} if args.operation_action == 'list' else await store.inspect(args.operation_id)
+        if isinstance(result, dict) and result.get('kind') == 'tool_operation':
+            result = _safe_operation(result)
+        if config.knowledge is not None:
+            from ai_assistant.knowledge.sync import settings
+            from ai_assistant.storage.rag import RagStore
+            from sqlalchemy import text
+            knowledge = RagStore(settings(config))
+            try:
+                ident = args.operation_id if args.operation_action == 'inspect' else None
+                async with knowledge.engine.connect() as conn:
+                    receipts = [dict(r) for r in (await conn.execute(text('''SELECT input_id,action,target,result
+                        FROM rag_management_operations WHERE kb=:kb AND (CAST(:id AS text) IS NULL OR input_id=:id)
+                        ORDER BY created_at DESC LIMIT 100'''),
+                        dict(kb=knowledge.config.knowledge_base_id, id=ident))).mappings()]
+                by_input = {r['input_id']: r for r in receipts}
+                commands = result.get('management_commands', []) if isinstance(result, dict) and args.operation_action == 'list' else (result if isinstance(result, list) else [])
+                for command in commands:
+                    command['business_receipt'] = by_input.get(command['input_id'])
+                if args.operation_action == 'inspect' and not result and receipts:
+                    result = [dict(r, kind='management_command', status='committed') for r in receipts]
+            finally:
+                await knowledge.close()
+        if args.operation_action == 'inspect' and not result:
+            raise ConfigError('操作回执不存在。')
         print(json.dumps(result, default=str, ensure_ascii=False))
         return 0
     servers = config.mcp.servers if config.mcp else {}
@@ -64,12 +88,12 @@ async def execute(config, args):
     if name and name not in servers:
         raise ConfigError('Unknown MCP server.')
     chosen = {name: servers[name]} if name else servers
-    if args.action in {'list', 'inspect'}:
+    if args.action == 'list':
         print(json.dumps({key: dict(transport=s.transport, identity=s.identity,
             tools=s.tools, write_tools=s.write_tools, allow_write=s.allow_write)
             for key, s in chosen.items()}, ensure_ascii=False))
         return 0
-    if args.action == 'check' and not args.network:
+    if args.action == 'check':
         problems = []
         if chosen and importlib.util.find_spec('fastmcp') is None:
             problems.append('Install the mcp extra.')
@@ -93,8 +117,9 @@ async def execute(config, args):
                             problems.append(f'{key}: install locked Node package {package}@{version} with npm ci.')
                     if shutil.which('node') is None:
                         problems.append(f'{key}: Node >=20 is required.')
-        print(json.dumps({'ok': not problems, 'problems': problems, 'network': False}, ensure_ascii=False))
-        return 2 if problems else 0
+        if problems:
+            print(json.dumps({'ok': False, 'problems': problems}, ensure_ascii=False))
+            return 2
     # Explicit network diagnostics authenticate using read-only endpoints.
     from ai_assistant.integrations.mcp import mcp_resources
     base = config.config_path.parent if config.config_path else Path.cwd()
@@ -105,7 +130,7 @@ async def execute(config, args):
         return 0
     narrowed = config.model_copy(update={'mcp': config.mcp.model_copy(update={'servers': chosen})})
     async with mcp_resources(narrowed, workspace) as catalog:
-        if args.action == 'check' and args.network:
+        if args.action == 'check':
             import asyncio
             import httpx
             from ai_assistant.integrations.feishu_files import FeishuAPI

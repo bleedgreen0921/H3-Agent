@@ -86,3 +86,25 @@ def test_unicode_resource_pagination_and_binary(tmp_path):
         assert catalog.read(skill.id, 'binary')['binary']
     finally:
         catalog.close()
+
+
+@pytest.mark.parametrize('selector', ['directory', 'metadata', 'id'])
+def test_disabled_skill_cannot_be_discovered_resolved_or_restored(tmp_path, selector):
+    import hashlib
+    root = tmp_path / 'skills'
+    blocked = package(root / 'blocked', name='blocked-name')
+    kept = package(root / 'kept', name='kept')
+    identity = 'skill:' + hashlib.sha256(str(root / 'blocked').encode()).hexdigest()[:24]
+    value = {'directory': 'blocked', 'metadata': 'blocked-name', 'id': identity}[selector]
+    catalog = SkillCatalog([root], disabled=[value])
+    try:
+        assert [skill.metadata['name'] for skill in catalog.skills.values()] == ['kept']
+        assert catalog.search('blocked')['total'] == 0
+        assert catalog.active({identity: 'old-digest'}) == []
+        for key in (identity, 'blocked-name'):
+            with pytest.raises(SkillError):
+                catalog.resolve(key)
+        assert blocked.is_dir() and kept.is_dir()
+        assert not catalog.diagnostics
+    finally:
+        catalog.close()

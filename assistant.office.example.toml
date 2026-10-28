@@ -7,10 +7,10 @@ model = "deepseek-flash"
 api_key = "REPLACE_DEEPSEEK_API_KEY"
 max_input_tokens = 1048576  # DeepSeek 官方 1M 上下文；应用另保留 10% 余量
 [models.deepseek.parameters]
+use_responses_api = true
+reasoning = { effort = "none" }
 timeout = 60
 max_retries = 0
-[models.deepseek.parameters.extra_body.thinking]
-type = "disabled"
 [workspace]
 root = "."
 [sessions]
@@ -50,6 +50,8 @@ tools = ["upload_drive", "download_drive", "upload_message_file", "download_mess
 write_tools = ["upload_drive", "upload_message_file"]
 allow_write = true
 [channels.feishu]
+# 从 skill list 获取完整 ID；默认未授权。仅加入适合向群公开的 Skills。
+default_group_skill_ids = []
 enabled = false
 streaming = false
 stream_interval_seconds = 1
@@ -59,11 +61,12 @@ card_max_bytes = 24576
 # feishu_bot = ["oc_REPLACE"]
 
 [context]
-summary_tokens = 1500
+summary_every_turns = 10
+summary_tokens = 10000
 tool_result_tokens = 4000
 mcp_schema_tokens = 6000
 
-# 办公入口也可启用长期知识库。先填写数据库并显式执行 rag init。
+# 办公入口也可启用长期知识库。先填写数据库并显式执行 init。
 # [knowledge]
 # database_url = "postgresql+asyncpg://USER:password@127.0.0.1:5432/assistant"
 # knowledge_base_id = "default"
@@ -81,7 +84,3 @@ summary_call_limit = 10
 turn_timeout_seconds = 300
 timezone = "Asia/Shanghai"
 persona_file = "PERSONA.md"
-
-# 先配置 sessions、context、knowledge 本地向量和飞书主人，再显式 memory init。
-[memory]
-enabled = false

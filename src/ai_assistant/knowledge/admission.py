@@ -8,6 +8,23 @@ from ai_assistant.knowledge import KnowledgeError
 from ai_assistant.knowledge.sync import register
 
 
+def extract_document_links(config, text):
+    """按出现顺序提取；保留整个 ASCII URL，避免把非法路径截成合法来源。"""
+    from ai_assistant.knowledge.sources import cloud_reference
+
+    seen = set()
+    for match in re.finditer(r"https://[^\s<>\"'`()\[\]{}\u0080-\uffff]+", text):
+        value = match.group().rstrip(".,;:!?")
+        try:
+            reference = cloud_reference(config, value)
+        except (KnowledgeError, ValueError):
+            continue
+        canonical = reference["url"]
+        if canonical not in seen:
+            seen.add(canonical)
+            yield value
+
+
 async def _admit_message(config, text, *, attachment=False):
     results = []
     if attachment and text.startswith("File reference: "):
@@ -29,20 +46,12 @@ async def _admit_message(config, text, *, attachment=False):
             ).download_message_file(
                 info["message_id"], info["file_key"], info["file_name"]
             )
-        results.append(await register(config, result["path"]))
-    for value in dict.fromkeys(re.findall(r'https://[^\s<>"\]]+', text)):
-        if re.search(
-            r"\.(?:feishu\.cn|larksuite\.com)/(?:wiki|docx|sheets|base)/", value
-        ):
-            try:
-                results.append(await register(config, value.rstrip("。，；）)")))
-            except (KnowledgeError, ValueError, httpx.HTTPError) as exc:
-                results.append(
-                    {
-                        "status": "failed",
-                        "reason": getattr(exc, "code", type(exc).__name__),
-                    }
-                )
+        results.append(await register(config, result["path"], restore=False))
+    for value in extract_document_links(config, text):
+        try:
+            results.append(await register(config, value, restore=False))
+        except (KnowledgeError, ValueError, httpx.HTTPError) as exc:
+            results.append({"status": "failed", "reason": getattr(exc, "code", type(exc).__name__)})
     return results
 
 

@@ -44,3 +44,6 @@ namespaces = false
 
 [tool.setuptools.package-data]
 "ai_assistant.integrations" = ["*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

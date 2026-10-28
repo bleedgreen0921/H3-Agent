@@ -124,7 +124,7 @@ def test_checkpoint_complete_but_index_commit_fails(tmp_path, monkeypatch):
                 sid = s.session_id
                 await s.run_turn('baseline')
                 head = s._complete
-                async def fail(config):
+                async def fail(config, **kwargs):
                     raise SessionStorageError('injected commit failure')
                 monkeypatch.setattr(s.repository, 'complete', fail)
                 with pytest.raises(SessionStorageError):
@@ -236,7 +236,7 @@ def test_missing_schema_is_not_implicitly_initialized(tmp_path):
                 query['options'] = '-csearch_path=' + schema
                 isolated = urlunsplit(url._replace(query=urlencode(query)))
                 settings = SessionsConfig(database_url=isolated)
-                with pytest.raises(SessionStorageError, match='session init'):
+                with pytest.raises(SessionStorageError, match='init'):
                     async with session_storage(settings):
                         pass
                 row = await (await conn.execute('SELECT to_regclass(%s)', (schema + '.assistant_sessions',))).fetchone()
@@ -263,4 +263,32 @@ def test_unlock_cleanup_does_not_mask_unknown_caller_exception(tmp_path, monkeyp
         finally:
             if sid:
                 await delete(c, sid)
+    asyncio.run(run())
+
+
+def test_title_and_success_pointer_commit_together(tmp_path, monkeypatch):
+    async def run():
+        c = config(tmp_path)
+        await initialize(c)
+        async with session_storage(c.sessions) as repo:
+            row = await repo.open(tmp_path)
+            sid = row['id']
+            checkpoint = {'configurable': {'thread_id': row['thread_id'], 'checkpoint_ns': '', 'checkpoint_id': str(uuid4())}}
+            original = repo.update_current
+
+            async def fail_pointer(sql, params):
+                if 'SET complete=' in sql:
+                    raise SessionStorageError('fixture failure after title update')
+                return await original(sql, params)
+
+            monkeypatch.setattr(repo, 'update_current', fail_pointer)
+            with pytest.raises(SessionStorageError):
+                await repo.complete(checkpoint, title='未提交主题')
+            stored = await (await repo.conn.execute('SELECT title,complete FROM assistant_sessions WHERE id=%s', (sid,))).fetchone()
+            assert stored == {'title': '', 'complete': None}
+            monkeypatch.setattr(repo, 'update_current', original)
+            await repo.complete(checkpoint, title='已提交主题')
+            stored = await (await repo.conn.execute('SELECT title,complete FROM assistant_sessions WHERE id=%s', (sid,))).fetchone()
+            assert stored['title'] == '已提交主题' and stored['complete'] == checkpoint
+            await repo.delete(sid)
     asyncio.run(run())

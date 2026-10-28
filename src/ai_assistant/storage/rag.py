@@ -4,7 +4,7 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from ai_assistant.knowledge import IngestionError, LeaseLost
-from ai_assistant.storage.knowledge import SourceStore, DDL as SOURCE_DDL
+from ai_assistant.storage.knowledge import SourceStore, transaction, DDL as SOURCE_DDL
 
 DDL = (
     'CREATE EXTENSION IF NOT EXISTS vector',
@@ -53,9 +53,9 @@ class RagStore(SourceStore):
     async def check_schema(self):
         from ai_assistant.knowledge import KnowledgeError
         async with self.engine.connect() as conn:
-            for name in ('rag_documents','rag_source_documents','rag_sync_runs','rag_query_runs'):
+            for name in ('rag_documents','rag_source_documents','rag_sync_runs','rag_query_runs','rag_management_operations'):
                 if not (await conn.execute(text('SELECT to_regclass(:name)'),dict(name=name))).scalar():
-                    raise KnowledgeError('知识库 schema 需要更新，请显式运行 rag init。')
+                    raise KnowledgeError('知识库 schema 需要更新，请显式运行 init。')
 
     async def init(self):
         # This is the only schema-mutating entry point.
@@ -67,7 +67,7 @@ class RagStore(SourceStore):
         manager = SQLRecordManager('rag:init', engine=self.engine, async_mode=True)
         await manager.acreate_schema()
 
-    async def submit(self, *, source_uri, digest, snapshot, metadata, force=False, sync_run=None):
+    async def submit(self, *, source_uri, digest, snapshot, metadata, force=False, sync_run=None, restore=True):
         c = self.config
         async with self.engine.begin() as conn:
             if sync_run:
@@ -81,6 +81,8 @@ class RagStore(SourceStore):
                 ON CONFLICT(kb,source_uri) DO NOTHING'''), dict(id=doc, kb=c.knowledge_base_id, uri=source_uri))
             row = (await conn.execute(text('''SELECT * FROM rag_documents WHERE kb=:kb AND source_uri=:uri FOR UPDATE'''),
                                       dict(kb=c.knowledge_base_id, uri=source_uri))).mappings().one()
+            if row['deleted'] and (sync_run or not restore):
+                raise IngestionError('document_removed', '文档已移除，请显式添加后重试。')
             doc = row['id']
             version = (await conn.execute(text('''SELECT id FROM rag_versions WHERE document_id=:doc
                 AND digest=:digest AND config_hash=:hash AND metadata=CAST(:metadata AS jsonb)'''),
@@ -218,8 +220,8 @@ class RagStore(SourceStore):
                 'JOIN rag_versions v ON v.id=b.version_id WHERE ' + ' AND '.join(clauses)), params)).scalars())
         return await self.eligible_builds(builds, filters)
 
-    async def delete(self, document_id):
-        async with self.engine.begin() as conn:
+    async def delete(self, document_id, *, conn=None):
+        async with transaction(self.engine, conn) as conn:
             count = (await conn.execute(text("""UPDATE rag_documents SET deleted=true WHERE id=:id AND kb=:kb"""),
                 dict(id=document_id, kb=self.config.knowledge_base_id))).rowcount
             if count:
@@ -231,6 +233,6 @@ class RagStore(SourceStore):
     async def version_for_rebuild(self, document_id):
         async with self.engine.connect() as conn:
             row = (await conn.execute(text('''SELECT v.*,d.source_uri FROM rag_documents d JOIN rag_versions v
-                ON v.id=d.desired_version WHERE d.id=:id AND d.kb=:kb'''),
+                ON v.id=d.desired_version WHERE d.id=:id AND d.kb=:kb AND NOT d.deleted'''),
                 dict(id=document_id, kb=self.config.knowledge_base_id))).mappings().one_or_none()
             return dict(row) if row else None

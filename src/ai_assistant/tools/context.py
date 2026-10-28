@@ -28,9 +28,9 @@ class ToolContext:
     mcp: object | None = None
     caller: object | None = None
     operations: object | None = None
+    project_rules: str = ''
     input_id: str | None = None
     knowledge_config: object | None = None
-    memory: object | None = None
     checkpoint_history: object | None = None
     mcp_schema_tokens: int = 6000
     timezone: str = 'Asia/Shanghai'
@@ -60,7 +60,7 @@ async def tool_context(config: AppConfig, *, retriever: BaseRetriever | None = N
         skills = None
         if config.skills is not None:
             from ai_assistant.skills.catalog import SkillCatalog, configured_roots
-            skills = skill_snapshot or SkillCatalog(configured_roots(config))
+            skills = skill_snapshot or SkillCatalog(configured_roots(config), disabled=config.skills.disabled)
             if skill_snapshot is None:
                 stack.callback(skills.close)
         settings = config.tools.web

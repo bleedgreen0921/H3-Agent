@@ -82,10 +82,10 @@ class NativeStructuredTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_value_and_raw_envelope(self):
         model = self.model()
-        runnable = create_structured_runnable(model, Answer)
+        runnable = create_structured_runnable(model, Answer, method="json_mode")
         self.assertIsInstance(runnable, Runnable)
         self.assertEqual(await runnable.ainvoke('Return JSON {"count":3}'), Answer(count=3))
-        result = await create_structured_runnable(model, Answer, include_raw=True).ainvoke("JSON")
+        result = await create_structured_runnable(model, Answer, method="json_mode", include_raw=True).ainvoke("JSON")
         self.assertEqual(set(result), {"raw", "parsed", "parsing_error"})
         self.assertEqual(result["parsed"], Answer(count=3))
         self.assertIsNone(result["parsing_error"])
@@ -97,7 +97,7 @@ class NativeStructuredTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.client.is_closed)
 
     async def test_native_tolerant_json_without_another_request(self):
-        runnable = create_structured_runnable(self.model(), Answer)
+        runnable = create_structured_runnable(self.model(), Answer, method="json_mode")
         for text in ('{"count":3', '```json\n{"count":3}\n```'):
             self.reply = response(text)
             before = len(self.requests)
@@ -109,19 +109,19 @@ class NativeStructuredTests(unittest.IsolatedAsyncioTestCase):
         for text, schema in (('{}', Answer), ('{"count":"bad"}', Answer),
                              ('{"count":0}', ValidatedAnswer), ('not JSON', Answer)):
             self.reply = response(text)
-            runnable = create_structured_runnable(model, schema, include_raw=True)
+            runnable = create_structured_runnable(model, schema, method="json_mode", include_raw=True)
             result = await runnable.ainvoke("JSON")
             self.assertIsNone(result["parsed"])
             self.assertIsInstance(result["parsing_error"], OutputParserException)
             self.assertEqual(result["raw"].usage_metadata["total_tokens"], 20)
             with self.assertRaises(OutputParserException):
-                await create_structured_runnable(model, schema).ainvoke("JSON")
+                await create_structured_runnable(model, schema, method="json_mode").ainvoke("JSON")
 
     async def test_schema_configuration_is_native(self):
         self.reply = response('{"count":"3","extra":"ignored"}')
-        self.assertEqual(await create_structured_runnable(self.model(), Answer).ainvoke("JSON"), Answer(count=3))
+        self.assertEqual(await create_structured_runnable(self.model(), Answer, method="json_mode").ainvoke("JSON"), Answer(count=3))
         with self.assertRaises(OutputParserException):
-            await create_structured_runnable(self.model(), StrictAnswer).ainvoke("JSON")
+            await create_structured_runnable(self.model(), StrictAnswer, method="json_mode").ainvoke("JSON")
 
     async def test_native_tool_binding_and_first_match(self):
         model = self.model()
@@ -158,9 +158,9 @@ class NativeStructuredTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             create_structured_runnable(deepseek, Answer, method="unknown")
         with self.assertRaisesRegex(ValueError, "DeepSeek only"):
-            create_structured_runnable(self.model(provider="openai", name="other-model"), Answer)
+            create_structured_runnable(self.model(provider="openai", name="other-model"), Answer, method="json_mode")
         self.assertEqual(len(self.requests), 0)
-        result = await create_structured_runnable(compatible, Answer).ainvoke("JSON")
+        result = await create_structured_runnable(compatible, Answer, method="json_mode").ainvoke("JSON")
         self.assertEqual(result.count, 3)
 
     async def test_sdk_finish_exceptions_propagate_even_with_raw(self):
@@ -168,7 +168,7 @@ class NativeStructuredTests(unittest.IsolatedAsyncioTestCase):
             self.reply = response('{"count":', finish=reason)
             before = len(self.requests)
             with self.assertRaises(error):
-                await create_structured_runnable(self.model(), Answer, include_raw=True).ainvoke("JSON")
+                await create_structured_runnable(self.model(), Answer, method="json_mode", include_raw=True).ainvoke("JSON")
             self.assertEqual(len(self.requests), before + 1)
 
     async def test_native_prompt_config_and_usage_callback(self):
@@ -176,7 +176,7 @@ class NativeStructuredTests(unittest.IsolatedAsyncioTestCase):
         prompt = ChatPromptTemplate.from_messages([
             ("system", "Return JSON matching this schema: {schema}"), ("user", "{text}"),
         ]).partial(schema=json.dumps(Answer.model_json_schema()))
-        chain = prompt | create_structured_runnable(self.model(), Answer)
+        chain = prompt | create_structured_runnable(self.model(), Answer, method="json_mode")
         result = await chain.with_config(tags=["offline"], metadata={"purpose": "test"}, callbacks=[handler]).ainvoke({"text": "Count 3"})
         self.assertEqual(result.count, 3)
         self.assertEqual(sum(value["total_tokens"] for value in handler.usage_metadata.values()), 20)
@@ -189,7 +189,7 @@ class NativeStructuredTests(unittest.IsolatedAsyncioTestCase):
             self.reply = fail
             before = len(self.requests)
             with self.assertRaises(expected):
-                await create_structured_runnable(self.model(), Answer, include_raw=True).ainvoke("JSON")
+                await create_structured_runnable(self.model(), Answer, method="json_mode", include_raw=True).ainvoke("JSON")
             self.assertEqual(len(self.requests), before + 1)
 
     async def test_sdk_retry_ownership(self):
@@ -200,7 +200,7 @@ class NativeStructuredTests(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(429, json={"error": {"message": "offline"}}) if attempts == 1 else response()
         self.reply = transient
         with patch("openai._base_client.BaseClient._calculate_retry_timeout", return_value=0):
-            parsed = await create_structured_runnable(self.model(retries=1), Answer).ainvoke("JSON")
+            parsed = await create_structured_runnable(self.model(retries=1), Answer, method="json_mode").ainvoke("JSON")
         self.assertEqual(parsed.count, 3)
         self.assertEqual(len(self.requests), 2)
 
@@ -210,7 +210,7 @@ class NativeStructuredTests(unittest.IsolatedAsyncioTestCase):
             started.set()
             await asyncio.Event().wait()
         self.reply = wait
-        task = asyncio.create_task(create_structured_runnable(self.model(), Answer).ainvoke("JSON"))
+        task = asyncio.create_task(create_structured_runnable(self.model(), Answer, method="json_mode").ainvoke("JSON"))
         await asyncio.wait_for(started.wait(), 2)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
@@ -224,4 +224,4 @@ class NativeStructuredTests(unittest.IsolatedAsyncioTestCase):
             def broken(cls, value):
                 raise RuntimeError("validator bug")
         with self.assertRaisesRegex(RuntimeError, "validator bug"):
-            await create_structured_runnable(self.model(), Broken).ainvoke("JSON")
+            await create_structured_runnable(self.model(), Broken, method="json_mode").ainvoke("JSON")

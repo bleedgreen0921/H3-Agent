@@ -1,15 +1,17 @@
 """Coalesced output: the model only touches memory; delivery reads durable snapshots."""
 import asyncio
 import json
+from ai_assistant.runtime.outcomes import TERMINAL_STATES
 from uuid import uuid5, NAMESPACE_URL
 
 
 def card(text, state, max_bytes=24576):
-    title = {'complete': '已完成', 'failed': '未完成', 'cancelled': '未完成'}.get(state, '处理中')
+    title = {'complete': '已完成', 'partial': '部分完成', 'failed': '未完成', 'unknown': '状态待核实', 'cancelled': '已取消', 'needs_clarification': '需要补充信息'}.get(state, '处理中')
     def build(value):
-        return {'config': {'wide_screen_mode': True, 'update_multi': True},
+        # 正文交给飞书原生 Markdown 渲染；plain_text 仅用于不支持富文本的标题。
+        return {'schema': '2.0', 'config': {'update_multi': True},
                 'header': {'title': {'tag': 'plain_text', 'content': title}},
-                'elements': [{'tag': 'div', 'text': {'tag': 'plain_text', 'content': value or '正在处理…'}}]}
+                'body': {'elements': [{'tag': 'markdown', 'content': value or '正在处理…'}]}}
     def size(value):
         # 包括作为 JSON 字符串嵌入请求后的转义开销。
         return len(json.dumps({'content': json.dumps(build(value), ensure_ascii=False)}, ensure_ascii=False).encode())
@@ -36,7 +38,7 @@ class ReplyStream:
 
     def emit(self, event):
         kind = event['kind']
-        if self.state in {'complete', 'failed', 'cancelled'}:
+        if self.state in TERMINAL_STATES:
             return
         if kind == 'delta':
             self.text += event['text']
@@ -49,18 +51,18 @@ class ReplyStream:
     async def persist(self, conn):
         from psycopg.types.json import Jsonb
         payload, fits = card(self.text, self.state, self.config.channels.feishu.card_max_bytes)
-        if self.state == 'complete' and not fits:
-            payload, _ = card('正文较长，完整回答见后续消息。', 'complete')
+        if self.state in TERMINAL_STATES and not fits:
+            payload, _ = card('正文较长，完整回答见后续消息。', self.state)
         await conn.execute('''INSERT INTO assistant_outbox(id,input_id,body,part,kind,display_version,final_state)
             VALUES(%s,%s,%s,-2,'card',%s,%s) ON CONFLICT(id) DO UPDATE SET
             body=EXCLUDED.body,display_version=assistant_outbox.display_version+1,
             final_state=EXCLUDED.final_state,
             status=CASE WHEN assistant_outbox.status IN ('unknown','rejected','sending') THEN assistant_outbox.status ELSE 'pending' END
-            WHERE assistant_outbox.final_state NOT IN ('complete','failed','cancelled')
-                OR (assistant_outbox.final_state IN ('failed','cancelled') AND EXCLUDED.final_state IN ('failed','cancelled'))''',
+            WHERE assistant_outbox.final_state NOT IN ('complete','partial','failed','unknown','cancelled','needs_clarification')
+                ''',
             (str(uuid5(NAMESPACE_URL, self.row['id'] + ':card')), self.row['id'],
              Jsonb({'chat_id': self.row['body']['chat_id'], 'card': payload,
-                    'final_text': self.text if self.state in {'complete', 'failed', 'cancelled'} else None}), self.version, self.state))
+                    'final_text': self.text if self.state in TERMINAL_STATES else None}), self.version, self.state))
 
     async def run(self):
         from ai_assistant.storage.integrations import operation_storage

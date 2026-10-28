@@ -31,3 +31,4 @@ smoke-results*.json
 .ruff_cache/
 constraints/
 TODO.md
+outputs/

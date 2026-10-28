@@ -6,15 +6,16 @@ model = "deepseek-flash"
 api_key = "REPLACE_API_KEY"
 max_input_tokens = 1048576  # DeepSeek 官方 1M 上下文；应用另保留 10% 余量
 [models.deepseek.parameters]
+use_responses_api = true
+reasoning = { effort = "none" }
 timeout = 60
 max_retries = 0
-[models.deepseek.parameters.extra_body.thinking]
-type = "disabled"
 
 [sessions]
 database_url = "postgresql://user@127.0.0.1:55432/H3-Agent"
 [context]
-summary_tokens = 1500
+summary_every_turns = 10
+summary_tokens = 10000
 tool_result_tokens = 4000
 mcp_schema_tokens = 6000
 [workspace]
@@ -25,6 +26,7 @@ enabled = false
 # 本地 Skills 由用户手动放入 .agents/skills 或显式目录。
 # [skills]
 # roots = []
+# disabled = [] # 按名称或完整 ID 排除自动发现的 Skill，不删除共享文件。
 # [tools.terminal]
 # timeout = 120
 # allow_network = false
@@ -78,6 +80,11 @@ turn_timeout_seconds = 300
 timezone = "Asia/Shanghai"
 persona_file = "PERSONA.md"
 
-# 先配置 sessions、context、knowledge 本地向量和飞书主人，再显式 memory init。
-[memory]
-enabled = false
+# 自动长期记忆已删除，不再支持旧 memory 配置。
+
+# [channels.feishu]
+# default_group_skill_ids = []
+
+# 每群 skill_ids 未设置时继承 default_group_skill_ids，[] 显式禁用。
+# [channels.feishu.groups."oc_REPLACE_CHAT_ID"]
+# skill_ids = []

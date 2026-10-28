@@ -110,7 +110,7 @@ async def run_case(config, index, wrong, request):
     with TemporaryDirectory(prefix='assistant-accept-') as root:
         c = config.model_copy(update={
             'workspace': config.workspace.model_copy(update={'root': root}),
-            'knowledge': None, 'skills': None, 'memory': config.memory.model_copy(update={'enabled': False}),
+            'knowledge': None, 'skills': None,
             'agent': config.agent.model_copy(update={'timezone': 'Asia/Shanghai', 'persona_file': None}),
             'tools': config.tools.model_copy(update={'terminal': None, 'web': None}),
             'integrations': config.integrations.model_copy(update={'feishu': config.integrations.feishu.model_copy(

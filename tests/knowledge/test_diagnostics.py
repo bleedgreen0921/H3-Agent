@@ -71,13 +71,14 @@ def test_status_cli_only_displays_diagnostics_when_requested(tmp_path, capsys):
     class Store:
         def __init__(self, settings):
             assert settings.diagnostics_dir == c.diagnostics_dir
+        async def sync_status(self, job_id): return None
         async def status(self, job_id): return result
         async def close(self): pass
     with patch('ai_assistant.storage.rag.RagStore', Store):
         for enabled in (False, True):
             assert asyncio.run(execute(config, SimpleNamespace(action='status', job_id=job['id'], diagnostics=enabled))) == 0
             captured = capsys.readouterr()
-            assert json.loads(captured.out) == result
+            assert json.loads(captured.out) == dict(result, kind='index')
             assert ('private traceback' in captured.err) == enabled
             assert 'private traceback' not in captured.out
 
@@ -93,6 +94,7 @@ def test_relative_diagnostic_directory_resolves_against_toml(tmp_path, monkeypat
     class Store:
         def __init__(self, settings):
             assert settings.diagnostics_dir == tmp_path/'config'/'private'
+        async def sync_status(self, job_id): return None
         async def status(self, job_id): return {'id': job_id}
         async def close(self): pass
     with patch('ai_assistant.storage.rag.RagStore', Store):

@@ -22,6 +22,8 @@ def failure_message(error):
     """仅暴露错误类别，避免异常正文包含凭据或文档内容。"""
     from ai_assistant.agents.context import ContextBudgetError
     from ai_assistant.runtime import TurnIncompleteError
+    if getattr(error, 'turn_message', None):
+        return error.turn_message
     if isinstance(error, TurnIncompleteError):
         return str(error)
     if isinstance(error, ContextBudgetError):
@@ -81,6 +83,13 @@ class BotWorker:
 
     async def fail_reply(self, row, text, *, cancelled=False):
         if self.config.channels.feishu.streaming:
+            # runtime 已持久化的业务终态不能被外层通用异常或取消提示覆盖。
+            from ai_assistant.runtime.outcomes import TERMINAL_STATES
+            existing = await (await self.store.conn.execute(
+                "SELECT final_state,body FROM assistant_outbox WHERE input_id=%s AND kind='card'", (row['id'],))).fetchone()
+            if existing and existing['final_state'] in TERMINAL_STATES and existing['body'].get('final_text'):
+                await self.finish_reply(row, existing['body']['final_text'])
+                return
             from ai_assistant.interfaces.streaming import ReplyStream
             stream = ReplyStream(self.config, row)
             stream.emit({'kind': 'cancelled' if cancelled else 'failed', 'text': text})
@@ -93,11 +102,11 @@ class BotWorker:
         else:
             await self.enqueue_reply(row, text)
 
-    async def restore_reply(self, row, text, *, incomplete=False):
+    async def restore_reply(self, row, text, *, incomplete=False, outcome=None):
         if self.config.channels.feishu.streaming:
             from ai_assistant.interfaces.streaming import ReplyStream
             stream = ReplyStream(self.config, row)
-            stream.emit({'kind': 'failed' if incomplete else 'complete', 'text': text})
+            stream.emit({'kind': outcome['status'] if outcome else 'failed' if incomplete else 'complete', 'text': text})
             await stream.persist(self.store.conn)
         await self.finish_reply(row, text)
 
@@ -125,17 +134,36 @@ class BotWorker:
         text = await UsageStore(self.store.conn).report(sid) if sid else '当前会话尚未开始。'
         await self.enqueue_reply(row, text)
 
-    async def save_binding(self, row, session_id):
-        await self.store.conn.execute('''INSERT INTO assistant_channel_sessions VALUES(%s,%s)
-            ON CONFLICT(binding) DO UPDATE SET session_id=EXCLUDED.session_id''', (row['binding'], session_id))
+    async def save_binding(self, row, session_id, conn):
+        from ai_assistant.interfaces.chat_commands import bind
+        async with conn.transaction():
+            await bind(conn, row['binding'], session_id)
 
     async def execute(self, row, *, recover=False, resume=False):
         caller = caller_for(self.config, row)
-        session_id = await self.binding_session(row)
+        from ai_assistant.interfaces.chat_commands import parse_command, handle
+        from ai_assistant.skills.catalog import skills_for_caller
         text = row['body']['text'].strip()
+        parsed = parse_command(text)
+        if parsed and parsed[0] != '/skill':
+            await handle(self, row, caller, parsed, recover=recover)
+            return
+        skill_ids = None
+        if parsed:
+            identity, text = parsed[1]
+            if not recover and not resume:
+                catalog = skills_for_caller(self.config, getattr(self.resources, 'skills', None), caller)
+                if catalog is None:
+                    await self.enqueue_reply(row, '本群未配置可用 Skills。' if caller.channel == 'feishu_group' else '未配置 Skills。')
+                    return
+                if identity not in catalog.skills:
+                    await self.enqueue_reply(row, 'Skill ID 不存在或未授权，请使用 /skills 查看可用 ID。')
+                    return
+            skill_ids = [identity]
+        session_id = await self.binding_session(row)
         async with assistant_session(self.config, session_id=session_id, caller=caller,
                                      resources=self.resources) as session:
-            await self.save_binding(row, session.session_id)
+            await self.save_binding(row, session.session_id, session.repository.conn)
             if recover:
                 if session._pending:
                     await self.store.conn.execute("UPDATE assistant_inbox SET status='waiting' WHERE id=%s", (row['id'],))
@@ -146,47 +174,16 @@ class BotWorker:
                     'SELECT last_input_id FROM assistant_sessions WHERE id=%s', (session.session_id,))).fetchone()
                 if current['last_input_id'] == row['id'] and session._complete:
                     state = await session.agent.aget_state(session._complete)
-                    await self.restore_reply(row, final_text(state.values['messages']), incomplete=bool(state.values.get('turn_outcome')))
+                    await self.restore_reply(row, final_text(state.values['messages']), incomplete=bool(state.values.get('turn_outcome')), outcome=state.values.get('turn_result'))
                     return
-                await self.fail_reply(row, '上一轮未完成，可能已产生外部操作。请查询 mcp operations 核实；该请求不会自动重跑。')
-                return
-            if text == '/new':
-                waiting_rows = await (await self.store.conn.execute("SELECT * FROM assistant_inbox WHERE binding=%s AND status='waiting'", (row['binding'],))).fetchall()
-                for waiting in waiting_rows:
-                    await self.fail_reply(waiting, '旧会话等待已取消，未完成；已入库资料仍保留。', cancelled=True)
-                await session.new_conversation()
-                await self.save_binding(row, session.session_id)
-                await self.enqueue_reply(row, '已创建新会话。')
-                return
-            if text == '/help':
-                await self.enqueue_reply(row, '/help /new /status /cancel /usage；发送文本即可使用助手。主人私聊可用 /skills、/skill <ID> <请求> 与 /memory。')
-                return
-            if text.startswith('/memory'):
-                if session.context.memory is None:
-                    await self.enqueue_reply(row, '当前入口未启用个人记忆。')
-                else:
-                    parts = text.split()
-                    action = parts[1] if len(parts) > 1 else 'list'
-                    argument = parts[2] if len(parts) > 2 else None
-                    try:
-                        answer = await session.context.memory.manage(action,
-                            argument if action in {'delete', 'detail', 'history'} else None,
-                            int(argument) if action == 'list' and argument else 0)
-                    except (ValueError, TypeError):
-                        answer = '用法：/memory [list OFFSET|detail ID|history ID|delete ID|clear|pause|resume]'
-                    await self.enqueue_reply(row, answer)
-                return
-            skill_ids = None
-            if caller.channel == 'feishu_private' and text == '/skills':
-                catalog = session.context.skills
-                await self.enqueue_reply(row, '\n'.join(f'{s.id}: {s.metadata["name"]}' for s in catalog.skills.values()) if catalog else '未配置 Skills。')
-                return
-            if caller.channel == 'feishu_private' and text.startswith('/skill '):
-                parts = text.split(maxsplit=2)
-                if len(parts) != 3:
-                    await self.enqueue_reply(row, '用法：/skill <ID> <请求>')
+                latest = await session.agent.aget_state({'configurable': {'thread_id': session._thread}})
+                recovered = latest.values.get('turn_result')
+                if recovered and recovered.get('input_id') == row['id'] and recovered['items']:
+                    from ai_assistant.runtime.outcomes import receipt_lines
+                    await self.restore_reply(row, '上一轮未全部完成；未自动重放。\n' + '\n'.join(receipt_lines(recovered['items'])), outcome=recovered)
                     return
-                skill_ids, text = [parts[1]], parts[2]
+                await self.fail_reply(row, '上一轮未完成，可能已产生外部操作。请查询操作回执核实；该请求不会自动重跑。')
+                return
             user_source = text
             if not resume and self.config.knowledge is not None and caller.channel == 'feishu_private':
                 from ai_assistant.knowledge.admission import admit_message
@@ -233,7 +230,7 @@ class BotWorker:
                 retry = is_card and (bool(row['remote_id']) or throttled) and not rejected
                 await self.store.conn.execute("UPDATE assistant_outbox SET status=%s,next_attempt_at=now()+interval '1 second' WHERE id=%s",
                     ('rejected' if is_card and rejected else 'pending' if retry else 'unknown', row['id']))
-                if is_card and rejected and row['final_state'] in {'complete', 'failed', 'cancelled'}:
+                if is_card and rejected and row['final_state'] in {'complete', 'partial', 'failed', 'unknown', 'cancelled', 'needs_clarification'}:
                     inbox = await (await self.store.conn.execute('SELECT * FROM assistant_inbox WHERE id=%s', (row['input_id'],))).fetchone()
                     if inbox and inbox['body'] and row['body'].get('final_text'):
                         await self.enqueue_reply(inbox, row['body']['final_text'])
@@ -262,6 +259,14 @@ class BotWorker:
             await self.execute(row, recover=True)
         await self.send_pending()
 
+    async def recover_rag(self, row):
+        """失败后的补交只读业务回执；渠道仍不可用时留待重启恢复。"""
+        try:
+            await self.execute(row, recover=True)
+        except Exception as exc:
+            logger.error('RAG receipt recovery pending: input_id=%s error_type=%s',
+                         row['id'], type(exc).__name__)
+
     async def run(self):
         await self.recover()
         try:
@@ -270,11 +275,18 @@ class BotWorker:
                     try:
                         self.active.result()
                     except asyncio.CancelledError:
-                        await self.fail_reply(self.active_row, '执行已取消，未完成；已发生的远端操作不会撤销，请核实操作回执。', cancelled=True)
+                        if self.active_row['body']['text'].strip().startswith('/rag '):
+                            # 取消可能发生在提交之后；只读业务回执，保留已经提交的 ID。
+                            await self.recover_rag(self.active_row)
+                        else:
+                            await self.fail_reply(self.active_row, '执行已取消；已提交的知识库任务继续执行，已发生的远端操作不会撤销，请核实操作回执。', cancelled=True)
                     except Exception as exc:
                         logger.error('Feishu turn failed: input_id=%s error_type=%s',
                                      self.active_row['id'], type(exc).__name__)
-                        await self.fail_reply(self.active_row, failure_message(exc))
+                        if self.active_row['body']['text'].strip().startswith('/rag '):
+                            await self.recover_rag(self.active_row)
+                        else:
+                            await self.fail_reply(self.active_row, failure_message(exc))
                     self.active = self.active_row = None
                 rows = await (await self.store.conn.execute("SELECT * FROM assistant_inbox WHERE status='received' ORDER BY received_at,id LIMIT 100")).fetchall()
                 for row in rows:
@@ -282,7 +294,7 @@ class BotWorker:
                     if command == '/usage':
                         await self.show_usage(row)
                         continue
-                    if command in {'/status', '/cancel'}:
+                    if command == '/cancel':
                         caller_for(self.config, row)
                         same = self.active_row and self.active_row['binding'] == row['binding']
                         waiting = await (await self.store.conn.execute("SELECT * FROM assistant_inbox WHERE binding=%s AND status='waiting' LIMIT 1", (row['binding'],))).fetchone()
@@ -294,12 +306,24 @@ class BotWorker:
                         same = same or waiting
                         if command == '/cancel' and self.active and self.active_row['binding'] == row['binding']:
                             self.active.cancel()
-                        await self.enqueue_reply(row, ('已请求取消。' if same else '当前会话没有正在执行的请求。') if command == '/cancel'
-                            else ('当前会话正在执行。' if same else '当前会话空闲或排队中。'))
+                        await self.enqueue_reply(row, '已请求取消；已提交的知识库任务继续执行。' if same else '当前会话没有正在执行的请求；已提交的知识库任务继续执行。')
+                        continue
+                    from ai_assistant.interfaces.chat_commands import parse_command
+                    parsed = parse_command(command)
+                    rag_add = bool(parsed and parsed[0] == '/rag' and parsed[1][0] == 'add')
+                    if parsed and parsed[0] not in {'/new', '/skill'} and not rag_add:
+                        try:
+                            await self.store.conn.execute("UPDATE assistant_inbox SET status='running' WHERE id=%s", (row['id'],))
+                            await self.execute(row)
+                        except Exception as exc:
+                            if parsed[0] == '/rag':
+                                await self.recover_rag(row)
+                            else:
+                                await self.fail_reply(row, failure_message(exc))
                         continue
                     if self.active is None:
                         waiting = await (await self.store.conn.execute("SELECT 1 FROM assistant_inbox WHERE binding=%s AND status='waiting' LIMIT 1", (row['binding'],))).fetchone()
-                        if waiting and command != '/new':
+                        if waiting and command != '/new' and not rag_add:
                             continue
                         await self.store.conn.execute("UPDATE assistant_inbox SET status='running' WHERE id=%s", (row['id'],))
                         self.active_row = row
@@ -362,16 +386,16 @@ async def serve(config):
         await store.conn.execute('SELECT last_input_id FROM assistant_sessions LIMIT 0')
         await store.conn.execute('SELECT call_id FROM assistant_model_usage LIMIT 0')
         await store.conn.execute('SELECT enabled_at FROM assistant_usage_schema LIMIT 0')
+        await store.conn.execute('SELECT binding,title FROM assistant_sessions LIMIT 0')
+        await store.conn.execute('SELECT input_id FROM assistant_chat_commands LIMIT 0')
         await store.conn.execute('SELECT id FROM assistant_inbox LIMIT 0')
         await store.conn.execute('SELECT kind,display_version,final_state FROM assistant_outbox LIMIT 0')
         # 已持有唯一飞书执行器锁，前一进程未结束的调用不能继续显示为进行中。
         await store.conn.execute("UPDATE assistant_model_usage SET status='unknown',ended_at=clock_timestamp() WHERE ended_at IS NULL AND session_id IN (SELECT session_id FROM assistant_channel_sessions)")
-        memory_repo = None
-        if config.memory.enabled:
-            from ai_assistant.storage.memory import memory_storage
-            memory_repo = await stack.enter_async_context(memory_storage(config))
         context = await stack.enter_async_context(tool_context(config))
         directory = await stack.enter_async_context(mcp_resources(config, context.workspace))
+        from ai_assistant.skills.catalog import validate_group_skills
+        validate_group_skills(config, context.skills)
         resources = ProcessResources(directory, context.skills)
         client = await stack.enter_async_context(httpx.AsyncClient(timeout=30, trust_env=False))
         api = FeishuAPI(config.integrations.feishu, client)
@@ -390,21 +414,8 @@ async def serve(config):
         await process.stdin.drain()
         worker = asyncio.create_task(BotWorker(config, store, resources, api).run())
         receiver_wait = asyncio.create_task(process.wait())
-        memory_worker = None
-        if memory_repo is not None:
-            async def maintain_memory():
-                while True:
-                    try:
-                        await memory_repo.drain()
-                    except Exception:
-                        logger.warning('Memory background commit failed; candidates retained.')
-                    await asyncio.sleep(1)
-            memory_worker = asyncio.create_task(maintain_memory())
         try:
-            done, _ = await asyncio.wait([worker, receiver_wait] + ([memory_worker] if memory_worker else []) + ([knowledge_worker] if knowledge_worker else []), return_when=asyncio.FIRST_COMPLETED)
-            if memory_worker and memory_worker in done:
-                await memory_worker
-                raise ConfigError('Memory worker stopped.')
+            done, _ = await asyncio.wait([worker, receiver_wait] + ([knowledge_worker] if knowledge_worker else []), return_when=asyncio.FIRST_COMPLETED)
             if knowledge_worker and knowledge_worker in done:
                 await knowledge_worker
                 raise ConfigError('Knowledge worker stopped.')
@@ -412,10 +423,6 @@ async def serve(config):
                 raise ConfigError('Feishu receiver stopped; check Node deployment and application permissions.')
             await worker
         finally:
-            if memory_worker:
-                memory_worker.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await memory_worker
             worker.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await worker

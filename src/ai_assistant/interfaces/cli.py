@@ -23,6 +23,9 @@ def _print_result(result) -> None:
     status = {"passed": "通过", "failed": "失败", "skipped": "未检查"}[result.status]
     usage = "未提供" if result.usage is None else ", ".join(f"{k}={v}" for k, v in result.usage.items())
     descriptions = {
+        "incomplete_response": "未收到完整结束状态",
+        "invalid_json": "JSON 语法错误", "invalid_fields": "字段或类型错误",
+        "unexpected_value": "字段值不符合预期", "truncated": "输出截断", "refused": "请求被拒绝",
         "thinking_mismatch": "服务返回了与禁用设置不符的推理内容",
         "incomplete_or_refused": "输出截断或请求被拒绝", "empty_output": "输出为空",
         "invalid_tool_call": "工具名称、数量或参数无效", "unexpected_tool_call": "返回了意外的工具调用",
@@ -40,11 +43,8 @@ def _print_result(result) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m ai_assistant")
     commands = parser.add_subparsers(dest="command", required=True)
-    config_parser = commands.add_parser("config", help="Application configuration")
-    config_commands = config_parser.add_subparsers(dest="action", required=True)
-    check = config_commands.add_parser("check", help="Validate configuration without network access")
-    check.add_argument("--config", default="assistant.toml", metavar="PATH")
-    check.add_argument("--model", metavar="NAME")
+    commands.add_parser("init", help="Initialize configured storage explicitly").add_argument(
+        "--config", default="assistant.toml", metavar="PATH")
     model_parser = commands.add_parser("model", help="Live model checks")
     model_commands = model_parser.add_subparsers(dest="action", required=True)
     probe = model_commands.add_parser("check", help="Send real requests using profile SDK retries")
@@ -60,23 +60,15 @@ def main(argv: list[str] | None = None) -> int:
     add_skills(commands)
     from ai_assistant.integrations.cli import add_commands as add_mcp
     add_mcp(commands)
-    from ai_assistant.interfaces.memory import add_commands as add_memory
-    add_memory(commands)
     feishu_parser = commands.add_parser("feishu", help="Feishu owner bot")
     feishu_commands = feishu_parser.add_subparsers(dest="action", required=True)
     feishu_commands.add_parser("serve").add_argument("--config", default="assistant.toml")
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
-        if args.command == "memory":
-            from ai_assistant.interfaces.memory import execute
-            try:
-                return asyncio.run(execute(config, args))
-            except ConfigError:
-                raise
-            except Exception:
-                print("记忆管理失败：请检查依赖、数据库与显式初始化状态。", file=sys.stderr)
-                return 2
+        if args.command == "init":
+            from ai_assistant.interfaces.initialization import execute
+            return asyncio.run(execute(config))
         if args.command == "feishu":
             from ai_assistant.interfaces.feishu import serve
             try:
@@ -85,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
             except ConfigError:
                 raise
             except Exception:
-                print("飞书入口失败：请检查部署、持久存储和认证状态。", file=sys.stderr)
+                print("飞书入口失败：请检查部署、持久存储和认证状态；缺少结构时请显式执行 init。", file=sys.stderr)
                 return 2
         if args.command == "mcp":
             from ai_assistant.integrations.cli import execute
@@ -97,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"MCP 操作失败：{exc}", file=sys.stderr)
                 return 2
             except Exception:
-                print("MCP 操作失败：请检查可选依赖、配置、部署及迁移状态。", file=sys.stderr)
+                print("MCP 操作失败：请检查可选依赖、配置和部署；缺少结构时请显式执行 init。", file=sys.stderr)
                 return 2
         if args.command == "skill":
             from ai_assistant.skills.cli import execute
@@ -116,27 +108,29 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"RAG 操作失败：{exc if isinstance(exc, KnowledgeError) else type(exc).__name__}", file=sys.stderr)
                 return 2
             except Exception:
-                print("RAG 操作失败：数据库或集成错误；请检查依赖、连接和显式迁移状态。", file=sys.stderr)
+                print("RAG 操作失败：数据库或集成错误；请检查依赖和连接；缺少结构时请显式执行 init。", file=sys.stderr)
                 return 2
         if args.command == "session":
             from ai_assistant.interfaces.sessions import execute
             try:
                 return asyncio.run(execute(config, args))
             except SessionError as exc:
-                print(f"会话操作失败：{exc}", file=sys.stderr)
+                print(f"会话操作失败：{getattr(exc, 'turn_message', str(exc))}", file=sys.stderr)
                 return 2
         if args.model is not None and args.model not in config.models:
             raise ConfigError("Unknown model profile.")
         if args.command == "model":
             from ai_assistant.llm.checks import check_model
             selected = config.default_model if args.model is None else args.model
+            protocol = "Responses" if config.models[selected].parameters.get("use_responses_api") else "Chat Completions"
+            print(f"协议：{protocol}", flush=True)
             retries = config.models[selected].parameters.get("max_retries")
             retry_text = "沿用 SDK 默认" if retries is None else f"max_retries={retries}（SDK）"
             print(f"开始真实模型检查（可能产生费用），SDK 重试：{retry_text}；每项一次逻辑调用。", flush=True)
             results = asyncio.run(check_model(config, args.model, args.capability, args.timeout, on_result=_print_result))
             return 1 if any(item.status == "failed" for item in results) else 0
     except SessionError as exc:
-        print(f"会话失败：{exc}", file=sys.stderr, flush=True)
+        print(f"会话失败：{getattr(exc, 'turn_message', str(exc))}", file=sys.stderr, flush=True)
         return 2
     except ConfigError as exc:
         print(f"检查失败：{exc}", file=sys.stderr, flush=True)
@@ -144,8 +138,6 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("检查已取消，未开始的项目不再发送。", file=sys.stderr, flush=True)
         return 130
-    names = [args.model] if args.model is not None else list(config.models)
-    print("配置有效，未检查连通性。模型：" + ", ".join(ascii(name) for name in names))
     return 0
 
 

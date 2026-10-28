@@ -263,8 +263,8 @@ def test_explicit_idempotent_migration_of_legacy_builds():
             from types import SimpleNamespace
             app = AppConfig(default_model='test', models={'test': ModelConfig(provider='ollama', model='test')},
                             knowledge=store.config)
-            with pytest.raises(KnowledgeError, match='rag init'):
-                await execute(app, SimpleNamespace(action='check', database=True, gpu=False))
+            with pytest.raises(KnowledgeError, match='init'):
+                await execute(app, SimpleNamespace(action='check', database=True, services=False))
             # Ordinary status must not migrate the schema.
             from sqlalchemy.exc import ProgrammingError
             with pytest.raises(ProgrammingError):

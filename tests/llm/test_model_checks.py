@@ -58,7 +58,10 @@ class ThinkingTests(unittest.TestCase):
                 {"extra_body": {"thinking": None}},
                 {"thinking": {"type": "disabled"}},
                 {"model_kwargs": {"thinking": {"type": "disabled"}}},
-                {"use_responses_api": True},
+                {"use_responses_api": True, "reasoning": {"effort": "high"}},
+                {"use_responses_api": True, "previous_response_id": "resp_old"},
+                {"use_responses_api": True, "extra_body": {"conversation": "conv_old"}},
+                {"use_responses_api": True, "store": True},
             ):
                 with self.subTest(provider=provider, params=params), self.assertRaises(ValidationError):
                     ModelConfig(provider=provider, model="deepseek-flash", api_key=KEY, parameters=params)
@@ -164,12 +167,12 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
     async def test_output_failure_and_single_selection(self):
         variants = [
             ("chat", {"reasoning": KEY}, "thinking_mismatch"),
-            ("chat", {"finish": "length"}, "incomplete_or_refused"),
-            ("json_mode", {"content": "not JSON " + KEY}, "invalid_output_or_parameters"),
-            ("json_schema", {"content": '{"ok":true,"extra":1}'}, "invalid_output_or_parameters"),
-            ("json_schema", {"content": '{"ok":false}'}, "invalid_output_or_parameters"),
-            ("json_schema", {"content": '{"ok":1}'}, "invalid_output_or_parameters"),
-            ("json_schema", {"content": '{"ok":"true"}'}, "invalid_output_or_parameters"),
+            ("chat", {"finish": "length"}, "truncated"),
+            ("json_mode", {"content": "not JSON " + KEY}, "invalid_json"),
+            ("json_schema", {"content": '{"ok":true,"extra":1}'}, "invalid_fields"),
+            ("json_schema", {"content": '{"ok":false}'}, "unexpected_value"),
+            ("json_schema", {"content": '{"ok":1}'}, "invalid_fields"),
+            ("json_schema", {"content": '{"ok":"true"}'}, "invalid_fields"),
         ]
         for capability, options, error in variants:
             requests = []

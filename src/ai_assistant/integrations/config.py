@@ -60,10 +60,12 @@ class IntegrationsConfig(Settings):
 
 
 class GroupConfig(Settings):
+    skill_ids: list[str] | None = None
     resources: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class FeishuChannel(Settings):
+    default_group_skill_ids: list[str] = Field(default_factory=list)
     enabled: bool = False
     streaming: bool = False
     stream_interval_seconds: float = Field(default=1, ge=0.1, allow_inf_nan=False)

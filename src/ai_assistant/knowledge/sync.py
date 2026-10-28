@@ -30,36 +30,36 @@ def settings(config):
     )
 
 
-async def register(config, reference, *, identity="user"):
+async def resolve_submission(config, reference, *, identity="user", tags=None):
+    """仅解析来源；云端只读请求不占用数据库事务。"""
+    base = config.config_path.parent if config.config_path else Path.cwd()
+    if reference.startswith("https://"):
+        descriptor = cloud_reference(config, reference, identity)
+        async with cloud_reader(config, identity) as reader:
+            descriptor = await reader.resolve(descriptor)
+        uri = cloud_uri(config.integrations.feishu.app_id, identity,
+                        descriptor["kind"], descriptor["token"])
+    else:
+        root = Path(config.workspace.root)
+        root = root if root.is_absolute() else base / root
+        workspace = ReadOnlyWorkspace(root, exclude_patterns=config.workspace.exclude_patterns,
+                                      config_path=config.config_path)
+        path = workspace._path(reference)
+        if not path.is_file() or path.suffix.lower() not in EXTENSIONS:
+            raise KnowledgeError("不支持的文档类型或文件不存在。")
+        uri, descriptor = path.as_uri(), local_descriptor(path, root)
+    if tags:
+        descriptor["tags"] = list(tags)
+    return uri, descriptor
+
+
+async def register(config, reference, *, identity="user", restore=True, tags=None):
+    uri, descriptor = await resolve_submission(config, reference, identity=identity, tags=tags)
     store = RagStore(settings(config))
     try:
-        base = config.config_path.parent if config.config_path else Path.cwd()
-        if reference.startswith("https://"):
-            descriptor = cloud_reference(config, reference, identity)
-            async with cloud_reader(config, identity) as reader:
-                descriptor = await reader.resolve(descriptor)
-            uri = cloud_uri(
-                config.integrations.feishu.app_id,
-                identity,
-                descriptor["kind"],
-                descriptor["token"],
-            )
-        else:
-            root = Path(config.workspace.root)
-            root = root if root.is_absolute() else base / root
-            workspace = ReadOnlyWorkspace(
-                root,
-                exclude_patterns=config.workspace.exclude_patterns,
-                config_path=config.config_path,
-            )
-            path = workspace._path(reference)
-            if not path.is_file() or path.suffix.lower() not in EXTENSIONS:
-                raise KnowledgeError("不支持的文档类型或文件不存在。")
-            uri = path.as_uri()
-            descriptor = local_descriptor(path, root)
-        source = await store.add_submission(uri, descriptor)
-        run = await store.request_sync({"source_id": source})
-        return {"source_id": source, "sync_id": run, "source_uri": uri}
+        from ai_assistant.knowledge.management import register_submission
+        result = await register_submission(store, uri, descriptor, restore=restore)
+        return result if result.get('status') == 'removed' else dict(result, source_uri=uri)
     finally:
         await store.close()
 
@@ -88,7 +88,7 @@ async def configure(config, store):
         ):
             p = Path(unquote(urlsplit(doc["source_uri"]).path))
             if p.is_relative_to(root):
-                await store.add_submission(doc["source_uri"], local_descriptor(p, root))
+                await store.add_submission(doc["source_uri"], local_descriptor(p, root), restore=False)
 
 
 async def synchronize(config, store, run):
@@ -166,6 +166,10 @@ async def synchronize(config, store, run):
 
             if isinstance(exc, LeaseLost):
                 raise
+            async with store.engine.begin() as conn:
+                await conn.execute(text("UPDATE rag_sources SET checked_at=now(),error=:error WHERE kb=:kb AND id=:id"),
+                    dict(kb=store.config.knowledge_base_id, id=name,
+                         error=exc.code if isinstance(exc, SourceFailure) else type(exc).__name__))
             errors.append(
                 {
                     "source": name,
@@ -226,7 +230,7 @@ async def synchronize(config, store, run):
                         "source_name": title,
                         "media_type": __import__("mimetypes").guess_type(title)[0]
                         or "application/octet-stream",
-                        "tags": [],
+                        "tags": descriptor.get("tags", []),
                     }
                 else:
                     async with cloud_reader(config, descriptor["identity"]) as reader:
@@ -258,13 +262,13 @@ async def synchronize(config, store, run):
                         or descriptor.get("name")
                         or descriptor["token"],
                         "media_type": "application/x-feishu-" + descriptor["kind"],
-                        "tags": [],
+                        "tags": descriptor.get("tags", []),
                         "source_url": descriptor.get("url", ""),
                         "identity": descriptor["identity"],
                         "remote_revision": after,
                     }
                 if previous_document and previous_document["metadata"]:
-                    metadata["tags"] = previous_document["metadata"].get("tags", [])
+                    metadata["tags"] = descriptor.get("tags", previous_document["metadata"].get("tags", []))
                 await store.sync_heartbeat(run)
                 job = await store.submit(
                     source_uri=uri,

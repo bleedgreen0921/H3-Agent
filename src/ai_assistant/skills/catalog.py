@@ -144,10 +144,11 @@ class Skill:
 
 
 class SkillCatalog:
-    def __init__(self, roots):
+    def __init__(self, roots, *, disabled=()):
         self._temporary = TemporaryDirectory(prefix='assistant-skills-')
         self.skills = {}
         self.diagnostics = []
+        disabled = frozenset(disabled)
         try:
             for root in roots:
                 root = Path(root).absolute()
@@ -157,10 +158,16 @@ class SkillCatalog:
                     if entry.name.startswith('.') or not entry.is_dir():
                         continue
                     identity = 'skill:' + hashlib.sha256(str(root / entry.name).encode()).hexdigest()[:24]
+                    # 项目级禁用优先于自动发现，不删除共享包，也不授予隐含权限。
+                    if entry.name in disabled or identity in disabled:
+                        continue
                     destination = Path(self._temporary.name).resolve() / identity.replace(':', '-')
                     try:
                         digest = copy_package(entry, destination)
                         metadata, body = parse_skill(destination / 'SKILL.md')
+                        if metadata['name'] in disabled:
+                            shutil.rmtree(destination)
+                            continue
                         warnings = []
                         if metadata['name'] != entry.name:
                             warnings.append('Directory name differs from skill name.')
@@ -228,3 +235,50 @@ class SkillCatalog:
             except UnicodeDecodeError:
                 result['binary'] = True
         return result
+
+
+class RestrictedSkillCatalog(SkillCatalog):
+    """共享不可变包快照，只暴露当前群明确授权的项目。"""
+
+    def __init__(self, source, identities):
+        self.skills = {}
+        self.diagnostics = []
+        for identity in identities:
+            if identity not in source.skills:
+                raise SkillError('群聊授权的 Skill ID 不存在，请检查配置。')
+            self.skills[identity] = source.skills[identity]
+
+    def close(self):
+        # 包生命周期由进程级原始目录管理。
+        pass
+
+
+def group_skill_ids(config, binding):
+    groups = config.channels.feishu.groups
+    matches = [value for chat, value in groups.items()
+               if binding == f'{config.integrations.feishu.app_id}:{chat}:{config.integrations.feishu.owner_open_id}'] if config.integrations.feishu else []
+    if len(matches) != 1:
+        raise SkillError('无法确定当前群的 Skills 授权。')
+    selected = matches[0].skill_ids
+    return config.channels.feishu.default_group_skill_ids if selected is None else selected
+
+
+def skills_for_caller(config, source, caller):
+    if caller.channel != 'feishu_group':
+        return source
+    identities = group_skill_ids(config, caller.binding)
+    if not identities:
+        return None
+    if source is None:
+        raise SkillError('群聊已授权 Skills，但未配置本地 Skills。')
+    return RestrictedSkillCatalog(source, identities)
+
+
+def validate_group_skills(config, source):
+    from ai_assistant.config import ConfigError
+    lists = [config.channels.feishu.default_group_skill_ids]
+    lists += [g.skill_ids for g in config.channels.feishu.groups.values() if g.skill_ids is not None]
+    for identities in lists:
+        for identity in identities:
+            if source is None or identity not in source.skills:
+                raise ConfigError('群聊授权的 Skill ID 不存在，请检查 default_group_skill_ids / skill_ids。')

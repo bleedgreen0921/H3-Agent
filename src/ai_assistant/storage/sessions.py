@@ -52,7 +52,7 @@ class SessionRepository:
             return await self.conn.execute(sql, params)
         except Exception:
             self.broken = True
-            raise SessionStorageError('Session database unavailable; check connection and run session init.') from None
+            raise SessionStorageError('Session database unavailable; check connection and run init.') from None
 
     async def check(self):
         await self.execute('SELECT 1')
@@ -60,8 +60,9 @@ class SessionRepository:
     async def check_schema(self):
         row = await (await self.execute(
             'SELECT version FROM assistant_session_schema WHERE singleton = true')).fetchone()
-        if not row or row['version'] != 2:
-            raise SessionError('Unsupported session schema; run session init with a compatible application.')
+        if not row or row['version'] != 3:
+            raise SessionError('Unsupported session schema; run init with a compatible application.')
+        await self.execute('SELECT binding,title FROM assistant_sessions LIMIT 0')
         await self.execute('SELECT call_id FROM assistant_model_usage LIMIT 0')
         await self.execute('SELECT enabled_at FROM assistant_usage_schema LIMIT 0')
         # Also fail before any model calls if native Saver initialization is missing.
@@ -83,18 +84,20 @@ class SessionRepository:
             if not self.broken:
                 await self.execute('SELECT pg_advisory_unlock(%s)', (lock_key(ident),))
 
-    async def open(self, workspace, ident=None):
+    async def open(self, workspace, ident=None, *, binding=None):
         await self.release()
         creating = ident is None
         ident = await self.acquire(str(uuid4()) if creating else ident)
         if creating:
             thread = str(uuid4())
             await self.execute('''INSERT INTO assistant_sessions
-                (id,workspace,thread_id,thread_ids,status) VALUES(%s,%s,%s,%s,'ready')''',
-                (ident, str(workspace), thread, [thread]))
+                (id,workspace,thread_id,thread_ids,status,binding) VALUES(%s,%s,%s,%s,'ready',%s)''',
+                (ident, str(workspace), thread, [thread], binding))
         row = await (await self.execute('SELECT * FROM assistant_sessions WHERE id=%s', (ident,))).fetchone()
         if not row:
             raise SessionError('Session not found.')
+        if binding is not None and row['binding'] not in (None, binding):
+            raise SessionError('会话不属于当前聊天。')
         if row['format_version'] != 1:
             raise SessionError('Unsupported session format.')
         if row['status'] == 'deleting':
@@ -118,36 +121,49 @@ class SessionRepository:
             thread_ids=CASE WHEN %s=ANY(thread_ids) THEN thread_ids ELSE array_append(thread_ids,%s) END,
             updated_at=clock_timestamp() WHERE id=%s''', (thread, thread, thread, self.current))
 
-    async def complete(self, config, *, input_id=None):
+    async def complete(self, config, *, input_id=None, title=None):
         from psycopg.types.json import Jsonb
         # Keep only the native state locator, never callbacks or runtime resources.
         c = config['configurable']
         locator = {'configurable': {k: c[k] for k in ('thread_id', 'checkpoint_ns', 'checkpoint_id')}}
-        if input_id is not None:
-            await self.update_current('''UPDATE assistant_sessions SET complete=%s,status='ready',
-                last_input_id=%s, updated_at=clock_timestamp() WHERE id=%s''',
-                (Jsonb(locator), input_id, self.current))
-        else:
-            await self.update_current('''UPDATE assistant_sessions SET complete=%s,status='ready',
-                updated_at=clock_timestamp() WHERE id=%s''', (Jsonb(locator), self.current))
+        # 主题与成功指针同事务，避免失败轮次的主题提前发布。
+        async with self.conn.transaction():
+            if title is not None:
+                await self.update_current('UPDATE assistant_sessions SET title=%s WHERE id=%s',
+                                          (title, self.current))
+            if input_id is not None:
+                await self.update_current('''UPDATE assistant_sessions SET complete=%s,status='ready',
+                    last_input_id=%s, updated_at=clock_timestamp() WHERE id=%s''',
+                    (Jsonb(locator), input_id, self.current))
+            else:
+                await self.update_current('''UPDATE assistant_sessions SET complete=%s,status='ready',
+                    updated_at=clock_timestamp() WHERE id=%s''', (Jsonb(locator), self.current))
 
     async def interrupted(self):
         await self.update_current("UPDATE assistant_sessions SET status='interrupted', updated_at=clock_timestamp() WHERE id=%s",
                            (self.current,))
 
-    async def delete(self, ident):
-        await self.release()
-        ident = await self.acquire(ident)
-        row = await (await self.execute('SELECT thread_ids FROM assistant_sessions WHERE id=%s', (ident,))).fetchone()
-        if not row:
-            raise SessionError('Session not found.')
+    async def delete(self, ident, *, binding=None):
+        ident = session_uuid(ident)
+        if self.current != ident:
+            await self.release()
+            ident = await self.acquire(ident)
+        row = await (await self.execute('SELECT thread_ids,status,binding FROM assistant_sessions WHERE id=%s', (ident,))).fetchone()
+        if not row or (binding is not None and row['binding'] != binding):
+            raise SessionError('未找到可删除的会话。')
+        if row['status'] == 'waiting' or (binding is not None and row['status'] == 'running'):
+            raise SessionError('会话正在执行或等待续接，请先 /cancel 并等待清理结束。')
         await self.execute("UPDATE assistant_sessions SET status='deleting' WHERE id=%s", (ident,))
         try:
             for thread in row['thread_ids']:
                 await self.saver.adelete_thread(thread)
         except Exception:
             raise SessionStorageError('Session deletion incomplete; retry session delete.') from None
-        await self.execute('DELETE FROM assistant_sessions WHERE id=%s', (ident,))
+        async with self.conn.transaction():
+            exists = await (await self.execute("SELECT to_regclass('assistant_channel_sessions') AS name")).fetchone()
+            if exists['name']:
+                await self.execute('DELETE FROM assistant_channel_sessions WHERE session_id=%s', (ident,))
+            await self.execute('DELETE FROM assistant_sessions WHERE id=%s', (ident,))
 
     async def waiting(self, pending, input_id):
         from psycopg.types.json import Jsonb
@@ -190,9 +206,12 @@ async def session_storage(settings, *, initialize=False):
                                 await repo.execute('''CREATE TABLE IF NOT EXISTS assistant_session_schema (
                                     singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), version integer NOT NULL)''')
                                 row = await (await repo.execute('SELECT version FROM assistant_session_schema')).fetchone()
-                                if row and row['version'] not in (1, 2):
+                                if row and row['version'] not in (1, 2, 3):
                                     raise SessionError('Unsupported session schema version.')
                                 await repo.execute(DDL)
+                                await repo.execute('ALTER TABLE assistant_sessions ADD COLUMN IF NOT EXISTS binding text')
+                                await repo.execute("ALTER TABLE assistant_sessions ADD COLUMN IF NOT EXISTS title text NOT NULL DEFAULT ''")
+                                await repo.execute('CREATE INDEX IF NOT EXISTS assistant_sessions_binding ON assistant_sessions(binding,updated_at DESC,id)')
                                 from ai_assistant.storage.usage import DDL as USAGE_DDL
                                 await repo.execute(USAGE_DDL)
                                 await repo.execute('CREATE INDEX IF NOT EXISTS assistant_model_usage_session ON assistant_model_usage(session_id)')
@@ -202,7 +221,7 @@ async def session_storage(settings, *, initialize=False):
                                 await repo.execute('ALTER TABLE assistant_sessions ADD COLUMN IF NOT EXISTS pending_input text')
                                 await repo.execute('ALTER TABLE assistant_sessions DROP CONSTRAINT IF EXISTS assistant_sessions_status_check')
                                 await repo.execute("ALTER TABLE assistant_sessions ADD CONSTRAINT assistant_sessions_status_check CHECK(status IN ('ready','running','interrupted','deleting','waiting'))")
-                                await repo.execute('INSERT INTO assistant_session_schema VALUES(true,2) ON CONFLICT(singleton) DO UPDATE SET version=2')
+                                await repo.execute('INSERT INTO assistant_session_schema VALUES(true,3) ON CONFLICT(singleton) DO UPDATE SET version=3')
                         finally:
                             await repo.execute('SELECT pg_advisory_unlock(%s)', (SCHEMA_LOCK,))
                     await repo.check_schema()

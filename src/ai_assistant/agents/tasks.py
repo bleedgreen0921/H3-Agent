@@ -2,8 +2,7 @@
 import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import ToolException
 
 TASK_WRITES = {'task_v2_task_create', 'task_v2_task_patch', 'task_v2_task_addMembers'}
@@ -149,18 +148,6 @@ async def read_task(context, entry, guid, config=None, params=None):
     if not task or task.get('guid') != guid:
         raise ToolException('任务回读失败或 GUID 不符；没有自动重放写入。')
     return task
-
-
-class TaskOutcomeMiddleware(AgentMiddleware):
-    async def aafter_agent(self, state, runtime):
-        outcomes = state.get('turn_outcome') or {}
-        if not outcomes:
-            return None
-        lines = ['未完成：远端任务操作已发生，但业务核对未通过；未自动补写或重放。']
-        for outcome in outcomes.values():
-            lines.append(json.dumps(outcome, ensure_ascii=False))
-        last = state['messages'][-1]
-        return {'messages': [AIMessage(content='\n'.join(lines), id=last.id)]}
 
 
 def outcome(context, operation, expected, actual, issues):

@@ -24,11 +24,25 @@ def create_model(config: AppConfig, name: str | None = None) -> BaseChatModel:
         try:
             validate_deepseek_parameters(options)
         except ValueError:
-            raise ConfigError("DeepSeek requires thinking disabled and Chat Completions.") from None
+            raise ConfigError("DeepSeek 参数冲突；请关闭思考并使用完整历史回放。") from None
         body = deepcopy(options.get("extra_body", {}))
-        body["thinking"] = {"type": "disabled"}
+        if options.get("use_responses_api"):
+            # Responses 由原生 OpenAI 适配器转换消息、工具与结构化输出。
+            body.pop("thinking", None)
+            body.pop("reasoning", None)
+            body.pop("reasoning_effort", None)
+            kwargs = deepcopy(options.get("model_kwargs", {}))
+            kwargs.pop("reasoning", None)
+            kwargs.pop("reasoning_effort", None)
+            if "model_kwargs" in options:
+                options["model_kwargs"] = kwargs
+            options.pop("reasoning_effort", None)
+            options.update(reasoning={"effort": "none"}, store=False,
+                           use_previous_response_id=False)
+        else:
+            body["thinking"] = {"type": "disabled"}
+            options["use_responses_api"] = False
         options["extra_body"] = body
-        options["use_responses_api"] = False
     provider = profile.provider
     preset = PROVIDER_PRESETS.get(provider)
     base_url = profile.base_url
@@ -41,6 +55,8 @@ def create_model(config: AppConfig, name: str | None = None) -> BaseChatModel:
             # optional stream usage extensions. Explicit settings still win.
             options.setdefault("use_responses_api", False)
             options.setdefault("stream_usage", False)
+    if is_deepseek(profile.provider, profile.model) and options.get("use_responses_api"):
+        provider = "openai"
     if base_url is not None:
         options["base_url"] = base_url
     if profile.api_key is not None:

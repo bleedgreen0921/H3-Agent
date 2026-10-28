@@ -141,19 +141,16 @@ class SessionsConfig(BaseModel):
 class ContextConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     summary_model: str | None = Field(default=None, min_length=1)
-    summary_tokens: int = Field(default=1500, ge=100, le=3000)
+    summary_tokens: int = Field(default=10000, ge=100, le=10000)
+    summary_every_turns: int = Field(default=10, ge=0, strict=True)
     tool_result_tokens: int = Field(default=4000, ge=100)
     mcp_schema_tokens: int = Field(default=6000, ge=100)
-
-
-class MemoryConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
-    enabled: bool = False
 
 
 class SkillsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     roots: list[str] = Field(default_factory=list)
+    disabled: list[str] = Field(default_factory=list)
 
 
 from ai_assistant.integrations.config import MCPConfig, IntegrationsConfig, ChannelsConfig
@@ -170,7 +167,6 @@ class AppConfig(BaseModel):
     skills: SkillsConfig | None = None
     sessions: SessionsConfig | None = None
     context: ContextConfig | None = None
-    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     agent: AgentSettings = Field(default_factory=AgentSettings)
     knowledge: KnowledgeConfig | None = None
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
@@ -214,13 +210,6 @@ class AppConfig(BaseModel):
                     raise ValueError('Groups may only grant official Feishu bot services')
         if self.channels.feishu.enabled and (self.sessions is None or self.integrations.feishu is None):
             raise ValueError('Feishu channel requires sessions and Feishu configuration')
-        if self.memory.enabled and (self.sessions is None or self.integrations.feishu is None
-                                    or self.knowledge is None or self.context is None):
-            raise ValueError('Memory requires sessions, Feishu owner, knowledge embedding and context')
-        if self.memory.enabled:
-            from urllib.parse import urlsplit
-            if urlsplit(self.knowledge.embedding.base_url).hostname not in {'localhost', '127.0.0.1', '::1'}:
-                raise ValueError('Personal memory requires the configured local embedding service')
         return self
 
 

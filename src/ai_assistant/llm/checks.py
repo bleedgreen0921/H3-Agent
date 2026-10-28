@@ -5,6 +5,7 @@ from collections.abc import Callable
 from contextlib import aclosing
 from dataclasses import dataclass
 import math
+import json
 from time import monotonic
 from typing import Literal
 
@@ -70,10 +71,18 @@ def _validate_response(message, *, deepseek: bool) -> None:
             for block in message.content
         ):
             raise ProbeFailure("thinking_mismatch")
-    if message.additional_kwargs.get("refusal") or message.response_metadata.get("finish_reason") in (
-        "length", "content_filter", "refusal",
+    if message.response_metadata.get("status") in ("incomplete", "failed"):
+        raise ProbeFailure("truncated" if message.response_metadata["status"] == "incomplete" else "request_failed")
+    if isinstance(message.content, list) and any(
+        isinstance(block, dict) and block.get("type") == "refusal" for block in message.content
     ):
-        raise ProbeFailure("incomplete_or_refused")
+        raise ProbeFailure("refused")
+    if message.response_metadata.get("finish_reason") == "length":
+        raise ProbeFailure("truncated")
+    if message.additional_kwargs.get("refusal") or message.response_metadata.get("finish_reason") in (
+        "content_filter", "refusal",
+    ):
+        raise ProbeFailure("refused")
 
 
 def _error(exc: Exception) -> tuple[str, int | None] | None:
@@ -90,6 +99,7 @@ def _error(exc: Exception) -> tuple[str, int | None] | None:
         return "connection", None
     # Optional SDK types cover errors raised before native message conversion.
     try:
+        from openai.types.responses import ResponseError
         from openai import (
             OpenAIError, APIConnectionError, APITimeoutError,
             ContentFilterFinishReasonError, LengthFinishReasonError,
@@ -101,8 +111,12 @@ def _error(exc: Exception) -> tuple[str, int | None] | None:
             return "timeout", None
         if isinstance(exc, APIConnectionError):
             return "connection", None
-        if isinstance(exc, (LengthFinishReasonError, ContentFilterFinishReasonError)):
-            return "incomplete_or_refused", None
+        if isinstance(exc, LengthFinishReasonError):
+            return "truncated", None
+        if isinstance(exc, ContentFilterFinishReasonError):
+            return "refused", None
+        if isinstance(exc, ValueError) and exc.args and isinstance(exc.args[0], ResponseError):
+            return "request_failed", None
         sdk_error = isinstance(exc, OpenAIError)
     if isinstance(exc, (ModelError, httpx.HTTPStatusError)) or sdk_error:
         status = getattr(exc, "status_code", None)
@@ -148,8 +162,14 @@ async def _probe(model, capability: str, deepseek: bool, record: dict):
         )
     else:
         message = await model.ainvoke("Reply with the word OK.")
+    record["response"] = {"output": message.content, "text": message.text,
+                          "status": message.response_metadata.get("status"),
+                          "finish_reason": message.response_metadata.get("finish_reason"),
+                          "tool_calls": message.tool_calls, "usage": _usage(message)}
     record["usage"] = _usage(message)
     _validate_response(message, deepseek=deepseek)
+    if getattr(model, "use_responses_api", False) is True and message.response_metadata.get("status") != "completed":
+        raise ProbeFailure("incomplete_response")
     if capability == "tools":
         calls = message.tool_calls
         if message.invalid_tool_calls or len(calls) != 1 or calls[0]["name"] != "connection_check":
@@ -161,12 +181,20 @@ async def _probe(model, capability: str, deepseek: bool, record: dict):
         if not message.text.strip():
             raise ProbeFailure("empty_output")
         if capability in ("json_mode", "json_schema"):
-            ProbeObject.model_validate_json(message.text)
+            try:
+                value = json.loads(message.text)
+            except (ValueError, TypeError):
+                raise ProbeFailure("invalid_json") from None
+            if not isinstance(value, dict) or set(value) != {"ok"} or type(value["ok"]) is not bool:
+                raise ProbeFailure("invalid_fields")
+            if value["ok"] is not True:
+                raise ProbeFailure("unexpected_value")
 
 
 async def check_model(
     config: AppConfig, name: str | None = None, capability: str = "all", timeout: float = 60,
     *, on_result: Callable[[CheckResult], None] | None = None,
+    on_evidence: Callable[[str, dict], None] | None = None,
 ) -> list[CheckResult]:
     """Each selected capability is invoked once; the profile controls SDK retries.
 
@@ -200,6 +228,8 @@ async def check_model(
                         raise
                     category, status = failure
                     result = CheckResult(item, "failed", monotonic() - start, record.get("usage"), category, status)
+            if on_evidence is not None and capability in ("all", item):
+                on_evidence(item, record)
             results.append(result)
             if on_result is not None:
                 on_result(result)

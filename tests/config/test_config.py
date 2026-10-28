@@ -34,7 +34,7 @@ class ConfigTests(unittest.TestCase):
     def cli(self, *args):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            code = main(["config", "check", "--config", str(self.path), *args])
+            code = main(["mcp", "list", "--config", str(self.path), *args])
         return code, out.getvalue(), err.getvalue()
 
     def test_example_loads_without_creating_models(self):
@@ -120,16 +120,16 @@ class ConfigTests(unittest.TestCase):
             config = load_config(self.path)
             code, out, err = self.cli()
             self.assertEqual(code, 0)
-            self.assertIn("未检查连通性", out)
-            self.assertIn("test", out)
+            self.assertEqual(out.strip(), "{}")
             self.assertEqual(err, "")
         self.assertEqual(dict(os.environ), before)
         self.path.write_text(VALID.replace("SENTINEL_PRIVATE_KEY", "${UNCHANGED_LITERAL}"))
         self.assertEqual(load_config(self.path).models["test"].api_key.get_secret_value(), "${UNCHANGED_LITERAL}")
 
     def test_selected_profile_and_unknown_profile(self):
-        self.assertEqual(self.cli("--model", "test")[0], 0)
-        self.assertEqual(self.cli("--model", "missing")[0], 2)
+        with patch("ai_assistant.llm.checks.check_model", return_value=[]):
+            self.assertEqual(main(["model", "check", "--config", str(self.path), "--model", "test"]), 0)
+            self.assertEqual(main(["model", "check", "--config", str(self.path), "--model", "missing"]), 2)
 
     def test_cli_bad_arguments_exit_two(self):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
@@ -138,11 +138,11 @@ class ConfigTests(unittest.TestCase):
 
     def test_module_entrypoint(self):
         result = subprocess.run(
-            [sys.executable, "-B", "-m", "ai_assistant", "config", "check", "--config", str(self.path)],
+            [sys.executable, "-B", "-m", "ai_assistant", "mcp", "list", "--config", str(self.path)],
             capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("未检查连通性", result.stdout)
+        self.assertEqual(result.stdout.strip(), "{}")
         self.assertNotIn("SENTINEL_PRIVATE_KEY", result.stdout + result.stderr)
 
 

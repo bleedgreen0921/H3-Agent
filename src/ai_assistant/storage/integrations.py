@@ -7,6 +7,10 @@ from uuid import uuid4
 from ai_assistant.config import ConfigError
 
 DDL = '''
+CREATE TABLE IF NOT EXISTS assistant_chat_commands (
+ input_id text PRIMARY KEY, binding text NOT NULL, action text NOT NULL,
+ target text, result text, created_at timestamptz NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS assistant_operations (
  id text PRIMARY KEY, input_id text NOT NULL, principal text NOT NULL,
  tool text NOT NULL, args_digest text NOT NULL,
@@ -73,21 +77,31 @@ class OperationStore:
         return await cursor.fetchall()
 
     async def replies(self):
-        return await (await self.conn.execute('''SELECT id,input_id,status,remote_id,part,created_at
+        return await (await self.conn.execute('''SELECT id,input_id,status,remote_id,part,created_at,'channel_reply' AS kind
             FROM assistant_outbox ORDER BY created_at DESC LIMIT 100''')).fetchall()
 
+    async def commands(self, ident=None):
+        return await (await self.conn.execute("""SELECT input_id,binding,action,target,
+            CASE WHEN result IS NULL THEN 'incomplete' ELSE 'completed' END AS status,
+            created_at,result AS receipt,'management_command' AS kind FROM assistant_chat_commands
+            WHERE (%s::text IS NULL OR input_id=%s) ORDER BY created_at DESC LIMIT 100""",
+            (ident, ident))).fetchall()
+
     async def inspect(self, ident):
-        row = await (await self.conn.execute('SELECT * FROM assistant_operations WHERE id=%s', (ident,))).fetchone()
+        row = await (await self.conn.execute("""SELECT id,input_id,tool,principal,status,
+            created_at,updated_at,(result->'business_outcome' IS NOT NULL) AS needs_verification,
+            'tool_operation' AS kind FROM assistant_operations WHERE id=%s""", (ident,))).fetchone()
         if row is not None:
             return row
-        return await (await self.conn.execute('''SELECT id,input_id,status,remote_id,part,created_at,
-            'channel_reply' AS kind FROM assistant_outbox WHERE id=%s''', (ident,))).fetchone()
+        row = await (await self.conn.execute("""SELECT id,input_id,status,remote_id,part,created_at,
+            'channel_reply' AS kind FROM assistant_outbox WHERE id=%s""", (ident,))).fetchone()
+        return row if row is not None else await self.commands(ident)
 
 
 @asynccontextmanager
 async def operation_storage(settings, *, initialize=False):
     if settings is None:
-        raise ConfigError('External operations require [sessions]; run mcp init first.')
+        raise ConfigError('External operations require [sessions]; run init first.')
     from psycopg import AsyncConnection
     from psycopg.rows import dict_row
     conn = await AsyncConnection.connect(settings.database_url.get_secret_value(),
@@ -98,4 +112,5 @@ async def operation_storage(settings, *, initialize=False):
             await store.initialize()
         await conn.execute('SELECT id FROM assistant_operations LIMIT 0')
         await conn.execute('SELECT last_input_id FROM assistant_sessions LIMIT 0')
+        await conn.execute('SELECT input_id FROM assistant_chat_commands LIMIT 0')
         yield store

@@ -27,9 +27,26 @@ def test_card_limits_serialized_utf8_without_silent_final_loss():
     assert card('完整回答', 'complete')[1]
 
 
+def test_card_uses_native_markdown_for_sql_answer_and_stream_updates():
+    text = ("## 聚合函数\n\n**COUNT** 与 `SUM`\n\n"
+            "| 函数 | 说明 |\n| --- | --- |\n| COUNT | 计数 |\n\n"
+            "```sql\nSELECT COUNT(*) FROM emp;\n```\n\n"
+            "[参考](https://example.com/sql?a=1&b=2)")
+    for state in ('delta', 'complete', 'failed'):
+        payload, fits = card(text, state)
+        assert fits
+        assert payload['schema'] == '2.0'
+        assert payload['config']['update_multi'] is True
+        assert payload['body']['elements'] == [{'tag': 'markdown', 'content': text}]
+        assert payload['header']['title']['tag'] == 'plain_text'
+        assert json.loads(json.dumps(payload, ensure_ascii=False)) == payload
+    assert card('', 'stage')[0]['body']['elements'][0]['content'] == '正在处理…'
+
+
 @pytest.mark.skipif(not URL, reason='Set a disposable SESSION_TEST_DATABASE_URL')
 @pytest.mark.parametrize('outcome', ['success', 'unknown', 'rejected', 'throttle', 'update_rejected', 'missing_id'])
-def test_card_creation_receipts_final_priority_and_resume(tmp_path, outcome):
+@pytest.mark.parametrize('terminal_state', ['complete', 'partial', 'failed', 'unknown', 'cancelled', 'needs_clarification'])
+def test_card_creation_receipts_final_priority_and_resume(tmp_path, outcome, terminal_state):
     async def run():
         from psycopg.types.json import Jsonb
         c = config(tmp_path, sessions={'database_url': URL}, channels={'feishu': {'streaming': True}})
@@ -63,7 +80,7 @@ def test_card_creation_receipts_final_priority_and_resume(tmp_path, outcome):
                 await worker.send_pending()
             # 知识等待恢复会重新创建内存 sink，但同一个 outbox 行和远端卡片复用。
             stream = ReplyStream(c, row)
-            stream.emit({'kind': 'complete', 'text': '最终答案'})
+            stream.emit({'kind': terminal_state, 'text': '最终答案'})
             await stream.persist(store.conn)
             stream.emit({'kind': 'delta', 'text': '迟到增量不能覆盖完成'})
             await stream.persist(store.conn)
@@ -71,7 +88,7 @@ def test_card_creation_receipts_final_priority_and_resume(tmp_path, outcome):
             await worker.send_pending()
             await worker.send_pending()
             receipt = await (await store.conn.execute("SELECT * FROM assistant_outbox WHERE input_id=%s AND kind='card'", (row['id'],))).fetchone()
-            assert receipt['final_state'] == 'complete'
+            assert receipt['final_state'] == terminal_state
             assert '迟到' not in str(receipt['body'])
             if outcome in {'success', 'throttle'}:
                 assert api.send_card.await_count == (2 if outcome == 'throttle' else 1)
@@ -93,7 +110,8 @@ def test_card_creation_receipts_final_priority_and_resume(tmp_path, outcome):
 
 
 @pytest.mark.skipif(not URL, reason='Set a disposable SESSION_TEST_DATABASE_URL')
-def test_long_final_delivered_in_full_and_failed_display_reuses_card(tmp_path):
+@pytest.mark.parametrize('terminal_state', ['complete', 'partial', 'failed', 'unknown', 'cancelled', 'needs_clarification'])
+def test_long_final_delivered_in_full_and_failed_display_reuses_card(tmp_path, terminal_state):
     async def run():
         from psycopg.types.json import Jsonb
         c = config(tmp_path, sessions={'database_url': URL}, channels={'feishu': {'streaming': True}})
@@ -110,8 +128,11 @@ def test_long_final_delivered_in_full_and_failed_display_reuses_card(tmp_path):
             worker = BotWorker(c, store, ProcessResources(Catalog()), api)
             stream = ReplyStream(c, row)
             text = '中文正文' * 5000
-            stream.emit({'kind': 'complete', 'text': text})
+            stream.emit({'kind': terminal_state, 'text': text})
             await stream.persist(store.conn)
+            stored_card = await (await store.conn.execute(
+                "SELECT body FROM assistant_outbox WHERE input_id=%s AND kind='card'", (row['id'],))).fetchone()
+            assert stored_card['body']['card']['header'] == card('', terminal_state)[0]['header']
             await worker.finish_reply(row, text)
             for _ in range(12):
                 await worker.send_pending()
@@ -121,4 +142,53 @@ def test_long_final_delivered_in_full_and_failed_display_reuses_card(tmp_path):
             await worker.enqueue_reply(row, text)
             await worker.send_pending()
             assert ''.join(call.args[1] for call in api.send_text.call_args_list) == text
+    asyncio.run(run())
+
+
+def test_outer_failure_preserves_persisted_business_terminal():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from ai_assistant.interfaces.feishu import BotWorker
+    async def run():
+        existing = {'final_state': 'partial', 'body': {'final_text': '第一项已完成；第二项失败。'}}
+        cursor = SimpleNamespace(fetchone=AsyncMock(return_value=existing))
+        store = SimpleNamespace(conn=SimpleNamespace(execute=AsyncMock(return_value=cursor)))
+        settings = SimpleNamespace(channels=SimpleNamespace(feishu=SimpleNamespace(streaming=True)))
+        worker = BotWorker(settings, store, None, None)
+        worker.finish_reply = AsyncMock()
+        row = {'id': 'fixture-input'}
+        await worker.fail_reply(row, '通用失败提示', cancelled=True)
+        worker.finish_reply.assert_awaited_once_with(row, '第一项已完成；第二项失败。')
+    asyncio.run(run())
+
+
+def test_markdown_survives_card_creation_and_update_http(tmp_path):
+    import httpx
+    from ai_assistant.integrations.feishu_files import FeishuAPI
+
+    async def run():
+        requests = []
+        text = '## SQL\n\n**计数**\n```sql\nSELECT COUNT(*) FROM emp;\n```'
+        payload, _ = card(text, 'complete')
+
+        def respond(request):
+            if request.url.path.endswith('/tenant_access_token/internal'):
+                return httpx.Response(200, json={'tenant_access_token': 'fixture', 'expire': 7200})
+            body = json.loads(request.content)
+            delivered = json.loads(body['content'])
+            assert delivered['schema'] == '2.0'
+            assert delivered['body']['elements'] == [{'tag': 'markdown', 'content': text}]
+            if request.method == 'POST':
+                assert body['msg_type'] == 'interactive'
+                assert body['uuid'] == 'fixture-operation'
+            requests.append(request.method)
+            return httpx.Response(200, json={'code': 0, 'data': {'message_id': 'fixture-message'}})
+
+        c = config(tmp_path, integrations={'feishu': {
+            'app_id': 'cli_fixture', 'app_secret': 'not-real', 'owner_open_id': 'owner'}})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            api = FeishuAPI(c.integrations.feishu, client)
+            await api.send_card('fixture-chat', payload, 'fixture-operation')
+            await api.update_card('fixture-message', payload)
+        assert requests == ['POST', 'PATCH']
     asyncio.run(run())

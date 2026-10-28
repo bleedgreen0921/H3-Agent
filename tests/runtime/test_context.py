@@ -59,11 +59,14 @@ def test_sources_survive_mid_turn_summary(tmp_path):
         s = managed(tmp_path, [AIMessage(content='答' * 250), AIMessage(content='答' * 250),
                                call('evidence', 'a'), AIMessage(content='done')], tools=[evidence])
         await s.run_turn('问' * 250)
-        before = await s.run_turn('问' * 250)
+        await s.run_turn('问' * 250)
         turn = await s.run_turn('retrieve')
         assert [d.id for d in turn.sources] == ['actual']
         assert turn.usage.summary_model_calls > 0
-        assert len(turn.messages) <= len(before.messages) + 1
+        # 系统提示变化可能提前触发上一轮摘要；验证压缩效果和工具链完整性，不依赖消息条数。
+        assert any(is_summary(m) for m in turn.messages)
+        assert not any(m.content == '问' * 250 for m in turn.messages)
+        validate_tool_pairs(turn.messages)
         assert turn.usage.tool_calls == 1
     asyncio.run(run())
 
