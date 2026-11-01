@@ -21,10 +21,23 @@ EXCLUDED = {
 }
 
 
+def is_config_file(path, sources):
+    for source in sources:
+        if path == source:
+            return True
+        try:
+            # APFS 大小写和 Unicode 别名及硬链接同样受保护。
+            if path.samefile(source):
+                return True
+        except OSError:
+            pass
+    return False
+
+
 class ReadOnlyWorkspace:
     """A filesystem access policy, not a sandbox against concurrent local writers."""
 
-    def __init__(self, root: Path, *, exclude_patterns=(), config_path: Path | None = None,
+    def __init__(self, root: Path, *, exclude_patterns=(), config_path: Path | None = None, config_files=(),
                  max_file_bytes=8 * MAX_FILE_BYTES, result_chars=48000,
                  scan_entries=20000, scan_bytes=128 * 1024 * 1024):
         self.max_file_bytes = max_file_bytes
@@ -35,6 +48,8 @@ class ReadOnlyWorkspace:
             raise WorkspaceError('工作区根目录必须是目录。')
         self.exclude_patterns = tuple(exclude_patterns)
         self.config_path = config_path.resolve() if config_path else None
+        self.config_files = tuple(dict.fromkeys(
+            [Path(path).resolve() for path in config_files] + ([self.config_path] if self.config_path else [])))
 
     def _excluded(self, relative: Path) -> bool:
         return any(
@@ -48,15 +63,7 @@ class ReadOnlyWorkspace:
                  for pattern in self.exclude_patterns)
 
     def _is_config(self, path):
-        if self.config_path is None:
-            return False
-        if path == self.config_path:
-            return True
-        try:
-            # APFS 可能不区分大小写及 Unicode 表示，不能仅比较路径字符串。
-            return path.samefile(self.config_path)
-        except OSError:
-            return False
+        return is_config_file(path, self.config_files)
 
     def _relative(self, value: str) -> Path:
         relative = Path(value)

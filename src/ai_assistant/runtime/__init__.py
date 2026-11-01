@@ -394,7 +394,7 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             from ai_assistant.skills.catalog import SkillCatalog, configured_roots, skills_for_caller
             source = getattr(resources, 'skills', None)
             if caller.skill_ids and source is None and source_config.skills is not None:
-                source = SkillCatalog(configured_roots(source_config), disabled=source_config.skills.disabled)
+                source = SkillCatalog(configured_roots(source_config), disabled=source_config.skills.disabled, config_files=source_config.config_files)
                 stack.callback(source.close)
             context = replace(context, skills=skills_for_caller(source_config, source, caller))
         context = replace(context, usage_store=usage_store, timezone=config.agent.timezone if caller.personal else 'UTC',

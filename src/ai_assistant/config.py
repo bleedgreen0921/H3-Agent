@@ -1,7 +1,6 @@
-"""Explicit, single-file application configuration without environment mutation."""
+"""显式配置校验及旧单文件、具名组合入口；不修改进程环境。"""
 
 from pathlib import Path
-import tomllib
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
@@ -136,7 +135,15 @@ class SessionsConfig(BaseModel):
     """Independent psycopg connection settings; never inferred from RAG."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    backend: str = Field(default="postgresql", min_length=1)
     database_url: SecretStr
+
+    @field_validator('backend')
+    @classmethod
+    def supported_backend(cls, value):
+        from ai_assistant.storage.backends import require_backend
+        require_backend('sessions', value)
+        return value
 
     @field_validator("database_url")
     @classmethod
@@ -183,6 +190,17 @@ class AppConfig(BaseModel):
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     _config_path: Path | None = PrivateAttr(default=None)
+    _config_files: tuple[Path, ...] = PrivateAttr(default=())
+    _profile: str | None = PrivateAttr(default=None)
+
+    @property
+    def config_files(self) -> tuple[Path, ...]:
+        return self._config_files
+
+    @property
+    def profile(self) -> str | None:
+        return self._profile
+
 
     @property
     def config_path(self) -> Path | None:
@@ -224,23 +242,19 @@ class AppConfig(BaseModel):
         return self
 
 
-def load_config(path: str | Path = "assistant.toml") -> AppConfig:
-    """Read exactly the given path, relative to the current directory if needed.
-
-    Errors intentionally omit parser snippets and validation inputs, which can
-    contain credentials. No dotenv, interpolation or parent-directory search.
-    """
-    try:
-        with Path(path).open("rb") as file:
-            data = tomllib.load(file)
-    except FileNotFoundError:
-        raise ConfigError("Configuration file not found; specify --config or create assistant.toml.") from None
-    except PermissionError:
-        raise ConfigError("Permission denied when reading the configuration file.") from None
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError):
-        raise ConfigError("Invalid TOML or UTF-8 in the configuration file.") from None
-    except OSError:
-        raise ConfigError("Unable to read the configuration file.") from None
+def load_config(path: str | Path = "assistant.toml", *, profile: str | None = None) -> AppConfig:
+    """读取旧单文件或显式组合；相对应用路径始终以入口目录为基准。"""
+    from ai_assistant.configuration import resolve_config
+    data, sources, selected_profile = resolve_config(path, profile)
+    # 在通用 schema 校验前给未实现后端明确摘要，不导入任何数据库客户端。
+    from ai_assistant.storage.backends import require_backend
+    for section, kind in [('sessions', 'sessions'), ('knowledge', 'knowledge')]:
+        settings = data.get(section)
+        if isinstance(settings, dict) and isinstance(settings.get('backend'), str):
+            try:
+                require_backend(kind, settings['backend'])
+            except ValueError:
+                raise ConfigError('该存储后端尚未实现；未创建连接或回退。') from None
     if 'plan' in data:
         raise ConfigError('未知配置 [plan]：Plan 模式已移除，请删除该配置节。')
     mcp = data.get('mcp')
@@ -256,6 +270,8 @@ def load_config(path: str | Path = "assistant.toml") -> AppConfig:
             logging.getLogger(__name__).warning(
                 'context.mcp_schema_tokens 已弃用且不再生效；工具大小统一由模型 max_input_tokens 检查。')
         config._config_path = Path(path).absolute()
+        config._config_files = sources
+        config._profile = selected_profile
         return config
     except ValidationError as exc:
         # Field locations and raw exception text may themselves contain secrets.

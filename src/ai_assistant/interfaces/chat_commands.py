@@ -1,7 +1,7 @@
 """飞书管理命令：可信归属、原生会话锁和持久回执，不创建模型。"""
 import json
 from pathlib import Path
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import UUID
 
 from ai_assistant.storage.sessions import SessionError, session_storage
 from ai_assistant.skills.catalog import skills_for_caller
@@ -50,15 +50,8 @@ def parse_command(text):
 
 async def reply(conn, row, text, settings):
     """调用方事务内提交回执及待投递消息，稳定 ID 防止重复投递。"""
-    from psycopg.types.json import Jsonb
-    from ai_assistant.interfaces.delivery import metadata
-    for offset in range(0, len(text), 3000):
-        await conn.execute('''INSERT INTO assistant_outbox(id,input_id,body,part)
-            VALUES(%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING''', (
-                str(uuid5(NAMESPACE_URL, row['id'] + ':reply:' + str(offset // 3000))),
-                row['id'], Jsonb({'chat_id': row['body']['chat_id'], 'text': text[offset:offset + 3000],
-                                  'delivery': {**metadata(settings), 'purpose': 'diagnostic'}}), offset // 3000))
-    await conn.execute("UPDATE assistant_inbox SET status='completed' WHERE id=%s", (row['id'],))
+    from ai_assistant.interfaces.outbox import enqueue_text
+    await enqueue_text(conn, settings, row, text, purpose='diagnostic')
 
 
 async def bind(conn, binding, session_id):

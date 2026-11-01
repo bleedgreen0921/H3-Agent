@@ -35,3 +35,5 @@ assert.equal(saved.delivery.terminal_attempts,0);
 assert.equal(busyQueries[0],'BEGIN');
 assert.equal(busyQueries.at(-1),'COMMIT');
 console.log('Busy admission uses current delivery metadata and one transaction.');
+
+assert.deepEqual(saved.message,{msg_type:'post',content:JSON.stringify({zh_cn:{content:[[{tag:'md',text:saved.text}]]}})});

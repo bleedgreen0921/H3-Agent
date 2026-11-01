@@ -25,7 +25,7 @@ export async function persistInbox(db,input,config){
    [input.id,input.binding,input.body,busy?'completed':'received']);
   const now=Date.now()/1000;
   if(busy)await db.query('INSERT INTO assistant_outbox(id,input_id,body) VALUES($1,$2,$3)',
-   [crypto.randomUUID(),input.id,{chat_id:input.body.chat_id,text:'当前队列已满，请稍后重试。',delivery:{version:1,attempts:0,terminal_attempts:0,first_terminal_at:now,deadline:now+config.final_delivery_timeout_seconds,last_error:null,purpose:'admission'}}]);
+   [crypto.randomUUID(),input.id,{chat_id:input.body.chat_id,text:'当前队列已满，请稍后重试。',message:{msg_type:'post',content:JSON.stringify({zh_cn:{content:[[{tag:'md',text:'当前队列已满，请稍后重试。'}]]}})},delivery:{version:1,attempts:0,terminal_attempts:0,first_terminal_at:now,deadline:now+config.final_delivery_timeout_seconds,last_error:null,purpose:'admission'}}]);
   await db.query('COMMIT');return busy?'busy':'received';
  }catch(error){await db.query('ROLLBACK');throw error;}
 }

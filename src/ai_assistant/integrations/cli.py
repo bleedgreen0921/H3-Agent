@@ -123,7 +123,7 @@ async def execute(config, args):
     # Explicit network diagnostics authenticate using read-only endpoints.
     from ai_assistant.integrations.mcp import mcp_resources
     base = config.config_path.parent if config.config_path else Path.cwd()
-    workspace = ReadOnlyWorkspace(base / config.workspace.root, config_path=config.config_path,
+    workspace = ReadOnlyWorkspace(base / config.workspace.root, config_path=config.config_path, config_files=config.config_files,
                                   exclude_patterns=config.workspace.exclude_patterns)
     if config.mcp is None:
         print('No MCP services configured; no connections made.')

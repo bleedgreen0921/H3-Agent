@@ -47,7 +47,7 @@ cp assistant.example.toml assistant.toml
 
 `/usage` 查询当前会话已保存的服务报告用量，进程重启后沿用同一会话累计，`/new` 单独统计。模型返回后按调用 ID 幂等保存；统计连接或表不可用不阻断聊天。仅显式 `init` 创建统计表，空记录不代表没有模型调用。详见 [运行契约](docs/runtime.md)。
 
-轮次结果由 runtime 保存；“本轮回复结束”只表示回复完整结束。只读错误允许纠正，写入失败或效果未知停止；终端正常非零退出保留退出事实，并按可信输入与规范化参数去重。
+轮次结果由 runtime 保存；正常回复直接展示正文，`complete` 仅表示本轮回复完整结束。只读错误允许纠正，写入失败或效果未知停止；终端正常非零退出保留退出事实，并按可信输入与规范化参数去重。
 
 ## 文档导航
 
@@ -66,3 +66,20 @@ cp assistant.example.toml assistant.toml
 记录、执行边界和投递恢复见 [运行与结果契约](docs/runtime.md)。旧数据格式和旧独立接口已停止支持；不自动迁移、补发或重跑历史业务。Plan、知识等待及旧接口的移除范围与验证见 [运行契约](docs/runtime.md)。
 
 飞书任务按请求由原生 Agent 选择工具，不隐式读取或写后回读。保留主人私聊默认负责人和本轮确定性时间保护；结果附加本地时间说明，原始字段完整保存。回执区分接口接受、字段未确认和明确不符，失败或未知效果不自动重放。详见 [运行契约](docs/runtime.md)。
+
+## 配置方案切换与 Spark
+
+配置可按任意现有配置节拆分为 TOML 组件，再由具名方案组合；示例见 [配置入口](config.example/profiles.toml)。当前私有入口仍默认 `current`，有效配置与拆分前一致；组件和原配置备份位于已忽略的 `.data/config/`，不要提交其中的凭据。相对路径统一以入口文件目录为基准。
+
+```bash
+./assistant.sh config list
+./assistant.sh config check --profile current
+./assistant.sh feishu serve --profile current
+# 填好 .data/config/main/spark.toml 的 api_key 后，再选择 spark。
+./assistant.sh model check --profile spark
+./assistant.sh feishu serve --profile spark
+```
+
+`--profile` 只影响本次命令，不记住上次选择；修改入口 `default_profile` 可改变默认方案。所有现有命令均支持 `--config` 与 `--profile`。服务配置切换需重新启动，不会迁移数据库或重放旧请求。
+
+Spark 使用现有 OpenAI 兼容 provider，模型为 `spark-x2.6`，首版关闭思考；无需增加依赖，环境缺少所选集成时手动执行 `"$(cat .python-path)" -m pip install -e '.[openai]'`。离线配置校验不验证 API Key 或远端权限；`model check` 会发送真实请求并可能产生费用，本次交付不自动执行。

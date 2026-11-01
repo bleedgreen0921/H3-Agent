@@ -68,7 +68,7 @@ def local_inventory(config, source):
     workspace = ReadOnlyWorkspace(
         root,
         exclude_patterns=config.workspace.exclude_patterns,
-        config_path=config.config_path,
+        config_path=config.config_path, config_files=config.config_files,
     )
     blocked = [
         Path(getattr(config.knowledge, k)).resolve()

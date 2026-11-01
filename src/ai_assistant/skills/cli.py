@@ -17,7 +17,7 @@ def add_commands(commands):
 async def execute(config, args):
     if config.skills is None:
         raise SkillError("Configure [skills] before loading skills.")
-    catalog = SkillCatalog(configured_roots(config), disabled=config.skills.disabled)
+    catalog = SkillCatalog(configured_roots(config), disabled=config.skills.disabled, config_files=config.config_files)
     try:
         if args.action == "list":
             result = dict(

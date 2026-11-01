@@ -36,7 +36,7 @@ DDL = (
 )
 
 
-class RagStore(SourceStore):
+class PgvectorStore(SourceStore):
     def __init__(self, config):
         self.config = config
         self.engine = create_async_engine(config.database_url.get_secret_value(), hide_parameters=True)
@@ -243,3 +243,9 @@ class RagStore(SourceStore):
                 ON v.id=d.desired_version WHERE d.id=:id AND d.kb=:kb AND NOT d.deleted'''),
                 dict(id=document_id, kb=self.config.knowledge_base_id))).mappings().one_or_none()
             return dict(row) if row else None
+
+
+def RagStore(config):
+    """创建显式选择的知识库存储，保留既有调用入口。"""
+    from ai_assistant.storage.backends import backend_factory
+    return backend_factory('knowledge', config.backend)(config)

@@ -74,7 +74,7 @@ def parse_skill(path):
     return data, ''.join(lines[end + 1:])
 
 
-def copy_package(source, target):
+def copy_package(source, target, *, config_files=()):
     """Resolve only internal links; reject special files, cycles and oversized trees."""
     source, target = Path(source).resolve(strict=True), Path(target)
     total = 0
@@ -89,6 +89,9 @@ def copy_package(source, target):
         resolved = path.resolve(strict=True)
         if not resolved.is_relative_to(source):
             raise SkillError('Package link escapes its root.')
+        from ai_assistant.workspace.files import is_config_file
+        if is_config_file(resolved, config_files):
+            raise SkillError('Skill package contains a protected configuration file.')
         mode = resolved.stat().st_mode
         if stat.S_ISDIR(mode):
             if resolved in ancestors:
@@ -140,7 +143,8 @@ class Skill:
 
 
 class SkillCatalog:
-    def __init__(self, roots, *, disabled=()):
+    def __init__(self, roots, *, disabled=(), config_files=()):
+        self.config_files = tuple(config_files)
         self._temporary = TemporaryDirectory(prefix='assistant-skills-')
         self.skills = {}
         self._prepared = {}
@@ -172,6 +176,9 @@ class SkillCatalog:
                         document = (source / 'SKILL.md').resolve(strict=True)
                         if not document.is_relative_to(source):
                             raise SkillError('SKILL.md link escapes its root.')
+                        from ai_assistant.workspace.files import is_config_file
+                        if is_config_file(document, self.config_files):
+                            raise SkillError('Skill metadata is a protected configuration file.')
                         metadata, body = parse_skill(document)
                         digest = None
                         if metadata['name'] in disabled:
@@ -210,7 +217,7 @@ class SkillCatalog:
             if skill.id not in self._prepared:
                 destination = Path(self._temporary.name).resolve() / skill.id.replace(':', '-')
                 try:
-                    digest = copy_package(skill.path, destination)
+                    digest = copy_package(skill.path, destination, config_files=self.config_files)
                     metadata, body = parse_skill(destination / 'SKILL.md')
                     if metadata != skill.metadata:
                         raise SkillError('Skill metadata changed; reopen the session.')

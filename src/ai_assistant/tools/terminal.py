@@ -175,7 +175,7 @@ class RestrictedExecutionPolicy(BaseExecutionPolicy):
 
     def _restrictions(self):
         """共享文件策略；依赖树只读，凭据与排除项拒绝读写。"""
-        denied, readonly = [], []
+        denied, readonly = list(self.workspace.config_files), []
         pending = [self.workspace.root]
         examined = 0
         while pending:

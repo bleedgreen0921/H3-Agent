@@ -63,9 +63,39 @@ def main(argv: list[str] | None = None) -> int:
     feishu_parser = commands.add_parser("feishu", help="Feishu owner bot")
     feishu_commands = feishu_parser.add_subparsers(dest="action", required=True)
     feishu_commands.add_parser("serve").add_argument("--config", default="assistant.toml")
+    config_commands = commands.add_parser('config', help='Offline configuration inspection').add_subparsers(dest='action', required=True)
+    for action in ('list', 'check'):
+        config_commands.add_parser(action).add_argument('--config', default='assistant.toml')
+
+    def add_profile_options(current):
+        if any(action.dest == 'config' for action in current._actions):
+            current.add_argument('--profile', help='Select a named configuration profile')
+        for action in current._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for child in action.choices.values():
+                    add_profile_options(child)
+    add_profile_options(parser)
     args = parser.parse_args(argv)
     try:
-        config = load_config(args.config)
+        if args.command == 'config' and args.action == 'list':
+            from ai_assistant.configuration import read_toml, profile_options
+            options = profile_options(read_toml(args.config))
+            if options is None:
+                if args.profile is not None:
+                    raise ConfigError('旧单文件配置不支持 --profile。')
+                print('旧单文件配置（无具名方案）')
+            else:
+                profiles, default = options
+                if args.profile is not None and args.profile not in profiles:
+                    raise ConfigError('未知配置方案。')
+                for name in profiles:
+                    print(name + ('（默认）' if name == default else ''))
+            return 0
+        config = (load_config(args.config) if args.profile is None else
+                  load_config(args.config, profile=args.profile))
+        if args.command == 'config':
+            print('配置校验通过：' + (config.profile or '旧单文件配置'))
+            return 0
         if args.command == "init":
             from ai_assistant.interfaces.initialization import execute
             return asyncio.run(execute(config))

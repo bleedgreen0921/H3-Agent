@@ -58,6 +58,15 @@ class ModelService(BaseModel):
 
 
 class KnowledgeConfig(BaseModel):
+    backend: str = Field(default='pgvector', min_length=1)
+
+    @field_validator('backend')
+    @classmethod
+    def supported_backend(cls, value):
+        from ai_assistant.storage.backends import require_backend
+        require_backend('knowledge', value)
+        return value
+
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     database_url: SecretStr
     sources: dict[str, KnowledgeSource] = Field(default_factory=dict)

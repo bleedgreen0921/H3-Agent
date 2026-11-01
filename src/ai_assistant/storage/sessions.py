@@ -164,7 +164,7 @@ class SessionRepository:
             await self.execute('DELETE FROM assistant_sessions WHERE id=%s', (ident,))
 
 @asynccontextmanager
-async def session_storage(settings, *, initialize=False):
+async def postgres_session_storage(settings, *, initialize=False):
     try:
         from psycopg import AsyncConnection, Error as DatabaseError
         from psycopg.rows import dict_row
@@ -227,3 +227,11 @@ async def session_storage(settings, *, initialize=False):
             raise
         except DatabaseError:
             raise SessionStorageError('Session database operation failed; check connection and schema.') from None
+
+
+def session_storage(settings, *, initialize=False):
+    from ai_assistant.storage.backends import backend_factory
+    if settings is None:
+        from ai_assistant.config import ConfigError
+        raise ConfigError('存储需要显式配置 [sessions]。')
+    return backend_factory('sessions', settings.backend)(settings, initialize=initialize)

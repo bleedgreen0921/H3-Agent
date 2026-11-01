@@ -24,7 +24,7 @@ class Presentation:
 
     @property
     def text(self):
-        text = self.label + '\n\n' + self.body
+        text = (self.label + '\n\n' if self.label else '') + self.body
         if self.diagnostics:
             text += '\n\n必要诊断：\n' + '\n'.join(
                 str(item.get('summary') or '会话维护未完成，业务正文已保留。') for item in self.diagnostics)
@@ -37,7 +37,7 @@ class Presentation:
 def project(result, body):
     """调用方仅传入持久结果和对应原文；不转换缺失当前契约的结果。"""
     state = result['status']
-    label = LABELS.get(state, '本轮回复结束')
+    label = '' if state == 'complete' else LABELS.get(state, '状态待核实')
     return Presentation(state, label, body, {'input_id': result.get('input_id'),
                         'body_locator': result.get('body_locator')}, result.get('diagnostics') or [])
 

@@ -53,6 +53,12 @@ class FeishuAPI:
             raise FeishuRejected(data.get('code'), http_status=response.status_code)
         return data.get('data', data)
 
+    async def send_message(self, chat_id, message, operation_id):
+        from ai_assistant.interfaces.feishu_message import request_body, validate_message
+        validate_message(message)
+        return await self.request('POST', '/im/v1/messages', params={'receive_id_type': 'chat_id'},
+                                  json=request_body(chat_id, message, operation_id))
+
     async def send_text(self, chat_id, text, operation_id):
         return await self.request('POST', '/im/v1/messages', params={'receive_id_type': 'chat_id'},
             json={'receive_id': chat_id, 'msg_type': 'text',

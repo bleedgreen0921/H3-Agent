@@ -30,3 +30,39 @@ for(const domain of ['im','docx','drive','wiki','bitable','calendar','task','con
 assert.equal(getShouldUseUAT('tenant_access_token',true),false);
 assert.equal(getShouldUseUAT('user_access_token',false),true);
 console.log(`Verified ${manifest.tools.length} official capabilities, every domain handler, permission/rate errors and fixed identities.`);
+
+// 文档写入使用官方 schema 和 SDK fixture；不读取真实 OAuth 或请求远端。
+const {z}=require('zod');
+const edit={elements:[{text_run:{content:'文档编辑 fixture'}}]};
+const cases=[
+ ['docx.v1.documentBlockChildren.create',{path:{document_id:'doc',block_id:'doc'},data:{children:[{block_type:2,text:{elements:edit.elements}}],index:-1}}],
+ ['docx.v1.documentBlock.patch',{path:{document_id:'doc',block_id:'block'},data:{update_text_elements:edit}}],
+ ['docx.v1.documentBlock.batchUpdate',{path:{document_id:'doc'},data:{requests:[{block_id:'block',update_text_elements:edit}]}}],
+];
+for(const [name,args] of cases){
+ const tool=AllTools.find(t=>t.name===name);
+ const parsed=z.object(tool.schema).parse({...args,useUAT:getShouldUseUAT('user_access_token',false)});
+ assert.equal(parsed.useUAT,true);
+ let calls=0;
+ const fixture={request:async(request,options)=>{
+  calls++;
+  assert.equal(request.method,tool.httpMethod);
+  assert.equal(request.url,tool.path);
+  assert.deepEqual(request.path,args.path);
+  assert.deepEqual(request.data,args.data);
+  assert.ok(options); // 官方 handler 为用户身份传递 token 请求选项。
+  return {data:{blocks:[{block_id:'block'}],document_revision_id:2}};
+ }};
+ const result=await larkOapiHandler(fixture,parsed,{tool,userAccessToken:'fixture-user-token'});
+ assert.equal(calls,1);
+ assert.equal(result.isError,undefined);
+ assert.equal(JSON.parse(result.content[0].text).document_revision_id,2);
+ for(const code of [99991672,99991400]){
+  let failures=0;
+  const failed=await larkOapiHandler({request:async()=>{failures++;throw {response:{data:{code}}};}},parsed,{tool,userAccessToken:'fixture-user-token'});
+  assert.equal(failed.isError,true);
+  assert.equal(failures,1);
+  assert.match(failed.content[0].text,new RegExp(String(code)));
+ }
+}
+console.log('Document append, patch and batch update schemas, user identity and error forwarding passed.');

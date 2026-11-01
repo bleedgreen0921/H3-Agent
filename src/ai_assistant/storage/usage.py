@@ -63,7 +63,7 @@ class UsageStore:
 
 
 @asynccontextmanager
-async def usage_storage(settings):
+async def postgres_usage_storage(settings):
     from psycopg import AsyncConnection
     from psycopg.rows import dict_row
     conn = await AsyncConnection.connect(settings.database_url.get_secret_value(),
@@ -77,3 +77,11 @@ async def usage_storage(settings):
         except Exception as error:
             import logging
             logging.getLogger(__name__).warning('Usage unavailable: phase=close category=%s', type(error).__name__)
+
+
+def usage_storage(settings):
+    from ai_assistant.storage.backends import backend_factory
+    if settings is None:
+        from ai_assistant.config import ConfigError
+        raise ConfigError('存储需要显式配置 [sessions]。')
+    return backend_factory('usage', settings.backend)(settings)

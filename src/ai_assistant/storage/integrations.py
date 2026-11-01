@@ -109,7 +109,7 @@ class OperationStore:
 
 
 @asynccontextmanager
-async def operation_storage(settings, *, initialize=False):
+async def postgres_operation_storage(settings, *, initialize=False):
     if settings is None:
         raise ConfigError('External operations require [sessions]; run init first.')
     from psycopg import AsyncConnection
@@ -156,3 +156,11 @@ class MemoryOperationStore:
 
     async def list(self, input_id=None):
         return [dict(row) for row in self.rows.values() if input_id is None or row['input_id'] == input_id]
+
+
+def operation_storage(settings, *, initialize=False):
+    from ai_assistant.storage.backends import backend_factory
+    if settings is None:
+        from ai_assistant.config import ConfigError
+        raise ConfigError('存储需要显式配置 [sessions]。')
+    return backend_factory('operations', settings.backend)(settings, initialize=initialize)

@@ -7,6 +7,7 @@ import httpx
 from langchain_core.language_models import BaseChatModel
 
 from ai_assistant.config import AppConfig, ConfigError
+from ai_assistant.llm.providers import uses_openai_client
 
 
 @asynccontextmanager
@@ -20,7 +21,7 @@ async def model_session(
     if timeout is not None:
         parameters.setdefault("timeout", timeout)
     async with AsyncExitStack() as stack:
-        if profile.provider in {"openai", "deepseek", "glm", "qwen", "kimi"}:
+        if uses_openai_client(profile.provider):
             try:
                 from openai import DEFAULT_TIMEOUT
             except ImportError:

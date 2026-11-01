@@ -52,7 +52,7 @@ async def submit(store, workspace, relative, *, tags=()):
         source_name=name, media_type=mimetypes.guess_type(name)[0] or 'application/octet-stream', tags=list(tags)))
 
 
-async def vector_store(config, embeddings):
+async def pgvector_store(config, embeddings):
     from langchain_postgres import PGEngine, PGVectorStore
     from langchain_postgres.v2.hybrid_search_config import HybridSearchConfig
     # A separate engine owned by this operation; no schema initialization here.
@@ -183,3 +183,8 @@ async def worker(store, *, once=False, app_config=None):
             return
         if not found and not synced:
             await asyncio.sleep(1)
+
+
+async def vector_store(config, embeddings):
+    from ai_assistant.storage.backends import backend_factory
+    return await backend_factory('vectors', config.backend)(config, embeddings)

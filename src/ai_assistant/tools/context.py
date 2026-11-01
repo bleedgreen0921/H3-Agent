@@ -50,7 +50,7 @@ async def tool_context(config: AppConfig, *, retriever: BaseRetriever | None = N
     root = Path(config.workspace.root)
     workspace = ReadOnlyWorkspace(
         root if root.is_absolute() else base / root,
-        exclude_patterns=config.workspace.exclude_patterns, config_path=config.config_path,
+        exclude_patterns=config.workspace.exclude_patterns, config_path=config.config_path, config_files=config.config_files,
         **config.tools.files.model_dump(exclude={"enabled"}),
     )
     lock = asyncio.Lock()
@@ -65,7 +65,7 @@ async def tool_context(config: AppConfig, *, retriever: BaseRetriever | None = N
         skills = None
         if config.skills is not None:
             from ai_assistant.skills.catalog import SkillCatalog, configured_roots
-            skills = skill_snapshot or SkillCatalog(configured_roots(config), disabled=config.skills.disabled)
+            skills = skill_snapshot or SkillCatalog(configured_roots(config), disabled=config.skills.disabled, config_files=config.config_files)
             if skill_snapshot is None:
                 stack.callback(skills.close)
         settings = config.tools.web

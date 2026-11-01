@@ -42,7 +42,7 @@ async def resolve_submission(config, reference, *, identity="user", tags=None):
         root = Path(config.workspace.root)
         root = root if root.is_absolute() else base / root
         workspace = ReadOnlyWorkspace(root, exclude_patterns=config.workspace.exclude_patterns,
-                                      config_path=config.config_path)
+                                      config_path=config.config_path, config_files=config.config_files)
         from ai_assistant.workspace.files import WorkspaceError
         try:
             path = workspace._path(reference)
@@ -206,7 +206,7 @@ async def synchronize(config, store, run):
                     workspace = ReadOnlyWorkspace(
                         Path(descriptor["root"]),
                         exclude_patterns=config.workspace.exclude_patterns,
-                        config_path=config.config_path,
+                        config_path=config.config_path, config_files=config.config_files,
                     )
                     _, digest, path, title = await asyncio.to_thread(
                         snapshot,

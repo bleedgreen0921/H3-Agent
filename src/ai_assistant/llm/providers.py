@@ -6,6 +6,7 @@ PROVIDER_PRESETS = {
     "deepseek": ("deepseek", "https://api.deepseek.com"),
     "glm": ("openai", "https://open.bigmodel.cn/api/paas/v4/"),
     "qwen": ("openai", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+    "spark": ("openai", "https://maas-api.cn-huabei-1.xf-yun.com/v2"),
     "kimi": ("openai", "https://api.moonshot.ai/v1"),
 }
 
@@ -50,3 +51,7 @@ def validate_deepseek_parameters(parameters: dict) -> None:
         raise ValueError("Protocol cannot be overridden in extra_body")
     if "thinking" in body and body["thinking"] != {"type": "disabled"}:
         raise ValueError("DeepSeek thinking must be disabled")
+
+
+def uses_openai_client(provider: str) -> bool:
+    return provider in {'openai', 'deepseek'} or PROVIDER_PRESETS.get(provider, (None,))[0] == 'openai'

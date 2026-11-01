@@ -229,7 +229,12 @@ class BotWorker:
                 timeout = min(settings.delivery_attempt_timeout_seconds,
                               max(0, remaining - time.time()) if remaining else settings.delivery_attempt_timeout_seconds)
                 async with asyncio.timeout(timeout):
-                    data = await self.api.send_text(body['chat_id'], body['text'], row['id'])
+                    if 'message' in body:
+                        from ai_assistant.interfaces.feishu_message import validate_message
+                        validate_message(body['message'])
+                        data = await self.api.send_message(body['chat_id'], body['message'], row['id'])
+                    else:
+                        data = await self.api.send_text(body['chat_id'], body['text'], row['id'])
                     if not isinstance(data.get('message_id'), str) or not data['message_id']:
                         raise RuntimeError('Missing delivery receipt')
             except Exception as error:
@@ -249,12 +254,12 @@ class BotWorker:
                 async with self.store.conn.transaction():
                     await self.store.conn.execute("UPDATE assistant_outbox SET status=%s,body=jsonb_set(body,'{delivery}',body->'delivery' || %s),next_attempt_at=now()+%s*interval '1 second' WHERE id=%s",
                         (status, Jsonb({'last_error': diagnostic, 'last_outcome': category}), delay, row['id']))
-                    logger.warning('Delivery operation=send_text elapsed=%.3f diagnostic=%s',
+                    logger.warning('Delivery operation=send_message elapsed=%.3f diagnostic=%s',
                                    time.monotonic()-started, diagnostic)
                     if not retry:
                         await self.store.conn.execute("UPDATE assistant_outbox SET status='blocked' WHERE input_id=%s AND part>%s AND status='pending'", (row['input_id'], row['part']))
                 continue
-            logger.info('Delivery operation=send_text elapsed=%.3f outcome=confirmed',
+            logger.info('Delivery operation=send_message elapsed=%.3f outcome=confirmed',
                         time.monotonic()-started)
             delivery['last_outcome'] = 'confirmed'
             await self.store.conn.execute("UPDATE assistant_outbox SET status='delivered',remote_id=%s,body=%s WHERE id=%s",
