@@ -10,6 +10,15 @@ import stat
 from ai_assistant.workspace.files import MAX_FILE_BYTES, ReadOnlyWorkspace, WorkspaceError
 
 
+class PublishedWorkspaceError(WorkspaceError):
+    """原子发布已发生，后续持久确认或清理失败；不得自动重写。"""
+
+    def __init__(self, path, data):
+        super().__init__('本地文件已发布，但持久确认或清理失败；请核实，不要重写。')
+        self.receipt = {'path': path, 'sha256': sha256(data).hexdigest(),
+                        'receipt_version': 1, 'published': True, 'durability': 'unknown'}
+
+
 class WritableWorkspace:
     """Uses the read workspace's policy; never grants access to excluded paths."""
 
@@ -82,6 +91,7 @@ class WritableWorkspace:
 
     def create_file(self, path: str, content: str) -> dict:
         data = self._encode(content)
+        published = False
         try:
             with self._parent(path, create=True) as (parent, relative):
                 temp = self._stage(parent, data)
@@ -89,18 +99,24 @@ class WritableWorkspace:
                     # Atomic publication that never replaces an existing name.
                     os.link(temp, relative.name, src_dir_fd=parent, dst_dir_fd=parent,
                             follow_symlinks=False)
+                    published = True
                 finally:
                     os.unlink(temp, dir_fd=parent)
                 os.fsync(parent)
         except FileExistsError:
+            if published:
+                raise PublishedWorkspaceError(relative.as_posix(), data) from None
             raise WorkspaceError('目标已存在；创建不会覆盖文件。') from None
         except OSError:
+            if published:
+                raise PublishedWorkspaceError(relative.as_posix(), data) from None
             raise WorkspaceError('文件无法创建；请检查路径和访问权限。') from None
         return {'path': relative.as_posix(), 'bytes': len(data), 'sha256': sha256(data).hexdigest()}
 
     def edit_file(self, path: str, edits: list[dict], expected_sha256: str) -> dict:
         if not 1 <= len(edits) <= 20:
             raise WorkspaceError('每次编辑需要 1～20 项替换。')
+        published = False
         try:
             with self._parent(path) as (parent, relative):
                 raw, info = self._read(parent, relative.name)
@@ -130,6 +146,7 @@ class WritableWorkspace:
                             or sha256(current).hexdigest() != before_hash):
                         raise WorkspaceError('文件已发生变化，请重新读取后编辑。')
                     os.replace(temp, relative.name, src_dir_fd=parent, dst_dir_fd=parent)
+                    published = True
                     os.fsync(parent)
                 finally:
                     try:
@@ -137,6 +154,8 @@ class WritableWorkspace:
                     except FileNotFoundError:
                         pass
         except OSError:
+            if published:
+                raise PublishedWorkspaceError(relative.as_posix(), data) from None
             raise WorkspaceError('文件无法编辑；请检查路径和访问权限。') from None
         diff = ''.join(difflib.unified_diff(text.splitlines(keepends=True),
                                           after.splitlines(keepends=True),

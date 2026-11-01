@@ -17,7 +17,7 @@ const dispatcher = new lark.EventDispatcher({}).register({
   const input=validateEvent(config,botId,event);
   if(!input)return;
   const db=await pool.connect();
-  try{await persistInbox(db,input);}finally{db.release();}
+  try{await persistInbox(db,input,config);}finally{db.release();}
  }
 });
 const socket = new lark.WSClient({appId:config.app_id,appSecret:config.app_secret,loggerLevel:lark.LoggerLevel.error});

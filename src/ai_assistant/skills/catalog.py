@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+from threading import RLock
 from tempfile import TemporaryDirectory
 
 
@@ -16,7 +17,7 @@ def parse_skill(path):
     try:
         import yaml
     except ImportError:
-        raise SkillError('Install the skills optional dependencies (PyYAML, packaging).') from None
+        raise SkillError('Install the skills optional dependency (PyYAML).') from None
 
     class Loader(yaml.SafeLoader):
         pass
@@ -116,12 +117,8 @@ def copy_package(source, target):
 
 def configured_roots(config):
     base = config.config_path.parent if config.config_path else Path.cwd()
-    workspace = Path(config.workspace.root)
-    workspace = (base / workspace).resolve()
-    roots = [workspace / '.agents/skills', Path.home() / '.agents/skills']
-    if config.skills:
-        roots += [(base / Path(p)).absolute() for p in config.skills.roots]
-    return list(dict.fromkeys(p.absolute() for p in roots))
+    roots = config.skills.roots if config.skills else []
+    return list(dict.fromkeys((base / Path(p).expanduser()).absolute() for p in roots))
 
 
 @dataclass(frozen=True)
@@ -129,7 +126,7 @@ class Skill:
     id: str
     metadata: dict
     body: str
-    digest: str
+    digest: str | None
     path: Path
     warnings: tuple[str, ...]
 
@@ -139,22 +136,30 @@ class Skill:
 
     def info(self):
         return dict(id=self.id, name=self.metadata['name'], description=self.metadata['description'],
-                    digest=self.digest, base_path=self.sandbox_path, warnings=self.warnings,
-                    resources=sorted(p.relative_to(self.path).as_posix() for p in self.path.rglob('*') if p.is_file()))
+                    digest=self.digest, base_path=self.sandbox_path, warnings=self.warnings)
 
 
 class SkillCatalog:
     def __init__(self, roots, *, disabled=()):
         self._temporary = TemporaryDirectory(prefix='assistant-skills-')
         self.skills = {}
+        self._prepared = {}
+        self._failures = {}
+        self._lock = RLock()
         self.diagnostics = []
         disabled = frozenset(disabled)
         try:
             for root in roots:
                 root = Path(root).absolute()
                 if not root.exists():
+                    self.diagnostics.append(f'{root.name}: Skill directory does not exist or is unavailable.')
                     continue
-                for entry in sorted(root.iterdir()):
+                try:
+                    entries = sorted(root.iterdir())
+                except OSError:
+                    self.diagnostics.append(f'{root.name}: Skill directory is unavailable.')
+                    continue
+                for entry in entries:
                     if entry.name.startswith('.') or not entry.is_dir():
                         continue
                     identity = 'skill:' + hashlib.sha256(str(root / entry.name).encode()).hexdigest()[:24]
@@ -163,10 +168,13 @@ class SkillCatalog:
                         continue
                     destination = Path(self._temporary.name).resolve() / identity.replace(':', '-')
                     try:
-                        digest = copy_package(entry, destination)
-                        metadata, body = parse_skill(destination / 'SKILL.md')
+                        source = entry.resolve(strict=True)
+                        document = (source / 'SKILL.md').resolve(strict=True)
+                        if not document.is_relative_to(source):
+                            raise SkillError('SKILL.md link escapes its root.')
+                        metadata, body = parse_skill(document)
+                        digest = None
                         if metadata['name'] in disabled:
-                            shutil.rmtree(destination)
                             continue
                         warnings = []
                         if metadata['name'] != entry.name:
@@ -174,9 +182,9 @@ class SkillCatalog:
                         for key in ('allowed-tools', 'context', 'agent', 'mcp', 'fork', 'model'):
                             if key in metadata:
                                 warnings.append(f'{key} is advisory; client/MCP/fork permissions are not implemented.')
-                        self.skills[identity] = Skill(identity, metadata, body, digest, destination, tuple(warnings))
-                    except (SkillError, OSError) as exc:
-                        self.diagnostics.append(f'{entry.name}: {exc}')
+                        self.skills[identity] = Skill(identity, metadata, body, digest, source, tuple(warnings))
+                    except (SkillError, OSError, RuntimeError) as exc:
+                        self.diagnostics.append(f'{entry.name}: ' + (str(exc) if isinstance(exc, SkillError) else 'Skill metadata is unavailable.'))
                         shutil.rmtree(destination, ignore_errors=True)
         except BaseException:
             self.close()
@@ -193,6 +201,27 @@ class SkillCatalog:
             raise SkillError('Unknown or ambiguous skill; choose full ID: ' + ', '.join(s.id for s in matches))
         return matches[0]
 
+    def prepare(self, identity):
+        skill = self.resolve(identity)
+        # 同一目录生命周期只准备一次；失败也不自动重试。
+        with self._lock:
+            if skill.id in self._failures:
+                raise SkillError(self._failures[skill.id])
+            if skill.id not in self._prepared:
+                destination = Path(self._temporary.name).resolve() / skill.id.replace(':', '-')
+                try:
+                    digest = copy_package(skill.path, destination)
+                    metadata, body = parse_skill(destination / 'SKILL.md')
+                    if metadata != skill.metadata:
+                        raise SkillError('Skill metadata changed; reopen the session.')
+                    self._prepared[skill.id] = Skill(skill.id, metadata, body, digest, destination, skill.warnings)
+                except (SkillError, OSError, RuntimeError) as exc:
+                    shutil.rmtree(destination, ignore_errors=True)
+                    reason = str(exc) if isinstance(exc, SkillError) else 'Skill package is unavailable.'
+                    self._failures[skill.id] = reason
+                    raise SkillError(reason) from None
+            return self._prepared[skill.id]
+
     def search(self, query='', offset=0, limit=20):
         if offset < 0 or not 1 <= limit <= 100:
             raise SkillError('Invalid pagination.')
@@ -201,11 +230,20 @@ class SkillCatalog:
         return dict(skills=matches[offset:offset + limit], total=len(matches), next_offset=offset + limit if offset + limit < len(matches) else None)
 
     def active(self, records):
-        return [s for identity, digest in (records or {}).items()
-                if digest is not None and (s := self.skills.get(identity)) is not None and s.digest == digest]
+        active = []
+        for identity, digest in (records or {}).items():
+            if digest is None or identity not in self.skills:
+                continue
+            try:
+                skill = self.prepare(identity)
+            except SkillError:
+                continue
+            if skill.digest == digest:
+                active.append(skill)
+        return active
 
     def read(self, identity, resource, offset=0, limit=20000):
-        skill = self.resolve(identity)
+        skill = self.prepare(identity)
         path = skill.path / resource
         if Path(resource).is_absolute() or not path.resolve().is_relative_to(skill.path) or not path.is_file():
             raise SkillError('Resource must be a file within the skill package.')
@@ -241,6 +279,7 @@ class RestrictedSkillCatalog(SkillCatalog):
     """共享不可变包快照，只暴露当前群明确授权的项目。"""
 
     def __init__(self, source, identities):
+        self._source = source
         self.skills = {}
         self.diagnostics = []
         for identity in identities:
@@ -248,25 +287,19 @@ class RestrictedSkillCatalog(SkillCatalog):
                 raise SkillError('群聊授权的 Skill ID 不存在，请检查配置。')
             self.skills[identity] = source.skills[identity]
 
+    def prepare(self, identity):
+        # 必须先在受限目录解析，旧激活不能触发未授权包的准备。
+        return self._source.prepare(self.resolve(identity).id)
+
     def close(self):
         # 包生命周期由进程级原始目录管理。
         pass
 
 
-def group_skill_ids(config, binding):
-    groups = config.channels.feishu.groups
-    matches = [value for chat, value in groups.items()
-               if binding == f'{config.integrations.feishu.app_id}:{chat}:{config.integrations.feishu.owner_open_id}'] if config.integrations.feishu else []
-    if len(matches) != 1:
-        raise SkillError('无法确定当前群的 Skills 授权。')
-    selected = matches[0].skill_ids
-    return config.channels.feishu.default_group_skill_ids if selected is None else selected
-
-
 def skills_for_caller(config, source, caller):
-    if caller.channel != 'feishu_group':
+    if caller.personal:
         return source
-    identities = group_skill_ids(config, caller.binding)
+    identities = caller.skill_ids
     if not identities:
         return None
     if source is None:

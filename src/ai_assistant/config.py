@@ -73,21 +73,29 @@ class WebConfig(BaseModel):
     """DeepSeek web credentials and request deadline."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    search_chars: int = Field(default=16000, ge=100, strict=True)
+    fetch_chars: int = Field(default=32000, ge=100, strict=True)
     credential_profile: str = Field(min_length=1)
-    timeout: float = Field(default=30, gt=0, allow_inf_nan=False)
+    timeout: float = Field(default=60, gt=0, allow_inf_nan=False)
 
 
 class FilesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     enabled: bool = False
+    max_file_bytes: int = Field(default=8 * 1024 * 1024, gt=0, strict=True)
+    result_chars: int = Field(default=48000, ge=100, strict=True)
+    scan_entries: int = Field(default=20000, gt=0, strict=True)
+    scan_bytes: int = Field(default=128 * 1024 * 1024, gt=0, strict=True)
 
 
 class TerminalConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    output_lines: int = Field(default=1000, gt=0, strict=True)
+    output_bytes: int = Field(default=128 * 1024, gt=0, strict=True)
     allow_network: bool = False
     env: dict[str, SecretStr] = Field(default_factory=dict)
     read_paths: list[Path] = Field(default_factory=list)
-    timeout: float = Field(default=120, gt=0, le=1800, allow_inf_nan=False)
+    timeout: float = Field(default=300, gt=0, le=1800, allow_inf_nan=False)
 
 
 class ToolsConfig(BaseModel):
@@ -117,11 +125,11 @@ class AgentSettings(BaseModel):
 
     persona_file: Path | None = None
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True, protected_namespaces=())
-    model_call_limit: int = Field(default=20, gt=0, strict=True)
-    tool_call_limit: int = Field(default=40, gt=0, strict=True)
-    summary_call_limit: int = Field(default=10, gt=0, strict=True)
-    knowledge_call_limit: int = Field(default=5, gt=0, strict=True)
-    turn_timeout_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
+    model_call_limit: int = Field(default=40, gt=0, strict=True)
+    tool_call_limit: int = Field(default=100, gt=0, strict=True)
+    summary_call_limit: int = Field(default=20, gt=0, strict=True)
+    knowledge_call_limit: int = Field(default=15, gt=0, strict=True)
+    turn_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
 
 
 class SessionsConfig(BaseModel):
@@ -141,14 +149,17 @@ class SessionsConfig(BaseModel):
 class ContextConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     summary_model: str | None = Field(default=None, min_length=1)
-    summary_tokens: int = Field(default=10000, ge=100, le=10000)
-    summary_every_turns: int = Field(default=10, ge=0, strict=True)
-    tool_result_tokens: int = Field(default=4000, ge=100)
-    mcp_schema_tokens: int = Field(default=6000, ge=100)
+    summary_tokens: int = Field(default=10000, ge=100)
+    summary_every_turns: int = Field(default=20, ge=0, strict=True)
+    recent_turns: int = Field(default=6, gt=0, strict=True)
+    tool_result_tokens: int = Field(default=12000, ge=100)
+    # 兼容旧配置；动态加载已移除，此字段不再限制工具。
+    mcp_schema_tokens: int = Field(default=16000, ge=100, exclude=True)
 
 
 class SkillsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    directory_tokens: int = Field(default=6000, ge=100, strict=True)
     roots: list[str] = Field(default_factory=list)
     disabled: list[str] = Field(default_factory=list)
 
@@ -230,18 +241,20 @@ def load_config(path: str | Path = "assistant.toml") -> AppConfig:
         raise ConfigError("Invalid TOML or UTF-8 in the configuration file.") from None
     except OSError:
         raise ConfigError("Unable to read the configuration file.") from None
-    def table(value):
-        return value if isinstance(value, dict) else {}
-    integrations = table(data.get('integrations'))
-    servers = table(table(data.get('mcp')).get('servers'))
-    if ('netease' in integrations
-            or any(table(s).get('transport') == 'netease' for s in servers.values())
-            or {'dependency_install', 'npm_project', 'dependency_timeout_seconds'} & table(data.get('skills')).keys()
-            or 'profile' in table(table(data.get('tools')).get('terminal'))
-            or {'embedding_model', 'reranker_model', 'device'} & table(data.get('knowledge')).keys()):
-        raise ConfigError('配置包含已移除字段：请删除邮箱/Skills 安装/终端档位配置，并将知识模型改为 HTTP 服务配置。')
+    if 'plan' in data:
+        raise ConfigError('未知配置 [plan]：Plan 模式已移除，请删除该配置节。')
+    mcp = data.get('mcp')
+    servers = mcp.get('servers') if isinstance(mcp, dict) else None
+    if isinstance(servers, dict):
+        for server in servers.values():
+            if isinstance(server, dict) and (server.get('resources') or server.get('prompts')):
+                raise ConfigError('MCP resources/prompts 内容接口不再支持，请删除非空配置。')
     try:
         config = AppConfig.model_validate(data)
+        if config.context and 'mcp_schema_tokens' in config.context.model_fields_set:
+            import logging
+            logging.getLogger(__name__).warning(
+                'context.mcp_schema_tokens 已弃用且不再生效；工具大小统一由模型 max_input_tokens 检查。')
         config._config_path = Path(path).absolute()
         return config
     except ValidationError as exc:

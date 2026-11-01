@@ -31,18 +31,12 @@ def convert_datetime(value: str, timezone: str = 'Asia/Shanghai') -> dict:
 @tool
 async def resolve_datetime(value: str, runtime: ToolRuntime[ToolContext], timezone: str | None = None) -> dict:
     """Convert an explicit ISO datetime (or all-day YYYY-MM-DD) to milliseconds. Clarify unclear dates first."""
-    if runtime.context.caller and runtime.context.caller.channel == 'feishu_group' and timezone is None:
+    if runtime.context.caller and runtime.context.caller.scope == 'shared' and timezone is None:
         raise ToolException('群聊不继承主人默认时区；请先明确 IANA 时区。')
     result = convert_datetime(value, timezone or runtime.context.timezone)
     runtime.context.resolved_datetimes.add((result['timestamp'], result['is_all_day']))
     return result
 
 
-@tool
-async def get_current_identity(runtime: ToolRuntime[ToolContext]) -> dict:
-    """Read the configured owner's identity, timezone and current time in a trusted owner private chat."""
-    context = runtime.context
-    if not context.caller or context.caller.channel != 'feishu_private' or not context.caller.owner or not context.owner_open_id:
-        raise ToolException('当前入口没有主人私聊身份权限。')
-    return {'open_id': context.owner_open_id, 'timezone': context.timezone,
-            'current_time': datetime.now(ZoneInfo(context.timezone)).isoformat()}
+# 兼容现有 Python 调用方；飞书身份实现由服务适配持有。
+from ai_assistant.integrations.feishu_identity import get_current_identity

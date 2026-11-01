@@ -29,15 +29,11 @@ CREATE TABLE IF NOT EXISTS assistant_inbox (
 CREATE TABLE IF NOT EXISTS assistant_outbox (
  id text PRIMARY KEY, input_id text NOT NULL REFERENCES assistant_inbox(id),
  body jsonb, status text NOT NULL DEFAULT 'pending', remote_id text,
- created_at timestamptz NOT NULL DEFAULT now(), part integer NOT NULL DEFAULT 0
+ created_at timestamptz NOT NULL DEFAULT now(), part integer NOT NULL DEFAULT 0,
+ kind text NOT NULL DEFAULT 'text', display_version bigint NOT NULL DEFAULT 0,
+ delivered_version bigint NOT NULL DEFAULT 0, next_attempt_at timestamptz NOT NULL DEFAULT now(),
+ final_state text NOT NULL DEFAULT 'stage'
 );
-ALTER TABLE assistant_outbox ADD COLUMN IF NOT EXISTS part integer NOT NULL DEFAULT 0;
-ALTER TABLE assistant_sessions ADD COLUMN IF NOT EXISTS last_input_id text;
-ALTER TABLE assistant_outbox ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'text';
-ALTER TABLE assistant_outbox ADD COLUMN IF NOT EXISTS display_version bigint NOT NULL DEFAULT 0;
-ALTER TABLE assistant_outbox ADD COLUMN IF NOT EXISTS delivered_version bigint NOT NULL DEFAULT 0;
-ALTER TABLE assistant_outbox ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz NOT NULL DEFAULT now();
-ALTER TABLE assistant_outbox ADD COLUMN IF NOT EXISTS final_state text NOT NULL DEFAULT 'stage';
 '''
 
 
@@ -48,6 +44,9 @@ class OperationStore:
     async def initialize(self):
         async with self.conn.transaction():
             await self.conn.execute('SELECT pg_advisory_xact_lock(714160002)')
+            present = await (await self.conn.execute("SELECT to_regclass('assistant_outbox') AS name")).fetchone()
+            if present['name']:
+                await self.conn.execute('SELECT kind,display_version,delivered_version,next_attempt_at,final_state,part FROM assistant_outbox LIMIT 0')
             await self.conn.execute(DDL)
 
     async def begin(self, input_id, principal, tool, arguments):
@@ -66,8 +65,13 @@ class OperationStore:
 
     async def finish(self, ident, status, result=None):
         from psycopg.types.json import Jsonb
-        await self.conn.execute('''UPDATE assistant_operations SET status=%s,result=COALESCE(%s,result),
-            updated_at=now() WHERE id=%s''', (status, Jsonb(result) if result is not None else None, ident))
+        # pending 可转任意终态；已终态仅允许同状态补充回执（jsonb 顶层合并，原键保留）。
+        # 跨终态改判（含迟到 unknown/failed 降级 succeeded）条件不满足、0 行更新、静默忽略。
+        payload = Jsonb(result) if result is not None else None
+        await self.conn.execute('''UPDATE assistant_operations SET status=%s,
+            result=COALESCE(result || %s, %s, result), updated_at=now()
+            WHERE id=%s AND (status='pending' OR status=%s)''',
+            (status, payload, payload, ident, status))
 
     async def list(self, input_id=None):
         if input_id:
@@ -77,7 +81,9 @@ class OperationStore:
         return await cursor.fetchall()
 
     async def replies(self):
-        return await (await self.conn.execute('''SELECT id,input_id,status,remote_id,part,created_at,'channel_reply' AS kind
+        return await (await self.conn.execute('''SELECT id,input_id,status,remote_id,part,created_at,
+            display_version,delivered_version,final_state,body->'delivery' AS delivery,
+            (body->'delivery'->>'version'='1') IS NOT TRUE AS unsupported_format,'channel_reply' AS kind
             FROM assistant_outbox ORDER BY created_at DESC LIMIT 100''')).fetchall()
 
     async def commands(self, ident=None):
@@ -89,11 +95,15 @@ class OperationStore:
 
     async def inspect(self, ident):
         row = await (await self.conn.execute("""SELECT id,input_id,tool,principal,status,
-            created_at,updated_at,(result->'business_outcome' IS NOT NULL) AS needs_verification,
+            created_at,updated_at,result->>'version' AS receipt_version,
+            COALESCE(result->>'verification','unverified') AS verification,
+            (COALESCE(result->>'verification','unverified')!='passed') AS needs_verification,
             'tool_operation' AS kind FROM assistant_operations WHERE id=%s""", (ident,))).fetchone()
         if row is not None:
             return row
         row = await (await self.conn.execute("""SELECT id,input_id,status,remote_id,part,created_at,
+            display_version,delivered_version,final_state,body->'delivery' AS delivery,
+            (body->'delivery'->>'version'='1') IS NOT TRUE AS unsupported_format,
             'channel_reply' AS kind FROM assistant_outbox WHERE id=%s""", (ident,))).fetchone()
         return row if row is not None else await self.commands(ident)
 
@@ -114,3 +124,35 @@ async def operation_storage(settings, *, initialize=False):
         await conn.execute('SELECT last_input_id FROM assistant_sessions LIMIT 0')
         await conn.execute('SELECT input_id FROM assistant_chat_commands LIMIT 0')
         yield store
+
+
+class MemoryOperationStore:
+    """仅当前会话去重；不提供崩溃恢复保证，也不保存原始参数。"""
+
+    def __init__(self):
+        self.rows = {}
+
+    async def begin(self, input_id, principal, tool, arguments):
+        digest = hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False,
+            separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+        key = (input_id, principal, tool, digest)
+        if key in self.rows:
+            return False, dict(self.rows[key])
+        row = dict(id=str(uuid4()), input_id=input_id, principal=principal, tool=tool,
+                   args_digest=digest, status='pending', result=None)
+        self.rows[key] = row
+        return True, dict(row)
+
+    async def finish(self, ident, status, result=None):
+        row = next(row for row in self.rows.values() if row['id'] == ident)
+        # 与数据库版同规则：终态只接受同状态补充回执并合并 result，跨终态改判直接忽略。
+        if row['status'] != 'pending' and row['status'] != status:
+            return
+        row['status'] = status
+        if result is not None:
+            merged = dict(row['result'] or {})
+            merged.update(result)
+            row['result'] = merged
+
+    async def list(self, input_id=None):
+        return [dict(row) for row in self.rows.values() if input_id is None or row['input_id'] == input_id]

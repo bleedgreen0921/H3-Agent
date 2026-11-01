@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from langchain_core.documents import Document
 
 RANGES = ('page', 'line', 'block')
-FILTERS = {'document_id', 'media_type', 'tags', 'source_name'}
+FILTERS = {'source_id', 'document_id', 'media_type', 'tags', 'source_name'}
 
 
 def normalize(document: Document, *, identity: dict, parser: str,

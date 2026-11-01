@@ -16,7 +16,8 @@ async def register_submission(store, uri, descriptor, *, restore=True, conn=None
         if restore:
             filters['submission_id'] = str(uuid4())
         sync = await store.request_sync(filters, conn=conn)
-        return dict(source_id=source, sync_id=sync)
+        return dict(version=1, source_id=source, sync_id=sync, status='submitted',
+                    searchable_confirmed=False, message='来源已登记，后台任务已提交；尚未确认可检索。')
 
 
 async def sources(config, store):
@@ -34,21 +35,23 @@ async def sources(config, store):
 async def status(store, ident):
     row = await store.sync_status(ident)
     if row is not None:
-        return dict(row, kind='sync', coverage='incomplete' if row['errors'] else ('complete' if row['state'] == 'ready' else 'pending'))
+        return dict(row, kind='sync', **sync_facts(row))
     row = await store.status(ident)
     if row is None:
         raise KnowledgeError('任务不存在。')
     return dict(row, kind='index')
 
 
-async def receipt(store, principal, input_id, *, conn=None):
+async def receipt(store, principal, input_id, *, conn=None, action=None, target=None):
     if conn is None:
         async with store.engine.connect() as connection:
-            return await receipt(store, principal, input_id, conn=connection)
-    row = (await conn.execute(text('''SELECT result FROM rag_management_operations
+            return await receipt(store, principal, input_id, conn=connection, action=action, target=target)
+    row = (await conn.execute(text('''SELECT action,target,result FROM rag_management_operations
         WHERE kb=:kb AND principal=:p AND input_id=:i'''),
-        dict(kb=store.config.knowledge_base_id, p=principal, i=input_id))).scalar()
-    return row
+        dict(kb=store.config.knowledge_base_id, p=principal, i=input_id))).mappings().first()
+    if row is not None and action is not None and (row['action'] != action or row['target'] != target):
+        raise KnowledgeError('同一输入已有不同的登记目标，拒绝覆盖或重放。')
+    return row['result'] if row else None
 
 
 async def apply(store, principal, input_id, action, target=None, *, submission=None):
@@ -56,7 +59,7 @@ async def apply(store, principal, input_id, action, target=None, *, submission=N
     async with store.engine.begin() as conn:
         key = packed([store.config.knowledge_base_id, principal, input_id])
         await conn.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:key,0))'), dict(key=key))
-        previous = await receipt(store, principal, input_id, conn=conn)
+        previous = await receipt(store, principal, input_id, conn=conn, action=action, target=target)
         if previous is not None:
             return previous
         if action == 'add':
@@ -73,3 +76,15 @@ async def apply(store, principal, input_id, action, target=None, *, submission=N
             dict(kb=store.config.knowledge_base_id, p=principal, i=input_id,
                  a=action, t=target, r=packed(result)))
         return result
+
+
+def sync_facts(row):
+    """ready 只表示处理结束；可检索构建与覆盖缺口分别展示。"""
+    builds, errors = row.get('builds') or [], row.get('errors') or []
+    finished = row['state'] == 'ready'
+    coverage = 'pending' if not finished else 'partial' if builds and errors else 'failed' if errors else 'available' if builds else 'empty'
+    descriptions = {'pending': '后台处理中', 'partial': '部分可检索，仍有覆盖缺口',
+        'failed': '处理结束，全部失败，无已确认可检索构建', 'available': '处理结束，已有可检索构建',
+        'empty': '处理结束，范围为空，无可检索构建'}
+    return dict(coverage=coverage, processing_finished=finished, searchable_builds=len(builds),
+                coverage_gaps=len(errors), summary=descriptions[coverage])

@@ -31,15 +31,12 @@ DDL = (
         PRIMARY KEY(kb,source_id,uri))""",
     """CREATE TABLE IF NOT EXISTS rag_sync_runs (
         id text PRIMARY KEY,kb text NOT NULL,scope text NOT NULL,state text NOT NULL DEFAULT 'queued',
-        request_key text,filters jsonb NOT NULL,builds jsonb NOT NULL DEFAULT '[]',
+        filters jsonb NOT NULL,builds jsonb NOT NULL DEFAULT '[]',
         errors jsonb NOT NULL DEFAULT '[]',jobs jsonb NOT NULL DEFAULT '[]',
         token text,lease_until timestamptz,created_at timestamptz NOT NULL DEFAULT now(),
         deadline timestamptz NOT NULL,finished_at timestamptz)""",
     """CREATE UNIQUE INDEX IF NOT EXISTS rag_sync_live ON rag_sync_runs(kb,scope)
         WHERE state IN ('queued','running','indexing')""",
-    """CREATE TABLE IF NOT EXISTS rag_query_runs (
-        kb text NOT NULL,request_key text NOT NULL,scope text NOT NULL,run_id text NOT NULL,
-        PRIMARY KEY(kb,request_key,scope))""",
 )
 
 
@@ -154,7 +151,7 @@ class SourceStore:
                 ),
             )
 
-    async def request_sync(self, filters=None, request_key=None, *, conn=None):
+    async def request_sync(self, filters=None, *, conn=None):
         filters = filters or {}
         scope = hashlib.sha256(packed(filters).encode()).hexdigest()
         kb = self.config.knowledge_base_id
@@ -163,16 +160,6 @@ class SourceStore:
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:k,0))"),
                 dict(k=kb + scope),
             )
-            if request_key:
-                existing = (
-                    await conn.execute(
-                        text("""SELECT run_id FROM rag_query_runs
-                    WHERE kb=:kb AND request_key=:key AND scope=:scope"""),
-                        dict(kb=kb, key=request_key, scope=scope),
-                    )
-                ).scalar()
-                if existing:
-                    return existing
             ident = (
                 await conn.execute(
                     text("""SELECT id FROM rag_sync_runs WHERE kb=:kb AND scope=:scope
@@ -192,11 +179,6 @@ class SourceStore:
                         f=packed(filters),
                         seconds=self.config.sync_deadline_seconds,
                     ),
-                )
-            if request_key:
-                await conn.execute(
-                    text("INSERT INTO rag_query_runs VALUES(:kb,:key,:scope,:id)"),
-                    dict(kb=kb, key=request_key, scope=scope, id=ident),
                 )
             return ident
 
@@ -368,6 +350,13 @@ class SourceStore:
             params[key] = packed(value) if key == "tags" else value
             if key == "document_id":
                 clauses.append("d.id=:document_id")
+            elif key == "source_id":
+                clauses.append("""EXISTS(SELECT 1 FROM rag_source_documents scope_member
+                    JOIN rag_sources scope_source ON scope_source.kb=scope_member.kb
+                    AND scope_source.id=scope_member.source_id
+                    WHERE scope_member.kb=d.kb AND scope_member.uri=d.source_uri
+                    AND scope_member.source_id=:source_id AND scope_source.enabled
+                    AND scope_member.state='available')""")
             elif key == "tags":
                 clauses.append("v.metadata->'tags' @> CAST(:tags AS jsonb)")
             else:

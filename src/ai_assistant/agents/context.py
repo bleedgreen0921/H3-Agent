@@ -50,13 +50,11 @@ def is_summary(message):
     return message.additional_kwargs.get('lc_source') == 'summarization'
 
 
-def project_messages(messages, *, catalog=None, directory_budget=2000, read_budget=4000):
-    """只投影模型视图，按类别总预算优先保留最新正文。"""
-    import json
+def project_messages(messages, *, catalog=None, read_budget=4000):
+    """只压缩模型视图中的旧读取正文；错误和写入回执保持完整。"""
     entries = catalog.entries if catalog else {}
     projected = list(messages)
-    groups = {'directory': [], 'read': []}
-    calls = {call['id']: call for m in messages if isinstance(m, AIMessage) for call in m.tool_calls}
+    records = []
     for index, message in enumerate(messages):
         if not isinstance(message, ToolMessage):
             continue
@@ -64,56 +62,43 @@ def project_messages(messages, *, catalog=None, directory_budget=2000, read_budg
         artifact = message.artifact
         writing = ((entry and entry.original_name in entry.settings.write_tools)
                    or isinstance(artifact, dict) and artifact.get('protected_receipt'))
-        if writing or message.status == 'error' or message.name == 'load_mcp_tools':
+        if writing or message.status == 'error':
             continue
-        kind = 'directory' if message.name == 'search_mcp_tools' else 'read'
-        locator = {'result_id': message.tool_call_id, 'status': message.status,
-                   'read': 'read_tool_result'}
-        if kind == 'directory':
-            locator['query'] = calls.get(message.tool_call_id, {}).get('args', {})
-            try:
-                page = json.loads(message.content)
-                locator.update({k: page[k] for k in ('total', 'returned', 'next_offset') if k in page})
-            except (ValueError, TypeError):
-                pass
-        details = {k: v for k, v in locator.items() if k not in {'result_id', 'status', 'read'}}
         notice = (f'旧工具正文已收起；{message.status}；'
-                  + (json.dumps(details, ensure_ascii=False, separators=(',', ':')) if details else '')
-                  + f'；read_tool_result(result_id={json.dumps(message.tool_call_id)})')
+                  '内容已截断，需要更多内容请使用业务工具分页。')
         preview = message.model_copy(update={'content': notice})
         if count_tokens([message]) < count_tokens([preview]):
             preview = message
-        groups[kind].append((index, message, preview))
-    for kind, records in groups.items():
-        budget = directory_budget if kind == 'directory' else read_budget
-        # 先为所有读取入口保留位置，避免旧页提示挤掉最新正文。
-        remaining = budget - sum(count_tokens([preview]) for _, _, preview in records)
-        if remaining < 0:
-            raise ContextBudgetError(f'工具结果定位与状态超出 {kind} 投影预算（估算 {budget - remaining}/{budget} token）。')
-        for index, message, preview in reversed(records):
-            extra = count_tokens([message]) - count_tokens([preview])
-            if extra <= remaining:
-                projected[index] = message
-                remaining -= extra
-            else:
-                projected[index] = preview
-                if remaining > 200 and isinstance(message.content, str):
-                    text = message.content[:remaining - 40] + '\n' + str(preview.content)
-                    partial = message.model_copy(update={'content': text})
-                    cost = count_tokens([partial]) - count_tokens([preview])
-                    if cost <= remaining:
-                        projected[index] = partial
-                        remaining -= cost
+        records.append((index, message, preview))
+    # 先为全部读取保留位置，再优先保留最新正文。
+    remaining = read_budget - sum(count_tokens([preview]) for _, _, preview in records)
+    if remaining < 0:
+        raise ContextBudgetError(f'工具结果定位与状态超出 read 投影预算（估算 {read_budget - remaining}/{read_budget} token）。')
+    for index, message, preview in reversed(records):
+        extra = count_tokens([message]) - count_tokens([preview])
+        if extra <= remaining:
+            projected[index] = message
+            remaining -= extra
+        else:
+            projected[index] = preview
+            if remaining > 200 and isinstance(message.content, str):
+                text = message.content[:remaining - 40] + '\n' + str(preview.content)
+                partial = message.model_copy(update={'content': text})
+                cost = count_tokens([partial]) - count_tokens([preview])
+                if cost <= remaining:
+                    projected[index] = partial
+                    remaining -= cost
     return projected
 
 
 def project_for_budget(messages, budget, *, catalog=None):
-    """有空间就保留完整历史；只在整轮预算不足时收起可恢复的读取正文。"""
+    """有空间就保留完整历史；只在整轮预算不足时压缩较早的读取正文。"""
     if count_tokens(messages) <= budget:
         return list(messages)
-    return project_messages(messages, catalog=catalog,
-                            directory_budget=max(2000, budget // 10),
-                            read_budget=max(4000, budget // 3))
+    latest = next((i for i in range(len(messages) - 1, -1, -1)
+                   if isinstance(messages[i], HumanMessage) and not is_summary(messages[i])), 0)
+    return project_messages(messages[:latest], catalog=catalog,
+                            read_budget=max(4000, budget // 3)) + list(messages[latest:])
 
 
 def fit_messages(messages, budget, *, counter=count_tokens):
@@ -146,6 +131,18 @@ def fit_messages(messages, budget, *, counter=count_tokens):
     return result
 
 
+def request_tool_tokens(request):
+    """预算包含绑定时由原生 Agent 添加的结构化响应 schema。"""
+    from langchain.agents.structured_output import ToolStrategy
+    tools = list(request.tools)
+    response_format = getattr(request, 'response_format', None)
+    if isinstance(response_format, ToolStrategy):
+        tools.extend({'type': 'function', 'function': {'name': spec.name,
+            'description': spec.description, 'parameters': spec.json_schema}}
+            for spec in response_format.schema_specs)
+    return count_tokens_approximately([], tools=tools)
+
+
 class InputBudgetMiddleware(AgentMiddleware):
     def __init__(self, max_input_tokens):
         self.budget = usable_budget(max_input_tokens)
@@ -153,7 +150,7 @@ class InputBudgetMiddleware(AgentMiddleware):
     def prepare(self, request):
         # 中文消息沿用保守估算；工具 JSON 含大量英文键和转义字符，
         # 使用框架默认的 schema 估算，避免把每个 JSON 字符都当作 token。
-        tool_tokens = count_tokens_approximately([], tools=request.tools)
+        tool_tokens = request_tool_tokens(request)
 
         def counter(messages):
             system = [request.system_message] if request.system_message else []
@@ -163,14 +160,12 @@ class InputBudgetMiddleware(AgentMiddleware):
             counter(request.messages), count_tokens([request.system_message]) if request.system_message else 0,
             tool_tokens, self.budget)
         available = self.budget - count_tokens([request.system_message] if request.system_message else []) - tool_tokens
+        if available <= 0:
+            raise ContextBudgetError('系统提示、Skills 或工具 schema 已超出输入预算；请精简 mcp.servers.<服务>.tools 或其他固定提示。')
         projected = project_for_budget(request.messages, available,
             catalog=getattr(getattr(request.runtime, 'context', None), 'mcp', None))
         logging.getLogger(__name__).info('Context estimate: turn=%s stage=final raw=%s projected=%s schema=%s limit=%s',
             getattr(getattr(request.runtime, 'context', None), 'input_id', None), count_tokens(request.messages), count_tokens(projected), tool_tokens, self.budget)
-        logging.getLogger(__name__).info(
-            'Context estimate: stage=results directory_raw=%s directory_projected=%s',
-            count_tokens([m for m in request.messages if isinstance(m, ToolMessage) and m.name == 'search_mcp_tools']),
-            count_tokens([m for m in projected if isinstance(m, ToolMessage) and m.name == 'search_mcp_tools']))
         try:
             messages = fit_messages(projected, self.budget, counter=counter)
         except ContextBudgetError:
@@ -201,22 +196,23 @@ class BudgetSummaryMiddleware(AgentMiddleware):
     """使用同一请求组装器扣除固定开销，再调用原生公开摘要钩子。"""
 
     def __init__(self, model, summary_model, *, max_input_tokens,
-                 summary_max_input_tokens, summary_profile, prepare, summary_tokens=10000):
+                 summary_max_input_tokens, summary_profile, prepare, summary_tokens=10000, recent_turns=6):
         self.model, self.summary_model = model, summary_model
         self.budget = usable_budget(max_input_tokens)
         self.summary_budget = usable_budget(summary_max_input_tokens)
         self.profile, self.prepare = summary_profile, prepare
         self.summary_tokens = summary_tokens
+        self.recent_turns = recent_turns
 
     async def compress(self, state, runtime, *, periodic=False):
         from langchain.agents.middleware.types import ModelRequest
         request = self.prepare(ModelRequest(model=self.model, messages=state['messages'],
                                            state=state, runtime=runtime))
         fixed = count_tokens([request.system_message]) if request.system_message else 0
-        fixed += count_tokens_approximately([], tools=request.tools)
+        fixed += request_tool_tokens(request)
         available = self.budget - fixed
         if available <= 0:
-            raise ContextBudgetError('系统提示、Skills 或工具 schema 已超出输入预算，请减少激活内容。')
+            raise ContextBudgetError('系统提示、Skills 或工具 schema 已超出输入预算；请精简 mcp.servers.<服务>.tools 或其他固定提示。')
 
         def prompt(messages):
             instruction = SUMMARY_PROMPT.format(summary_tokens=self.summary_tokens)
@@ -232,8 +228,12 @@ class BudgetSummaryMiddleware(AgentMiddleware):
             metadata = {**config.get('metadata', {}), 'lc_source': 'summarization',
                         'assistant_model_profile': self.profile}
             response = await self.summary_model.ainvoke(inputs, config={**config, 'metadata': metadata})
-            from ai_assistant.llm.completion import validate_completion
-            validate_completion(response, responses=getattr(self.summary_model, 'use_responses_api', False) is True)
+            from ai_assistant.llm.completion import IncompleteResponseError, validate_completion
+            try:
+                validate_completion(response, responses=getattr(self.summary_model, 'use_responses_api', False) is True)
+            except IncompleteResponseError as error:
+                error.phase = 'periodic_summary' if periodic else 'compression'
+                raise
             text = response.text.strip()
             if not text:
                 raise ContextBudgetError('摘要为空，本轮未提交。')
@@ -255,9 +255,16 @@ class BudgetSummaryMiddleware(AgentMiddleware):
         if periodic:
             starts = [i for i, m in enumerate(state['messages'])
                       if isinstance(m, HumanMessage) and not is_summary(m)]
-            if len(starts) <= 3:
+            if len(starts) <= self.recent_turns:
                 return None
-            keep = ('messages', len(state['messages']) - starts[-3])
+            start = starts[-self.recent_turns]
+            # 六轮是保留目标；预算紧张时仍保护当前请求及其完整工具交换。
+            reserve = min(self.summary_tokens, available // 4)
+            for candidate in starts[-self.recent_turns:]:
+                start = candidate
+                if count_tokens(projected[start:]) <= available - reserve:
+                    break
+            keep = ('messages', len(state['messages']) - start)
         native = SummarizationMiddleware(model=self.model,
             trigger=('messages', 1) if periodic else ('tokens', max(1, available * 3 // 4)),
             keep=keep, token_counter=lambda messages: count_tokens(project_for_budget(
@@ -298,7 +305,7 @@ class BudgetSummaryMiddleware(AgentMiddleware):
 
 
 def context_middleware(model, summary_model, *, max_input_tokens, summary_max_input_tokens,
-                       summary_profile, prepare=lambda request: request, summary_tokens=10000):
+                       summary_profile, prepare=lambda request: request, summary_tokens=10000, recent_turns=6):
     return [BudgetSummaryMiddleware(model, summary_model, max_input_tokens=max_input_tokens,
         summary_max_input_tokens=summary_max_input_tokens, summary_profile=summary_profile,
-        prepare=prepare, summary_tokens=summary_tokens), InputBudgetMiddleware(max_input_tokens)]
+        prepare=prepare, summary_tokens=summary_tokens, recent_turns=recent_turns), InputBudgetMiddleware(max_input_tokens)]

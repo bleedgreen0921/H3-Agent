@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from langchain_core.documents import Document
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from ai_assistant.agents import create_assistant_agent, load_persona, load_project_rules
@@ -44,12 +44,6 @@ class AgentTurn:
     result: dict = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class WaitingTurn:
-    sync_id: str
-    input_id: str
-
-
 def request_preview(text):
     """只保留用户原文的单行预览，附件优先显示文件名。"""
     import json
@@ -68,11 +62,12 @@ def final_text(messages):
 
 
 class AssistantSession:
-    def __init__(self, agent, context, settings, *, model_name='', tools=(), repository=None):
+    def __init__(self, agent, context, settings, *, model_name='', repository=None):
         self.agent, self.context, self.settings = agent, context, settings
-        self.model_name, self.tools = model_name, tuple(tools)
+        self.model_name = model_name
         self.repository = repository
         self._running = False
+        self._turn_lock = asyncio.Lock()
         self._closed = False
         self._active_task = None
         self._storage_lost = False
@@ -85,11 +80,10 @@ class AssistantSession:
     def _reset(self):
         self._session_id = str(uuid4())
         self._thread = str(uuid4())
+        self._threads = [self._thread]
         self._complete = None
         self._failed = False
-        self._reopened = False
-        self._pending = None
-        self._pending_input = None
+        self._maintenance = None
 
     async def open(self, session_id=None):
         if self._closed:
@@ -100,24 +94,21 @@ class AssistantSession:
             self._reset()
             return
         caller = self.context.caller
-        binding = caller.binding if caller and caller.channel in {'feishu_private', 'feishu_group'} else None
+        binding = caller.binding if caller and caller.scope != 'local' else None
         row = await self.repository.open(self.context.workspace.root, session_id, binding=binding)
         self._session_id = str(row['id'])
         self._thread, self._complete = row['thread_id'], row['complete']
+        self._threads = row.get('thread_ids') or [self._thread]
         self._failed = row['status'] in {'running', 'interrupted'}
-        self._pending = row.get('pending')
-        self._pending_input = row.get('pending_input')
-        self._reopened = session_id is not None
         if self._complete is not None:
             state = await self.agent.aget_state(self._complete)
-            if not state.values or state.next or not final_text(state.values.get('messages', [])):
-                raise SessionError('Stored successful checkpoint is missing or incompatible.')
+            from ai_assistant.runtime.history import saved_turn
+            if not state.values or state.next or saved_turn(state.values, threads=self._threads) is None:
+                raise SessionError('不支持的 checkpoint 格式或正文缺失；未恢复或重新执行。')
 
     async def new_conversation(self):
-        if self._running:
+        if self._running or self._turn_lock.locked():
             raise RuntimeError('A turn is already running.')
-        if self._pending:
-            await self.cancel_waiting()
         await self.open()
 
     async def watch_connection(self):
@@ -132,89 +123,88 @@ class AssistantSession:
                 return
             await asyncio.sleep(1)
 
-    async def run_turn(self, text, *, skill_ids=None, on_event=None, on_output=None,
-                       input_id=None, resume=False, user_source=None):
+    async def run_turn(self, text, **kwargs):
+        # 输入校验也会读取 checkpoint，必须纳入同一轮互斥范围。
+        if self._turn_lock.locked():
+            raise RuntimeError('A turn is already running.')
+        async with self._turn_lock:
+            return await self._run_turn(text, **kwargs)
+
+    async def _run_turn(self, text, *, skill_ids=None, on_event=None,
+                       input_id=None, user_source=None):
         if self._closed:
             raise RuntimeError('Session is closed.')
         if self._running:
             raise RuntimeError('A turn is already running.')
         if self._storage_lost:
             raise SessionStorageError('Session connection lost; reopen the conversation.')
-        if self._pending and not resume:
-            raise SessionError('本会话正在等待知识同步，请先继续或取消等待。')
-        if resume and not self._pending:
-            raise SessionError('本会话没有可续接的知识请求。')
-        input_id = self._pending_input if resume else (input_id or str(uuid4()))
-        if resume:
-            pending_state = await self.agent.aget_state(self._pending['checkpoint'])
-            project_rules = pending_state.values.get('project_rules_snapshot', '')
-        else:
-            project_rules = load_project_rules(self.context)
+        input_id = input_id or str(uuid4())
+        from ai_assistant.runtime.inputs import metadata, user_message, recorded_messages
+        by_id = {}
+        for thread in self._threads:
+            for message in await recorded_messages(self.agent, thread, input_id=input_id):
+                by_id.setdefault((thread, message.id), message)
+        records = sorted(by_id.values(), key=lambda m: metadata(m).get('received_at', ''))
+        business_text = text
+        if user_source is None:
+            user_source = text
+        for message in records:
+            if metadata(message).get('input_id') == input_id:
+                if message.text != business_text:
+                    raise SessionError('同一输入 ID 的内容不同，拒绝覆盖已接收输入。')
+                raise SessionError('该输入已接收，未重复执行；请查看会话状态。')
+        project_rules = load_project_rules(self.context)
         turn_context = replace(self.context, project_rules=project_rules, input_id=input_id,
-                               resolved_datetimes=set(), task_outcomes={})
+                               resolved_datetimes=set(), effect_facts=[], inflight_tools=set(), executed_tool_calls=set())
         started = monotonic()
         timings = {}
         observer = None
-
-        async def emit_output(kind, **data):
-            if kind == 'stage':
-                timings.setdefault('first_status_seconds', monotonic() - started)
-            if kind == 'delta' and data.get('text'):
-                timings.setdefault('first_body_seconds', monotonic() - started)
-            if on_output:
-                returned = on_output({'kind': kind, **data})
-                if inspect.isawaitable(returned):
-                    await returned
+        phase = 'preparation'
+        saved_result = None
+        self._maintenance = None
+        event_enabled = True
 
         self._running = True
         self._active_task = asyncio.current_task()
         try:
-            if self._complete is None and self._failed:
-                self._thread = str(uuid4())
+            from ai_assistant.runtime.history import latest_state, recovery_values
+            snapshot = await latest_state(self.agent, self._thread)
+            recovered = None
+            if self._failed:
+                # 只复制已保存的对话事实；新线程没有旧任务或 pending writes。
+                recovered = recovery_values(snapshot.values)
+                branch = str(uuid4())
+                await self.agent.aupdate_state({'configurable': {'thread_id': branch}},
+                                               recovered, as_node='__start__')
+                self._thread = branch
+                self._threads.append(branch)
             if self.repository is not None:
-                if resume:
-                    # 续接一旦开始便不再属于可安全自动恢复的等待状态。
-                    await self.repository.clear_waiting()
                 await self.repository.start(self._thread)
-            await emit_output('stage', text='正在处理')
+            timings.setdefault('first_status_seconds', monotonic() - started)
             observer = TurnObserver(self.settings.summary_call_limit, self.model_name,
-                self.context.usage_store, self.session_id)
-            locator = self._pending['checkpoint'] if resume else (self._complete or {'configurable': {'thread_id': self._thread}})
-            # astream_events may insert LangGraph's generic 25-step default,
-            # overriding create_agent's 9_999-step setting. Middleware nodes
-            # consume steps too; model/tool/deadline limits remain authoritative.
-            config = {**locator, 'recursion_limit': 9_999, 'callbacks': [observer],
+                self.context.usage_store, self.session_id, input_id=input_id)
+            config = {'configurable': {'thread_id': self._thread},
+                      'recursion_limit': 9_999, 'callbacks': [observer],
                       'metadata': {'assistant_model_profile': self.model_name}}
             inputs = []
-            if self._failed:
-                inputs.append(HumanMessage(content=RECOVERY_NOTICE))
-            # 飞书每条消息均重新打开持久会话，重开不是用户的新任务。
-            from datetime import datetime, timezone
-            inputs.append(HumanMessage(content=text, id=str(uuid4()), additional_kwargs={
-                'user_source': text if user_source is None else user_source,
-                'user_timestamp': datetime.now(timezone.utc).isoformat()}))
+            graph_input = recovered or {}
+            if recovered is not None:
+                inputs.extend(graph_input.pop('messages', []))
+                inputs.append(SystemMessage(content=RECOVERY_NOTICE))
+            inputs.append(user_message(self.session_id, input_id, business_text, source=user_source))
             activated_skills = set()
-            graph_input = {'messages': inputs, 'turn_outcome': None, 'turn_result': None,
-                           'project_rules_snapshot': project_rules}
-            if not resume:
-                snapshot = await self.agent.aget_state(locator)
-                graph_input['active_mcp_tools'] = {key: None for key in snapshot.values.get('active_mcp_tools', {})}
-            if resume:
-                from langgraph.types import Command
-                if self.context.operations:
-                    operations = await self.context.operations.list(input_id)
-                    if any(o['status'] in ('pending','unknown') for o in operations):
-                        raise SessionError('存在未确认的外部写入，请先核实操作回执，不自动续接。')
-                graph_input = Command(resume=True)
-            if skill_ids and not resume:
+            graph_input.update(messages=inputs, turn_result=None,
+                               execution=None, diagnostics=[], project_rules_snapshot=project_rules)
+            if skill_ids:
                 from ai_assistant.skills.catalog import SkillError
                 if self.context.skills is None:
                     raise SkillError('Skills are not configured.')
-                chosen = [self.context.skills.resolve(identity) for identity in skill_ids]
+                chosen = [self.context.skills.prepare(identity) for identity in skill_ids]
                 graph_input['active_skills'] = {s.id: s.digest for s in chosen}
                 activated_skills.update(s.id for s in chosen)
             result = None
             root_id = None
+            phase = 'execution'
             async with asyncio.timeout(self.settings.turn_timeout_seconds):
                 async for event in self.agent.astream_events(
                     graph_input, config=config, context=turn_context,
@@ -222,58 +212,44 @@ class AssistantSession:
                 ):
                     if root_id is None:
                         root_id = event['run_id']
-                    metadata = event.get('metadata', {})
-                    if metadata.get('langgraph_node') == 'model' and metadata.get('lc_source') != 'summarization':
-                        if event['event'] == 'on_chat_model_start':
-                            await emit_output('replace', text='')
-                        elif event['event'] == 'on_chat_model_stream':
-                            chunk = event.get('data', {}).get('chunk')
-                            if isinstance(chunk, AIMessage) and chunk.text:
-                                visible = chunk.text
-                                if visible:
-                                    await emit_output('delta', text=visible)
-                        elif event['event'] == 'on_chat_model_end':
-                            answer = event.get('data', {}).get('output')
-                            if isinstance(answer, AIMessage) and answer.tool_calls:
-                                await emit_output('stage', text='正在执行工具')
-                    if event['event'] == 'on_tool_start':
-                        await emit_output('stage', text='正在执行工具')
+                    # 流式回调已删除；仅记录首个正文块的耗时指标。
+                    if event['event'] == 'on_chat_model_stream':
+                        metadata = event.get('metadata', {})
+                        chunk = event.get('data', {}).get('chunk')
+                        if (metadata.get('langgraph_node') == 'model' and metadata.get('lc_source') != 'summarization'
+                                and isinstance(chunk, AIMessage) and not timings.get('first_body_seconds')
+                                and any(block.get('text') for block in chunk.content_blocks if block.get('type') == 'text')):
+                            timings['first_body_seconds'] = monotonic() - started
                     if event['event'] == 'on_tool_end'  and event.get('name') == 'load_skill' and self.context.skills:
                         from langgraph.types import Command
                         output = event.get('data', {}).get('output')
                         if isinstance(output, Command) and isinstance(output.update, dict):
                             activated_skills.update(s.id for s in self.context.skills.active(output.update.get('active_skills', {})))
-                    if event['event'] in {'on_tool_start', 'on_tool_end', 'on_tool_error'} and on_event:
-                        returned = on_event(event)
-                        if inspect.isawaitable(returned):
-                            await returned
+                    if event['event'] in {'on_tool_start', 'on_tool_end', 'on_tool_error'} and on_event and event_enabled:
+                        try:
+                            returned = on_event(event)
+                            if inspect.isawaitable(returned):
+                                await returned
+                        except Exception as callback_error:
+                            event_enabled = False
+                            logger.warning('Turn auxiliary failure: input_id=%s phase=on_event category=%s', input_id, type(callback_error).__name__)
                     if event['event'] == 'on_chain_end' and event['run_id'] == root_id:
                         result = event['data']['output']
-            state = await self.agent.aget_state({'configurable': {'thread_id': self._thread}})
-            interrupts = [item for task in state.tasks for item in task.interrupts]
-            if interrupts:
-                value = interrupts[0].value
-                if not isinstance(value, dict) or value.get('kind') != 'knowledge_sync':
-                    raise RuntimeError('Unsupported graph interruption.')
-                if self.repository is None:
-                    raise SessionError('后台知识检索需要持久会话。')
-                self._pending = {'sync_id': value['sync_id'], 'checkpoint': state.config}
-                self._pending_input = input_id
-                await self.repository.waiting(self._pending, input_id)
-                await emit_output('stage', text='正在同步知识来源，完成后继续回答')
-                return WaitingTurn(value['sync_id'], input_id)
             if not result or not final_text(result['messages']):
                 raise RuntimeError('Agent returned no final answer.')
             if self._storage_lost:
                 raise SessionStorageError('Session connection lost; completion was not confirmed.')
-            # Exclusive session lock makes latest unambiguous ONLY after this
-            # successful invocation. Failed runs always branch from _complete.
+            # 会话锁保护最新状态；完成指针只表示已确认提交的位置。
             state = await self.agent.aget_state({'configurable': {'thread_id': self._thread}})
             if state.next:
                 raise RuntimeError('Agent has pending execution.')
-            operations = await self.context.operations.list(input_id) if self.context.operations else []
+            operations = await (self.context.operations or self.context.terminal_operations).list(input_id)
             from ai_assistant.runtime.outcomes import turn_result
-            unified = turn_result(result, operations).to_dict() | {'input_id': input_id}
+            execution_state = {**state.values, 'execution': state.values.get('execution') or
+                               {'status': 'complete', 'phase': 'execution'}}
+            unified = turn_result(execution_state, operations, executed_tool_calls=turn_context.executed_tool_calls).to_dict() | {'input_id': input_id}
+            body_message = state.values['messages'][-1]
+            unified['body_locator'] = {'thread_id': self._thread, 'checkpoint_ns': '', 'message_id': body_message.id}
             update = {'turn_result': unified}
             if not state.values.get('conversation_title'):
                 first = next((m for m in state.values['messages'] if isinstance(m, HumanMessage) and m.content != RECOVERY_NOTICE and not m.additional_kwargs.get('lc_source')), None)
@@ -282,100 +258,52 @@ class AssistantSession:
             if state.values.get('last_counted_input_id') != input_id:
                 completed = state.values.get('completed_turns', 0) + 1
                 update.update(completed_turns=completed, last_counted_input_id=input_id)
-                every = getattr(self.agent, 'summary_every_turns', 0)
-                summarizer = getattr(self.agent, 'context_summary', None)
-                remaining = self.settings.turn_timeout_seconds - (monotonic() - started)
-                if (every and summarizer and remaining > 0
-                        and completed - state.values.get('summarized_turns', 0) >= every
-                        and observer.usage.summary_model_calls < self.settings.summary_call_limit):
-                    try:
-                        async with asyncio.timeout(remaining):
-                            summary_update = await summarizer.periodic_update(state.values, turn_context, config)
-                        if summary_update:
-                            update.update(summary_update)
-                            update['summarized_turns'] = completed
-                    except Exception:
-                        # 摘要失败不丢业务回执，不泄漏模型正文或异常中的凭据。
-                        logger.warning('定期会话整理失败；保留旧摘要及未覆盖原文，下一完成轮次再尝试。')
-            # 原文替换和计数与业务结果同次提交；存储异常不能当作摘要失败吞掉。
+            phase = 'result_commit'
             state_config = await self.agent.aupdate_state(state.config, update)
-            state = await self.agent.aget_state(state_config)
+            saved_result = unified
+            phase = 'session_index'
             if self.repository is not None:
-                if self.context.mcp is not None or self.context.caller is not None:
-                    await self.repository.complete(state.config, input_id=input_id,
-                        title=state.values.get('conversation_title') or request_preview(user_source if user_source is not None else text))
-                else:
-                    await self.repository.complete(state.config,
-                        title=state.values.get('conversation_title') or request_preview(user_source if user_source is not None else text))
+                await self.repository.complete(state_config, input_id=input_id,
+                    title=update.get('conversation_title') or state.values.get('conversation_title') or request_preview(user_source))
+            state = await latest_state(self.agent, self._thread)
             self._complete = state.config
-            self._pending = self._pending_input = None
-            self._failed = self._reopened = False
-            with suppress(Exception):
-                await emit_output(unified['status'], text=final_text(result['messages']))
+            self._failed = False
+            self._maintenance = (input_id, turn_context, config, observer)
             return AgentTurn(result['messages'], observer.sources, observer.usage,
                 sorted(activated_skills | {s.id for s in self.context.skills.active(result.get('active_skills', {}))}) if self.context.skills else [],
                 input_id, operations, unified)
         except BaseException as error:
+            if isinstance(error, SessionStorageError):
+                self._storage_lost = True
+            from ai_assistant.runtime.execution import drain_tools, ToolCleanupError
+            try:
+                await drain_tools(turn_context)
+            except BaseException as cleanup_error:
+                self._storage_lost = True
+                logger.error('Turn cleanup failure: input_id=%s phase=tools category=%s', input_id, type(cleanup_error).__name__)
+            logger.error('Turn stopped: input_id=%s phase=%s category=%s', input_id, phase, type(error).__name__)
+            self._failed = True
+            self._maintenance = None
+            if self.repository is not None and not self._storage_lost:
+                try:
+                    await self.repository.interrupted()
+                except Exception as marking_error:
+                    self._storage_lost = True
+                    logger.error('Turn cleanup failure: input_id=%s phase=interrupted category=%s', input_id, type(marking_error).__name__)
             from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
             if isinstance(error, ModelCallLimitExceededError):
-                try:
-                    operations = await turn_context.operations.list(input_id) if turn_context.operations else []
-                except Exception:
-                    operations = None
-                lines = ['未完成：本轮主模型调用次数已达上限。']
-                if operations is None:
-                    lines.append('操作记录读取失败，远端写入状态未知；请核实，未自动重放。')
-                elif not operations:
-                    lines.append('本轮未记录远端写入。')
-                for operation in operations or []:
-                    stored = operation.get('result') or {}
-                    detail = stored.get('business_outcome')
-                    status = operation['status']
-                    lines.append(f"操作 {operation['id']}：{status}；" + (
-                        '业务核对未通过' if detail else '远端回执成功，本轮整体仍未完成' if status == 'succeeded'
-                        else '需要核实，未自动重放'))
-                if any(o['status'] == 'succeeded' and not (o.get('result') or {}).get('business_outcome')
-                       for o in operations or []):
-                    lines.insert(1, '部分完成：已有成功回执，其他步骤未完成或未确认。')
-                error = TurnIncompleteError('\n'.join(lines))
-            from ai_assistant.runtime.outcomes import turn_result, receipt_lines
-            failure_state = {}
-            with suppress(Exception):
-                snapshot = await self.agent.aget_state({'configurable': {'thread_id': self._thread}})
-                failure_state = dict(snapshot.values)
-            cancelled = isinstance(error, asyncio.CancelledError)
-            remote_operations = []
-            with suppress(Exception):
-                if turn_context.operations:
-                    remote_operations = await turn_context.operations.list(input_id)
-            unified = turn_result(failure_state, remote_operations, interrupted='cancelled' if cancelled else 'failed').to_dict() | {'input_id': input_id}
-            if cancelled:
-                unified['interruption'] = 'cancelled'
-            failure_text = ('执行已取消；已完成的操作保留。' if cancelled else
-                            str(error) if isinstance(error, TurnIncompleteError) else '本轮未完成。')
-            if unified['items']:
-                failure_text += '\n' + '\n'.join(receipt_lines(unified['items']))
-            with suppress(Exception):
-                snapshot = await self.agent.aget_state({'configurable': {'thread_id': self._thread}})
-                await self.agent.aupdate_state(snapshot.config, {'turn_result': unified})
-            with suppress(Exception):
-                await emit_output(unified['status'], text=failure_text)
-            if not cancelled and unified['items']:
-                if isinstance(error, TurnIncompleteError) or not isinstance(error, (SessionError, TimeoutError)):
-                    error = TurnIncompleteError(failure_text)
-                error.turn_result = unified
-                error.turn_message = failure_text
-            if resume:
-                self._pending = self._pending_input = None
-            self._failed = True
-            if self.repository is not None:
-                with suppress(SessionStorageError):
-                    await self.repository.interrupted()
-            if self.repository is not None and (self.repository.broken or
-                    self.repository.saver.conn.closed or self.repository.saver.conn.broken):
+                error = TurnIncompleteError('本轮主模型调用次数已达上限；已发生效果保留，请核实操作回执。')
+            if isinstance(error, ToolCleanupError):
                 self._storage_lost = True
-            if self._storage_lost:
-                raise SessionStorageError('Session connection lost; current turn did not complete.') from None
+            # 已保存回答由入口只读恢复，索引或交付错误不能改写它。
+            if saved_result is not None:
+                error.turn_result = saved_result
+            if not isinstance(error, asyncio.CancelledError):
+                error.turn_message = ('会话存储或清理未确认，请重新打开后核实。' if self._storage_lost else
+                    '本轮超时。' if isinstance(error, TimeoutError) else
+                    '本轮未完成（' + type(error).__name__ + '）。') + '已发生的操作不会自动回滚，未自动重试。'
+            if self._storage_lost and isinstance(error, asyncio.CancelledError):
+                raise SessionStorageError('Session connection lost; cleanup finished, reopen the conversation.') from None
             raise error
         finally:
             if observer is not None:
@@ -387,17 +315,38 @@ class AssistantSession:
             self._running = False
             self._active_task = None
 
-    async def cancel_waiting(self):
-        if self.repository:
-            await self.repository.clear_waiting()
-        self._pending = self._pending_input = None
-
-    async def continue_waiting(self, *, on_event=None, on_output=None):
-        if not self._pending:
-            raise SessionError('没有待续接请求。')
-        from ai_assistant.knowledge.sync import wait_sync
-        await wait_sync(self.context.knowledge_config, self._pending['sync_id'])
-        return await self.run_turn('', resume=True, on_event=on_event, on_output=on_output)
+    async def after_reply(self):
+        """入口成功处理最终回复后，在同一任务、会话锁内整理；不改写回答。"""
+        pending = getattr(self, '_maintenance', None)
+        self._maintenance = None
+        if pending is None or self._storage_lost or self._closed:
+            return
+        async with self._turn_lock:
+            input_id, context, config, observer = pending
+            self._active_task = asyncio.current_task()
+            try:
+                if self.repository is not None:
+                    await self.repository.check()
+                from ai_assistant.runtime.history import latest_state
+                state = await latest_state(self.agent, self._thread)
+                every = getattr(self.agent, 'summary_every_turns', 0)
+                summarizer = getattr(self.agent, 'context_summary', None)
+                completed = state.values.get('completed_turns', 0)
+                if (state.values.get('turn_result', {}).get('input_id') != input_id
+                        or state.values['turn_result']['status'] != 'complete'
+                        or not every or not summarizer
+                        or completed - state.values.get('summarized_turns', 0) < every
+                        or observer.usage.summary_model_calls >= self.settings.summary_call_limit):
+                    return
+                update = await summarizer.periodic_update(state.values, context, config)
+                if update:
+                    await self.agent.aupdate_state(state.config, {**update, 'summarized_turns': completed})
+            except Exception as error:
+                if isinstance(error, SessionStorageError):
+                    self._storage_lost = True
+                logger.warning('Turn auxiliary failure: input_id=%s phase=periodic_summary category=%s', input_id, type(error).__name__)
+            finally:
+                self._active_task = None
 
 
 def validate_context_config(config, selected):
@@ -410,12 +359,12 @@ def validate_context_config(config, selected):
 
 @asynccontextmanager
 async def assistant_session(config, model_name=None, *, retriever=None, session_id=None, caller=None, resources=None):
-    persona = load_persona(config)
-    from ai_assistant.integrations.policy import Caller
+    from ai_assistant.integrations.policy import Caller, shared_service_allowed
     caller = caller or Caller()
+    persona = load_persona(config) if caller.personal else ''
     source_config = config
-    if caller.channel == 'feishu_group':
-        # Group sessions cannot inherit private local capabilities.
+    if not caller.personal:
+        # 共享和未验证私人入口不能继承个人能力。
         config = config.model_copy(update={'knowledge': None, 'skills': None,
             'tools': config.tools.model_copy(update={'web': None, 'files': config.tools.files.model_copy(update={'enabled': False}), 'terminal': None})})
         retriever = None
@@ -425,86 +374,81 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
     if session_id is not None and config.sessions is None:
         raise ConfigError('Opening a session requires [sessions].')
     validate_context_config(config, selected)
-    if retriever is None and config.knowledge is not None:
-        try:
-            from ai_assistant.knowledge.config import resolve_knowledge_paths
-            from ai_assistant.knowledge.retrieval import create_knowledge_retriever
-            base = config.config_path.parent if config.config_path else Path.cwd()
-            retriever = create_knowledge_retriever(resolve_knowledge_paths(config.knowledge, base))
-        except ImportError:
-            raise ConfigError('Knowledge integration is unavailable; install the rag extras.') from None
+    if config.mcp and any(s.tools and caller.owner and (caller.scope != 'shared' or (
+            name in caller.resources and shared_service_allowed(s))) for name, s in config.mcp.servers.items()):
+        if config.models[selected].max_input_tokens is None:
+            raise ConfigError('启用 MCP 工具的模型必须显式配置 max_input_tokens。')
     async with AsyncExitStack() as stack:
         repository = await stack.enter_async_context(session_storage(config.sessions)) if config.sessions else None
         usage_store = None
         if repository:
             from ai_assistant.storage.usage import usage_storage
-            usage_store = await stack.enter_async_context(usage_storage(config.sessions))
+            try:
+                usage_store = await stack.enter_async_context(usage_storage(config.sessions))
+            except Exception as error:
+                logger.warning('Usage unavailable: phase=connect category=%s', type(error).__name__)
         saver = repository.saver if repository else InMemorySaver()
         context = await stack.enter_async_context(tool_context(config, retriever=retriever,
-            skill_snapshot=getattr(resources, "skills", None) if caller.channel != "feishu_group" else None))
-        if caller.channel == 'feishu_group':
+            skill_snapshot=getattr(resources, "skills", None) if caller.personal else None))
+        if not caller.personal:
             from ai_assistant.skills.catalog import SkillCatalog, configured_roots, skills_for_caller
             source = getattr(resources, 'skills', None)
-            if source is None and source_config.skills is not None:
+            if caller.skill_ids and source is None and source_config.skills is not None:
                 source = SkillCatalog(configured_roots(source_config), disabled=source_config.skills.disabled)
                 stack.callback(source.close)
             context = replace(context, skills=skills_for_caller(source_config, source, caller))
-        context = replace(context, usage_store=usage_store, timezone=config.agent.timezone,
-                          owner_open_id=config.integrations.feishu.owner_open_id if config.integrations.feishu else None,
-                          default_task_assignee=config.integrations.feishu.default_task_assignee if config.integrations.feishu else 'none',
-                          caller=caller if caller.channel != "cli" else None,
-                          mcp_schema_tokens=config.context.mcp_schema_tokens if config.context else 6000)
+        context = replace(context, usage_store=usage_store, timezone=config.agent.timezone if caller.personal else 'UTC',
+                          owner_open_id=config.integrations.feishu.owner_open_id if caller.personal and config.integrations.feishu else None,
+                          default_task_assignee=config.integrations.feishu.default_task_assignee if caller.personal and config.integrations.feishu else 'none',
+                          caller=caller,
+                          skills_directory_tokens=config.skills.directory_tokens if config.skills else 6000)
         if config.knowledge is not None:
             context = replace(context, knowledge_config=config)
+        from ai_assistant.storage.integrations import operation_storage
+        operations = (await stack.enter_async_context(operation_storage(config.sessions))
+                      if config.sessions and (config.tools.terminal is not None or
+                          (config.mcp is not None and config.mcp.servers)) else None)
+        context = replace(context, operations=operations)
         if config.mcp is not None and config.mcp.servers:
             from ai_assistant.integrations.mcp import mcp_resources
-            from ai_assistant.storage.integrations import operation_storage
             directory = getattr(resources, "catalog", resources) if resources is not None else await stack.enter_async_context(
                 mcp_resources(config, context.workspace, caller=caller))
-            operations = await stack.enter_async_context(operation_storage(config.sessions)) if config.sessions else None
             context = replace(context, mcp=directory.for_caller(caller), caller=caller, operations=operations)
         model = await stack.enter_async_context(model_session(config, selected,
-            config.models[selected].parameters.get('timeout', 300), factory=create_model))
+            config.models[selected].parameters.get('timeout', 180), factory=create_model))
         summary_name = (config.context.summary_model or selected) if config.context else selected
         summary_model = model
         if summary_name != selected:
             summary_model = await stack.enter_async_context(model_session(config, summary_name,
-                config.models[summary_name].parameters.get('timeout', 300), factory=create_model))
+                config.models[summary_name].parameters.get('timeout', 180), factory=create_model))
         tools = create_builtin_tools(include_web=config.tools.web is not None,
             include_write=config.tools.files.enabled,
-            include_terminal=config.tools.terminal is not None, retriever=retriever)
-        if config.knowledge is not None:
+            include_terminal=config.tools.terminal is not None)
+        if config.knowledge is not None or retriever is not None:
             from ai_assistant.knowledge.tools import knowledge_tools
-            tools = [t for t in tools if t.name != 'search_knowledge'] + knowledge_tools()
-        if config.context is not None:
-            from ai_assistant.agents.results import read_tool_result
-            tools.append(read_tool_result)
+            tools.extend(knowledge_tools(include_management=config.knowledge is not None))
         if context.skills is not None:
             from ai_assistant.tools.skills import create_skill_tools
             tools.extend(create_skill_tools())
-        if caller.channel == 'feishu_group':
+        if not caller.personal:
             tools = create_skill_tools() if context.skills is not None else []
-        from ai_assistant.tools.datetime import resolve_datetime, get_current_identity
-        if caller.channel != 'feishu_group' or (context.mcp and any(
+        from ai_assistant.tools.datetime import resolve_datetime
+        if caller.personal or (context.mcp and any(
                 e.original_name.startswith('task_v2_task_') for e in context.mcp.entries.values())):
             tools.append(resolve_datetime.model_copy(update={'handle_tool_error': True}))
-        if caller.channel == 'feishu_private' and caller.owner:
-            tools.append(get_current_identity.model_copy(update={'handle_tool_error': True}))
+        if config.integrations.feishu is not None:
+            from ai_assistant.integrations.feishu_identity import identity_tools
+            tools.extend(identity_tools(caller))
         if context.mcp is not None:
-            from ai_assistant.tools.mcp import discovery_tools
-            tools.extend(discovery_tools())
             tools.extend(e.tool for e in context.mcp.entries.values())
         agent = create_assistant_agent(model, tools, checkpointer=saver, settings=config.agent, persona=persona,
             context_settings=config.context, summary_model=summary_model,
             max_input_tokens=config.models[selected].max_input_tokens,
             summary_max_input_tokens=config.models[summary_name].max_input_tokens,
-            summary_profile=summary_name, skills_enabled=context.skills is not None, mcp_enabled=context.mcp is not None)
-        context = replace(context, checkpoint_history=agent.aget_state_history)
+            summary_profile=summary_name, skills_enabled=context.skills is not None, mcp_enabled=bool(context.mcp and (context.mcp.entries or context.mcp.unavailable)))
         session = AssistantSession(agent, context, config.agent, model_name=selected,
-                                   tools=tools, repository=repository)
+                                   repository=repository)
         await session.open(session_id)
-        if usage_store:
-            await usage_store.abandon(session.session_id)
         watcher = asyncio.create_task(session.watch_connection()) if repository else None
         try:
             yield session

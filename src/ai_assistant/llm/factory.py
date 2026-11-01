@@ -20,6 +20,7 @@ def create_model(config: AppConfig, name: str | None = None) -> BaseChatModel:
         raise ValueError("Unknown model profile.")
     profile = config.models[selected]
     options = dict(profile.parameters)
+    options.setdefault("timeout", 180)
     if is_deepseek(profile.provider, profile.model):
         try:
             validate_deepseek_parameters(options)

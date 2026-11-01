@@ -1,17 +1,16 @@
 """One native Agent, durable inbox/outbox, SDK WebSocket reception."""
 import asyncio
-from contextlib import AsyncExitStack, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass
 import json
 import logging
 from pathlib import Path
-from uuid import uuid5, NAMESPACE_URL
 
 import httpx
 from ai_assistant.config import ConfigError
 from ai_assistant.executables import executable, executable_env
 from ai_assistant.integrations.policy import Caller
-from ai_assistant.runtime import assistant_session, final_text, WaitingTurn
+from ai_assistant.runtime import assistant_session
 from ai_assistant.storage.integrations import operation_storage
 from ai_assistant.tools.context import tool_context
 
@@ -22,12 +21,16 @@ def failure_message(error):
     """仅暴露错误类别，避免异常正文包含凭据或文档内容。"""
     from ai_assistant.agents.context import ContextBudgetError
     from ai_assistant.runtime import TurnIncompleteError
+    from ai_assistant.storage.sessions import SessionStorageError
     if getattr(error, 'turn_message', None):
         return error.turn_message
     if isinstance(error, TurnIncompleteError):
         return str(error)
     if isinstance(error, ContextBudgetError):
-        reason = '上下文超出预算：当前请求、必需回执或已激活提示与 schema 无法容纳。请分页读取、减少工具或 Skills、缩小范围，或将文档入库。'
+        reason = '上下文超出预算：当前请求、必需回执或固定提示与工具 schema 无法容纳。请精简 mcp.servers.<服务>.tools 或 Skills、分页读取、缩小范围，或将文档入库。'
+    elif isinstance(error, SessionStorageError):
+        from ai_assistant.runtime.presentation import SAFE_MESSAGE
+        return SAFE_MESSAGE
     elif isinstance(error, TimeoutError):
         reason = '本轮执行超时。'
     else:
@@ -58,8 +61,9 @@ def caller_for(config, row):
         if grant is None:
             raise ConfigError('Group is no longer authorized.')
         return Caller('feishu_group', True, row['binding'],
-                      {key: tuple(value) for key, value in grant.resources.items()})
-    return Caller('feishu_private', True, row['binding'])
+                      {key: tuple(value) for key, value in grant.resources.items()}, scope='shared',
+                      skill_ids=tuple(grant.skill_ids if grant.skill_ids is not None else config.channels.feishu.default_group_skill_ids))
+    return Caller('feishu_private', True, row['binding'], scope='private')
 
 
 class BotWorker:
@@ -68,58 +72,61 @@ class BotWorker:
         self.active = None
         self.active_row = None
 
-    async def enqueue_reply(self, row, text, *, progress=False):
-        from psycopg.types.json import Jsonb
-        # Store replies and completion atomically. Received text is cleared after delivery.
-        async with operation_storage(self.config.sessions) as reply_store:
-            async with reply_store.conn.transaction():
-                for index in range(0, len(text), 3000):
-                    await reply_store.conn.execute('''INSERT INTO assistant_outbox(id,input_id,body,part)
-                        VALUES(%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING''', (
-                            str(uuid5(NAMESPACE_URL, row['id'] + (':progress' if progress else ':reply:' + str(index // 3000)))), row['id'], Jsonb({
-                            'chat_id': row['body']['chat_id'], 'text': text[index:index+3000]}), -1 if progress else index // 3000))
-                if not progress:
-                    await reply_store.conn.execute("UPDATE assistant_inbox SET status='completed' WHERE id=%s", (row['id'],))
+    async def enqueue_reply(self, row, text, *, conn=None, purpose='answer', snapshot=None):
+        from ai_assistant.interfaces.outbox import enqueue_text
 
-    async def fail_reply(self, row, text, *, cancelled=False):
-        if self.config.channels.feishu.streaming:
-            # runtime 已持久化的业务终态不能被外层通用异常或取消提示覆盖。
-            from ai_assistant.runtime.outcomes import TERMINAL_STATES
-            existing = await (await self.store.conn.execute(
-                "SELECT final_state,body FROM assistant_outbox WHERE input_id=%s AND kind='card'", (row['id'],))).fetchone()
-            if existing and existing['final_state'] in TERMINAL_STATES and existing['body'].get('final_text'):
-                await self.finish_reply(row, existing['body']['final_text'])
-                return
-            from ai_assistant.interfaces.streaming import ReplyStream
-            stream = ReplyStream(self.config, row)
-            stream.emit({'kind': 'cancelled' if cancelled else 'failed', 'text': text})
-            await stream.persist(self.store.conn)
-            existing = await (await self.store.conn.execute("SELECT status FROM assistant_outbox WHERE input_id=%s AND kind='card'", (row['id'],))).fetchone()
-            if existing and existing['status'] == 'rejected':
-                await self.enqueue_reply(row, text)
-            else:
-                await self.store.conn.execute("UPDATE assistant_inbox SET status='completed' WHERE id=%s", (row['id'],))
+        async def enqueue(connection):
+            async with connection.transaction():
+                await enqueue_text(connection, self.config.channels.feishu, row, text,
+                    purpose=purpose, snapshot=snapshot)
+        if conn is not None:
+            await enqueue(conn)
         else:
-            await self.enqueue_reply(row, text)
+            async with operation_storage(self.config.sessions) as reply_store:
+                await enqueue(reply_store.conn)
 
-    async def restore_reply(self, row, text, *, incomplete=False, outcome=None):
-        if self.config.channels.feishu.streaming:
-            from ai_assistant.interfaces.streaming import ReplyStream
-            stream = ReplyStream(self.config, row)
-            stream.emit({'kind': outcome['status'] if outcome else 'failed' if incomplete else 'complete', 'text': text})
-            await stream.persist(self.store.conn)
-        await self.finish_reply(row, text)
+    async def recover_reply(self, row, *, fallback=None):
+        """投递恢复只读 saver 和索引，不构建 Agent 或模型。"""
+        from ai_assistant.runtime.presentation import project, response_finished
+        from ai_assistant.storage.sessions import session_storage
 
-    async def finish_reply(self, row, text):
-        from ai_assistant.interfaces.streaming import card
-        existing = await (await self.store.conn.execute(
-            "SELECT * FROM assistant_outbox WHERE input_id=%s AND kind='card'", (row['id'],))).fetchone()
-        if existing and existing['status'] != 'rejected':
-            _, fits = card(text, 'complete', self.config.channels.feishu.card_max_bytes)
-            if fits:
-                await self.store.conn.execute("UPDATE assistant_inbox SET status='completed' WHERE id=%s", (row['id'],))
-                return
-        await self.enqueue_reply(row, text)
+        saved = await (await self.store.conn.execute(
+            'SELECT * FROM assistant_outbox WHERE input_id=%s ORDER BY part', (row['id'],))).fetchall()
+        # 旧记录仅供诊断，升级不能自动补发。
+        if any((item.get('body') or {}).get('delivery', {}).get('version') != 1 for item in saved):
+            logger.warning('不支持的投递格式：input_id=%s；未恢复或发送。', row['id'])
+            return
+        # 升级前遗留的流式卡片：终态已确认投递即不重发，正文已在远端。
+        cards = [item for item in saved if item['kind'] == 'card']
+        if any(item['status'] == 'delivered' and response_finished(item['final_state']) for item in cards):
+            await self.store.conn.execute("UPDATE assistant_inbox SET status='completed' WHERE id=%s", (row['id'],))
+            return
+        # 已登记的文本批次全部复用，残缺旧批次也不重新切分或补发。
+        if any(item['part'] >= 0 for item in saved):
+            await self.store.conn.execute("UPDATE assistant_inbox SET status='completed' WHERE id=%s", (row['id'],))
+            return
+        # 卡片未完成投递：放弃卡片行并降级为文本补发，优先使用已持久化的终态正文。
+        if cards:
+            await self.store.conn.execute("UPDATE assistant_outbox SET status='rejected' WHERE input_id=%s AND kind='card'", (row['id'],))
+            for item in cards:
+                snapshot = (item.get('body') or {}).get('presentation')
+                if snapshot and snapshot.get('version') == 1:
+                    await self.enqueue_reply(row, snapshot['text'], snapshot=snapshot)
+                    return
+        async with session_storage(self.config.sessions) as repo:
+            session = await (await repo.execute(
+                'SELECT s.* FROM assistant_sessions s JOIN assistant_channel_sessions c ON c.session_id=s.id WHERE c.binding=%s',
+                (row['binding'],))).fetchone()
+            if not session:
+                display = project({'status': 'unknown', 'input_id': row['id']}, fallback or '未找到当前会话记录，未恢复或重新执行。')
+            else:
+                from ai_assistant.runtime.history import read_saved_turn
+                found = await read_saved_turn(repo.saver, session, row['id'])
+                if found is not None:
+                    display = project(*found)
+                else:
+                    display = project({'status': 'unknown', 'input_id': row['id']}, fallback or '不支持的结果格式或缺少当前输入的原生正文定位；未恢复或重新执行。')
+        await self.enqueue_reply(row, display.text, snapshot=display.snapshot())
 
     async def binding_session(self, row):
         result = await (await self.store.conn.execute('SELECT session_id FROM assistant_channel_sessions WHERE binding=%s',
@@ -129,9 +136,15 @@ class BotWorker:
     async def show_usage(self, row):
         """管理命令直接读取可信绑定；不打开 runtime 或竞争会话锁。"""
         caller_for(self.config, row)
-        from ai_assistant.storage.usage import UsageStore
+        from ai_assistant.storage.usage import usage_storage
         sid = await self.binding_session(row)
-        text = await UsageStore(self.store.conn).report(sid) if sid else '当前会话尚未开始。'
+        text = '当前会话尚未开始。'
+        if sid:
+            try:
+                async with usage_storage(self.config.sessions) as usage:
+                    text = await usage.report(sid)
+            except Exception:
+                text = '累计用量统计暂不可用。'
         await self.enqueue_reply(row, text)
 
     async def save_binding(self, row, session_id, conn):
@@ -139,19 +152,19 @@ class BotWorker:
         async with conn.transaction():
             await bind(conn, row['binding'], session_id)
 
-    async def execute(self, row, *, recover=False, resume=False):
+    async def execute(self, row, *, recover=False):
         caller = caller_for(self.config, row)
         from ai_assistant.interfaces.chat_commands import parse_command, handle
         from ai_assistant.skills.catalog import skills_for_caller
         text = row['body']['text'].strip()
         parsed = parse_command(text)
-        if parsed and parsed[0] != '/skill':
+        if parsed and parsed[0] not in {'/skill'}:
             await handle(self, row, caller, parsed, recover=recover)
             return
         skill_ids = None
-        if parsed:
+        if parsed and parsed[0] == '/skill':
             identity, text = parsed[1]
-            if not recover and not resume:
+            if not recover:
                 catalog = skills_for_caller(self.config, getattr(self.resources, 'skills', None), caller)
                 if catalog is None:
                     await self.enqueue_reply(row, '本群未配置可用 Skills。' if caller.channel == 'feishu_group' else '未配置 Skills。')
@@ -160,101 +173,133 @@ class BotWorker:
                     await self.enqueue_reply(row, 'Skill ID 不存在或未授权，请使用 /skills 查看可用 ID。')
                     return
             skill_ids = [identity]
+        if recover:
+            await self.recover_reply(row)
+            return
         session_id = await self.binding_session(row)
         async with assistant_session(self.config, session_id=session_id, caller=caller,
                                      resources=self.resources) as session:
             await self.save_binding(row, session.session_id, session.repository.conn)
-            if recover:
-                if session._pending:
-                    await self.store.conn.execute("UPDATE assistant_inbox SET status='waiting' WHERE id=%s", (row['id'],))
-                    if not self.config.channels.feishu.streaming:
-                        await self.enqueue_reply(row, '正在同步知识来源，完成后将自动回答。', progress=True)
-                    return
-                current = await (await session.repository.execute(
-                    'SELECT last_input_id FROM assistant_sessions WHERE id=%s', (session.session_id,))).fetchone()
-                if current['last_input_id'] == row['id'] and session._complete:
-                    state = await session.agent.aget_state(session._complete)
-                    await self.restore_reply(row, final_text(state.values['messages']), incomplete=bool(state.values.get('turn_outcome')), outcome=state.values.get('turn_result'))
-                    return
-                latest = await session.agent.aget_state({'configurable': {'thread_id': session._thread}})
-                recovered = latest.values.get('turn_result')
-                if recovered and recovered.get('input_id') == row['id'] and recovered['items']:
-                    from ai_assistant.runtime.outcomes import receipt_lines
-                    await self.restore_reply(row, '上一轮未全部完成；未自动重放。\n' + '\n'.join(receipt_lines(recovered['items'])), outcome=recovered)
-                    return
-                await self.fail_reply(row, '上一轮未完成，可能已产生外部操作。请查询操作回执核实；该请求不会自动重跑。')
-                return
-            user_source = text
-            if not resume and self.config.knowledge is not None and caller.channel == 'feishu_private':
-                from ai_assistant.knowledge.admission import admit_message
-                admitted = await admit_message(self.config, text, attachment=text.startswith('File reference: '))
-                if admitted:
-                    text += '\n应用状态：以下为文档长期入库登记结果，failed 表示失败，其余尚不代表索引已完成；成功项请用 search_knowledge 并按 source_id 检索。失败时可检查已配置 MCP 的读取权限，不能声称未配置集成：' + json.dumps(admitted, ensure_ascii=False)
-            stream = None
-            if self.config.channels.feishu.streaming:
-                from ai_assistant.interfaces.streaming import ReplyStream
-                stream = await ReplyStream(self.config, row).start()
-            try:
-                result = await session.run_turn(text, skill_ids=skill_ids, input_id=row['id'], resume=resume,
-                    user_source=user_source, on_output=stream.emit if stream else None)
-            finally:
-                if stream:
-                    await stream.close()
-            if isinstance(result, WaitingTurn):
-                await self.store.conn.execute("UPDATE assistant_inbox SET status='waiting' WHERE id=%s", (row['id'],))
-                if not stream:
-                    await self.enqueue_reply(row, '正在同步知识来源，完成后将自动回答。', progress=True)
-                return
-            await self.finish_reply(row, final_text(result.messages))
+            result = await session.run_turn(text, skill_ids=skill_ids, input_id=row['id'],
+                user_source=text)
+            from ai_assistant.runtime.presentation import project, saved_body
+            display = project(result.result, saved_body(result.result, result.messages))
+            await self.enqueue_reply(row, display.text, snapshot=display.snapshot())
+            await session.after_reply()
 
     async def send_pending(self):
-        rows = await (await self.store.conn.execute("SELECT o.* FROM assistant_outbox o WHERE o.status='pending' AND o.next_attempt_at<=now() AND NOT EXISTS(SELECT 1 FROM assistant_outbox p WHERE p.input_id=o.input_id AND p.part>=0 AND p.part<o.part AND p.status!='delivered') ORDER BY o.created_at,o.input_id,o.part,o.id")).fetchall()
+        rows = await (await self.store.conn.execute("SELECT o.* FROM assistant_outbox o WHERE o.status='pending' AND o.kind='text' AND o.next_attempt_at<=now() AND NOT EXISTS(SELECT 1 FROM assistant_outbox p WHERE p.input_id=o.input_id AND p.part>=0 AND p.part<o.part AND p.status!='delivered') ORDER BY o.created_at,o.input_id,o.part,o.id")).fetchall()
+        from psycopg.types.json import Jsonb
+        from ai_assistant.interfaces.chat_commands import parse_command
+        from ai_assistant.interfaces.delivery import classify, exhausted
+        import time
+        settings = self.config.channels.feishu
         for row in rows:
-            # Persist sending before the remote effect. A crash is never treated as unsent.
-            await self.store.conn.execute("UPDATE assistant_outbox SET status='sending' WHERE id=%s", (row['id'],))
-            is_card = row.get('kind') == 'card'
-            try:
-                if is_card:
-                    data = await self.api.update_card(row['remote_id'], row['body']['card']) if row['remote_id'] else await self.api.send_card(row['body']['chat_id'], row['body']['card'], row['id'])
-                else:
-                    data = await self.api.send_text(row['body']['chat_id'], row['body']['text'], row['id'])
-                if is_card and not row['remote_id'] and not isinstance(data.get('message_id'), str):
-                    raise RuntimeError('Card creation has no confirmed message ID.')
-                if is_card and not row['remote_id'] and not data.get('message_id'):
-                    raise RuntimeError('Card creation has no confirmed message ID.')
-            except Exception as error:
-                from ai_assistant.integrations.feishu_files import FeishuRejected
-                rejected = isinstance(error, FeishuRejected) and error.code in {230001, 230006}
-                throttled = (isinstance(error, FeishuRejected) and error.code == 99991400) or (
-                    isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429)
-                retry = is_card and (bool(row['remote_id']) or throttled) and not rejected
-                await self.store.conn.execute("UPDATE assistant_outbox SET status=%s,next_attempt_at=now()+interval '1 second' WHERE id=%s",
-                    ('rejected' if is_card and rejected else 'pending' if retry else 'unknown', row['id']))
-                if is_card and rejected and row['final_state'] in {'complete', 'partial', 'failed', 'unknown', 'cancelled', 'needs_clarification'}:
-                    inbox = await (await self.store.conn.execute('SELECT * FROM assistant_inbox WHERE id=%s', (row['input_id'],))).fetchone()
-                    if inbox and inbox['body'] and row['body'].get('final_text'):
-                        await self.enqueue_reply(inbox, row['body']['final_text'])
+            # 慢投递期间出现可立即处理的输入（命令或空闲时的业务请求）先让位；主循环处理后下一轮续发。
+            incoming = await (await self.store.conn.execute(
+                "SELECT body->>'text' AS text FROM assistant_inbox WHERE status='received' ORDER BY received_at,id LIMIT 1")).fetchone()
+            if incoming and (self.active is None or parse_command(incoming['text'] or '')):
+                return
+            body = row['body'] or {}
+            delivery = body.get('delivery')
+            # 旧记录仅供诊断，升级不能自动补发。
+            if not delivery or delivery.get('version') != 1:
                 continue
-            if is_card:
-                await self.store.conn.execute("""UPDATE assistant_outbox SET
-                    status=CASE WHEN display_version=%s THEN 'delivered' ELSE 'pending' END,
-                    remote_id=COALESCE(remote_id,%s),delivered_version=%s WHERE id=%s""",
-                    (row['display_version'], data.get('message_id'), row['display_version'], row['id']))
-            else:
-                await self.store.conn.execute("UPDATE assistant_outbox SET status='delivered',remote_id=%s,body=NULL WHERE id=%s",
-                                              (data.get('message_id'), row['id']))
+            if exhausted(delivery, settings):
+                async with self.store.conn.transaction():
+                    await self.store.conn.execute("UPDATE assistant_outbox SET status='unknown' WHERE id=%s", (row['id'],))
+                    await self.store.conn.execute("UPDATE assistant_outbox SET status='blocked' WHERE input_id=%s AND part>%s AND status='pending'", (row['input_id'], row['part']))
+                continue
+            delivery['attempts'] += 1
+            if delivery.get('first_terminal_at') is not None:
+                delivery['terminal_attempts'] = delivery.get('terminal_attempts', 0) + 1
+            delivery['last_outcome'] = 'in_flight'
+            attempt_patch = {key: delivery[key] for key in ('attempts', 'terminal_attempts', 'last_outcome') if key in delivery}
+            claimed = await (await self.store.conn.execute(
+                "UPDATE assistant_outbox SET status='sending',body=jsonb_set(body,'{delivery}',body->'delivery' || %s) WHERE id=%s AND status='pending' RETURNING *",
+                (Jsonb(attempt_patch), row['id']))).fetchone()
+            if claimed is None:
+                continue
+            row = claimed
+            body = row['body']
+            delivery = body['delivery']
+            started = time.monotonic()
+            try:
+                remaining = delivery.get('deadline')
+                timeout = min(settings.delivery_attempt_timeout_seconds,
+                              max(0, remaining - time.time()) if remaining else settings.delivery_attempt_timeout_seconds)
+                async with asyncio.timeout(timeout):
+                    data = await self.api.send_text(body['chat_id'], body['text'], row['id'])
+                    if not isinstance(data.get('message_id'), str) or not data['message_id']:
+                        raise RuntimeError('Missing delivery receipt')
+            except Exception as error:
+                category, diagnostic = classify(error)
+                delivery['last_error'] = diagnostic
+                delivery['last_outcome'] = category
+                retry = category == 'temporary' and not exhausted(delivery, settings)
+                status = 'pending' if retry else 'rejected' if category in {'rejected', 'temporary'} else 'unknown'
+                delay = 1 if delivery.get('terminal_attempts', delivery['attempts']) <= 1 else 3
+                if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429:
+                    try:
+                        requested_delay = float(error.response.headers.get('Retry-After', delay))
+                    except ValueError:
+                        requested_delay = delay
+                    if 0 <= requested_delay <= max(0, (delivery.get('deadline') or time.time()) - time.time()):
+                        delay = requested_delay
+                async with self.store.conn.transaction():
+                    await self.store.conn.execute("UPDATE assistant_outbox SET status=%s,body=jsonb_set(body,'{delivery}',body->'delivery' || %s),next_attempt_at=now()+%s*interval '1 second' WHERE id=%s",
+                        (status, Jsonb({'last_error': diagnostic, 'last_outcome': category}), delay, row['id']))
+                    logger.warning('Delivery operation=send_text elapsed=%.3f diagnostic=%s',
+                                   time.monotonic()-started, diagnostic)
+                    if not retry:
+                        await self.store.conn.execute("UPDATE assistant_outbox SET status='blocked' WHERE input_id=%s AND part>%s AND status='pending'", (row['input_id'], row['part']))
+                continue
+            logger.info('Delivery operation=send_text elapsed=%.3f outcome=confirmed',
+                        time.monotonic()-started)
+            delivery['last_outcome'] = 'confirmed'
+            await self.store.conn.execute("UPDATE assistant_outbox SET status='delivered',remote_id=%s,body=%s WHERE id=%s",
+                                          (data.get('message_id'), Jsonb({'delivery': delivery}), row['id']))
             await self.store.conn.execute('''UPDATE assistant_inbox SET body=NULL,status='delivered'
-                WHERE id=%s AND status='completed' AND NOT EXISTS(SELECT 1 FROM assistant_outbox WHERE input_id=%s AND (part>=0 OR kind='card') AND status NOT IN ('delivered','rejected'))''',
+                WHERE id=%s AND status='completed' AND NOT EXISTS(SELECT 1 FROM assistant_outbox WHERE input_id=%s AND (part>=0 OR kind='card') AND (status!='delivered' AND NOT (kind='card' AND status='rejected' AND EXISTS(SELECT 1 FROM assistant_outbox t WHERE t.input_id=assistant_outbox.input_id AND t.part>=0))))''',
                 (row['input_id'], row['input_id']))
 
         await self.store.conn.execute("""UPDATE assistant_inbox i SET body=NULL,status='delivered'
             WHERE i.status='completed' AND EXISTS(SELECT 1 FROM assistant_outbox o WHERE o.input_id=i.id)
             AND NOT EXISTS(SELECT 1 FROM assistant_outbox o WHERE o.input_id=i.id
-                AND (o.part>=0 OR o.kind='card') AND o.status NOT IN ('delivered','rejected'))""")
+                AND (o.part>=0 OR o.kind='card') AND (o.status!='delivered' AND NOT (o.kind='card' AND o.status='rejected' AND EXISTS(SELECT 1 FROM assistant_outbox t WHERE t.input_id=o.input_id AND t.part>=0))))""")
+
+    async def stop_for_command(self, row):
+        """用户取消意图先落盘，再等待执行任务和工具清理，最后处理命令回执。"""
+        from ai_assistant.storage.sessions import session_storage
+        from ai_assistant.interfaces.chat_commands import prepare_session_end
+        async with session_storage(self.config.sessions) as repo:
+            same = self.active and self.active_row['binding'] == row['binding']
+            stored = await prepare_session_end(repo, row,
+                active_input_id=str(self.active_row['id']) if same else None)
+        if stored['result']:
+            return
+        target = json.loads(stored['target'] or '{}')
+        same = self.active and self.active_row['binding'] == row['binding']
+        if same:
+            # 单执行器保证绑定不在中途切换；旧命令不能取消后来启动的任务。
+            current = await self.binding_session(row)
+            if (current != target.get('session_id')
+                    or target.get('active_input_id') != str(self.active_row['id'])):
+                from ai_assistant.storage.sessions import SessionError
+                raise SessionError('取消目标已变化，未取消当前执行。')
+            self.active.cancel()
+            from ai_assistant.cancellation import _drain_worker
+            await _drain_worker(self.active)
+            if not self.active.cancelled() and self.active.exception() is not None:
+                raise self.active.exception()
+            # 回执由取消命令承担，不能随后又发送一份系统中断回复。
+            self.active = self.active_row = None
 
     async def recover(self):
-        await self.store.conn.execute("UPDATE assistant_outbox SET status=CASE WHEN kind='card' AND remote_id IS NOT NULL THEN 'pending' ELSE 'unknown' END WHERE status='sending'")
-        rows = await (await self.store.conn.execute("SELECT * FROM assistant_inbox WHERE status IN ('running','waiting') ORDER BY received_at,id")).fetchall()
+        # 卡片机制已删除：本地确认中断的投递不推测远端结果，一律 unknown 且不重发。
+        await self.store.conn.execute("UPDATE assistant_outbox SET status='unknown' WHERE status='sending' AND body->'delivery'->>'version'='1'")
+        await self.store.conn.execute("UPDATE assistant_outbox o SET status='blocked' WHERE o.status='pending' AND o.part>=0 AND o.body->'delivery'->>'version'='1' AND EXISTS(SELECT 1 FROM assistant_outbox p WHERE p.input_id=o.input_id AND p.part>=0 AND p.part<o.part AND p.status IN ('unknown','blocked','rejected'))")
+        rows = await (await self.store.conn.execute("SELECT i.* FROM assistant_inbox i WHERE i.status='running' AND (i.body->>'delivery_version'='1' OR EXISTS(SELECT 1 FROM assistant_outbox o WHERE o.input_id=i.id AND o.body->'delivery'->>'version'='1')) ORDER BY i.received_at,i.id")).fetchall()
         for row in rows:
             await self.execute(row, recover=True)
         await self.send_pending()
@@ -279,14 +324,15 @@ class BotWorker:
                             # 取消可能发生在提交之后；只读业务回执，保留已经提交的 ID。
                             await self.recover_rag(self.active_row)
                         else:
-                            await self.fail_reply(self.active_row, '执行已取消；已提交的知识库任务继续执行，已发生的远端操作不会撤销，请核实操作回执。', cancelled=True)
+                            await self.recover_reply(self.active_row)
                     except Exception as exc:
                         logger.error('Feishu turn failed: input_id=%s error_type=%s',
                                      self.active_row['id'], type(exc).__name__)
                         if self.active_row['body']['text'].strip().startswith('/rag '):
                             await self.recover_rag(self.active_row)
                         else:
-                            await self.fail_reply(self.active_row, failure_message(exc))
+                            # checkpoint 提交也可能已成功但确认失败，先只读检查，不能覆盖原答案。
+                            await self.recover_reply(self.active_row, fallback=failure_message(exc))
                     self.active = self.active_row = None
                 rows = await (await self.store.conn.execute("SELECT * FROM assistant_inbox WHERE status='received' ORDER BY received_at,id LIMIT 100")).fetchall()
                 for row in rows:
@@ -294,59 +340,31 @@ class BotWorker:
                     if command == '/usage':
                         await self.show_usage(row)
                         continue
-                    if command == '/cancel':
-                        caller_for(self.config, row)
-                        same = self.active_row and self.active_row['binding'] == row['binding']
-                        waiting = await (await self.store.conn.execute("SELECT * FROM assistant_inbox WHERE binding=%s AND status='waiting' LIMIT 1", (row['binding'],))).fetchone()
-                        if waiting and command == '/cancel':
-                            async with assistant_session(self.config, session_id=await self.binding_session(row),
-                                                         caller=caller_for(self.config,row), resources=self.resources) as session:
-                                await session.cancel_waiting()
-                            await self.fail_reply(waiting, '已取消本次知识回答等待，未完成；已入库资料仍保留。', cancelled=True)
-                        same = same or waiting
-                        if command == '/cancel' and self.active and self.active_row['binding'] == row['binding']:
-                            self.active.cancel()
-                        await self.enqueue_reply(row, '已请求取消；已提交的知识库任务继续执行。' if same else '当前会话没有正在执行的请求；已提交的知识库任务继续执行。')
+                    if command in {'/cancel', '/new'}:
+                        try:
+                            caller_for(self.config, row)
+                            await self.stop_for_command(row)
+                            await self.execute(row)
+                        except Exception as exc:
+                            await self.enqueue_reply(row, failure_message(exc))
                         continue
                     from ai_assistant.interfaces.chat_commands import parse_command
                     parsed = parse_command(command)
                     rag_add = bool(parsed and parsed[0] == '/rag' and parsed[1][0] == 'add')
                     if parsed and parsed[0] not in {'/new', '/skill'} and not rag_add:
                         try:
-                            await self.store.conn.execute("UPDATE assistant_inbox SET status='running' WHERE id=%s", (row['id'],))
+                            await self.store.conn.execute("UPDATE assistant_inbox SET status='running',body=jsonb_set(body,'{delivery_version}','1'::jsonb) WHERE id=%s", (row['id'],))
                             await self.execute(row)
                         except Exception as exc:
                             if parsed[0] == '/rag':
                                 await self.recover_rag(row)
                             else:
-                                await self.fail_reply(row, failure_message(exc))
+                                await self.enqueue_reply(row, failure_message(exc))
                         continue
                     if self.active is None:
-                        waiting = await (await self.store.conn.execute("SELECT 1 FROM assistant_inbox WHERE binding=%s AND status='waiting' LIMIT 1", (row['binding'],))).fetchone()
-                        if waiting and command != '/new' and not rag_add:
-                            continue
-                        await self.store.conn.execute("UPDATE assistant_inbox SET status='running' WHERE id=%s", (row['id'],))
+                        await self.store.conn.execute("UPDATE assistant_inbox SET status='running',body=jsonb_set(body,'{delivery_version}','1'::jsonb) WHERE id=%s", (row['id'],))
                         self.active_row = row
                         self.active = asyncio.create_task(self.execute(row))
-                if self.active is None and self.config.knowledge is not None:
-                    from ai_assistant.knowledge.sync import settings
-                    from ai_assistant.storage.rag import RagStore
-                    knowledge = RagStore(settings(self.config))
-                    try:
-                        waiting_rows = await (await self.store.conn.execute("SELECT * FROM assistant_inbox WHERE status='waiting' ORDER BY received_at,id")).fetchall()
-                        for row in waiting_rows:
-                            sid = await self.binding_session(row)
-                            stored = await (await self.store.conn.execute('SELECT pending FROM assistant_sessions WHERE id=%s', (sid,))).fetchone()
-                            if not stored or not stored['pending']:
-                                await self.execute(row, recover=True)
-                                continue
-                            status = await knowledge.sync_status(stored['pending']['sync_id'])
-                            if status and status['state'] == 'ready':
-                                self.active_row = row
-                                self.active = asyncio.create_task(self.execute(row, resume=True))
-                                break
-                    finally:
-                        await knowledge.close()
                 await self.send_pending()
                 await asyncio.sleep(0.25)
         finally:
@@ -354,6 +372,40 @@ class BotWorker:
                 self.active.cancel()
                 with suppress(asyncio.CancelledError, Exception):
                     await self.active
+
+
+@asynccontextmanager
+async def optional_knowledge_worker(config):
+    """同进程启动一次；知识故障不参与聊天服务退出判定。"""
+    async with AsyncExitStack() as stack:
+        try:
+            from ai_assistant.knowledge.sync import background_worker
+            task = await stack.enter_async_context(background_worker(config))
+        except Exception as error:
+            # 会话/清理错误仍必须传播；知识数据库启动错误单独隔离。
+            from ai_assistant.storage.sessions import SessionError
+            from langgraph.errors import GraphBubbleUp
+            if (isinstance(error, (SessionError, GraphBubbleUp))
+                    or asyncio.current_task().cancelling()):
+                raise
+            logger.error('知识 Worker 启动失败；聊天继续，队列尚未确认处理，不自动重启。category=%s',
+                         type(error).__name__)
+            task = None
+
+        def stopped(completed):
+            error = None if completed.cancelled() else completed.exception()
+            logger.error('知识 Worker 已退出；聊天继续，队列尚未确认处理，不自动重启。state=%s category=%s',
+                         'cancelled' if completed.cancelled() else 'failed' if error else 'ended',
+                         type(error).__name__ if error else 'none')
+
+        if task is not None:
+            task.add_done_callback(stopped)
+        try:
+            yield task
+        finally:
+            if task is not None:
+                # 正常关闭由 background_worker 等待任务清理并关闭连接，不记作意外退出。
+                task.remove_done_callback(stopped)
 
 
 async def serve(config):
@@ -374,24 +426,18 @@ async def serve(config):
     if not receiver.is_file() or not (project / 'node_modules/pg/package.json').is_file():
         raise ConfigError('Deploy the pinned Feishu Node project with npm ci.')
     async with AsyncExitStack() as stack:
-        knowledge_worker = None
         if config.knowledge is not None:
-            from ai_assistant.knowledge.sync import background_worker
-            knowledge_worker = await stack.enter_async_context(background_worker(config))
+            await stack.enter_async_context(optional_knowledge_worker(config))
         store = await stack.enter_async_context(operation_storage(config.sessions))
         leader = await (await store.conn.execute('SELECT pg_try_advisory_lock(714160004) AS locked')).fetchone()
         if not leader['locked']:
             raise ConfigError('Another Feishu executor is already running.')
         # Fail before starting reception if migration has not been explicitly run.
         await store.conn.execute('SELECT last_input_id FROM assistant_sessions LIMIT 0')
-        await store.conn.execute('SELECT call_id FROM assistant_model_usage LIMIT 0')
-        await store.conn.execute('SELECT enabled_at FROM assistant_usage_schema LIMIT 0')
         await store.conn.execute('SELECT binding,title FROM assistant_sessions LIMIT 0')
         await store.conn.execute('SELECT input_id FROM assistant_chat_commands LIMIT 0')
         await store.conn.execute('SELECT id FROM assistant_inbox LIMIT 0')
         await store.conn.execute('SELECT kind,display_version,final_state FROM assistant_outbox LIMIT 0')
-        # 已持有唯一飞书执行器锁，前一进程未结束的调用不能继续显示为进行中。
-        await store.conn.execute("UPDATE assistant_model_usage SET status='unknown',ended_at=clock_timestamp() WHERE ended_at IS NULL AND session_id IN (SELECT session_id FROM assistant_channel_sessions)")
         context = await stack.enter_async_context(tool_context(config))
         directory = await stack.enter_async_context(mcp_resources(config, context.workspace))
         from ai_assistant.skills.catalog import validate_group_skills
@@ -403,7 +449,7 @@ async def serve(config):
         process = await asyncio.create_subprocess_exec(binary, str(receiver), cwd=str(project),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             env=executable_env(binary))
-        payload = dict(app_id=config.integrations.feishu.app_id,
+        payload = dict(final_delivery_timeout_seconds=config.channels.feishu.final_delivery_timeout_seconds, app_id=config.integrations.feishu.app_id,
             app_secret=config.integrations.feishu.app_secret.get_secret_value(),
             owner_open_id=config.integrations.feishu.owner_open_id,
             database_url=config.sessions.database_url.get_secret_value(),
@@ -415,10 +461,7 @@ async def serve(config):
         worker = asyncio.create_task(BotWorker(config, store, resources, api).run())
         receiver_wait = asyncio.create_task(process.wait())
         try:
-            done, _ = await asyncio.wait([worker, receiver_wait] + ([knowledge_worker] if knowledge_worker else []), return_when=asyncio.FIRST_COMPLETED)
-            if knowledge_worker and knowledge_worker in done:
-                await knowledge_worker
-                raise ConfigError('Knowledge worker stopped.')
+            done, _ = await asyncio.wait([worker, receiver_wait], return_when=asyncio.FIRST_COMPLETED)
             if receiver_wait in done:
                 raise ConfigError('Feishu receiver stopped; check Node deployment and application permissions.')
             await worker

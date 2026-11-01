@@ -115,12 +115,13 @@ class RestrictedExecutionPolicy(BaseExecutionPolicy):
         allow_network=False,
         read_paths=(),
         skills=(),
+        output_lines=1000, output_bytes=128 * 1024,
     ):
         super().__init__(
             command_timeout=timeout,
             termination_timeout=0.5,
-            max_output_lines=200,
-            max_output_bytes=32768,
+            max_output_lines=output_lines,
+            max_output_bytes=output_bytes,
         )
         self.workspace, self.venv = workspace, Path(venv).resolve()
         self.temporary = Path(temporary).resolve()
@@ -300,15 +301,17 @@ class TerminalService:
         self,
         workspace: ReadOnlyWorkspace,
         *,
-        timeout=120,
+        timeout=300,
         venv=None,
         lock=None,
         allow_network=False,
+        output_lines=1000, output_bytes=128 * 1024,
         env=None,
         read_paths=(),
     ):
         if not math.isfinite(timeout) or not 0 < timeout <= 1800:
             raise TerminalError("终端超时必须在 0～1800 秒之间。")
+        self.output_lines, self.output_bytes = output_lines, output_bytes
         self.workspace, self.timeout = workspace, timeout
         self.venv = Path(venv or sys.prefix).resolve()
         self.lock = lock or asyncio.Lock()
@@ -433,6 +436,7 @@ class TerminalService:
                             allow_network=self.allow_network,
                             read_paths=self.read_paths,
                             skills=skills,
+                            output_lines=self.output_lines, output_bytes=self.output_bytes,
                         )
                     except OSError:
                         raise TerminalError("终端只读路径不存在或不可访问。") from None
@@ -448,16 +452,16 @@ class TerminalService:
                         await _drain_worker(worker)
                         raise
                 result.update(
-                    profile="restricted", elapsed_seconds=time.monotonic() - started
+                    elapsed_seconds=time.monotonic() - started
                 )
                 raw = result["output"].encode("utf-8")
-                result["output"] = raw[:32768].decode("utf-8", errors="ignore")
+                result["output"] = raw[:self.output_bytes].decode("utf-8", errors="ignore")
                 for secret in self.env.values():
                     if secret:
                         result["output"] = result["output"].replace(
                             secret, "[REDACTED]"
                         )
-                result["truncated_by_bytes"] |= len(raw) > 32768
+                result["truncated_by_bytes"] |= len(raw) > self.output_bytes
                 return result
         except WorkspaceError as exc:
             raise TerminalError(str(exc)) from None

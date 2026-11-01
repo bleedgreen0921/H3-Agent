@@ -19,7 +19,6 @@ def add_commands(commands):
             command.add_argument('--tag', action='append', default=[])
         if action == 'sync':
             command.add_argument('--source')
-            command.add_argument('--wait', action='store_true')
         if action == 'status':
             command.add_argument('job_id')
             command.add_argument('--diagnostics', action='store_true')
@@ -68,12 +67,10 @@ async def execute(config, args):
             rows = await sources(config, store) if args.action == 'sources' else await store.document_list()
             print(json.dumps(rows[(args.page - 1) * 10:args.page * 10], ensure_ascii=False, default=str))
         elif args.action == 'sync':
-            from ai_assistant.knowledge.sync import configure, wait_sync
+            from ai_assistant.knowledge.sync import configure
             await configure(config,store)
             ident = await store.request_sync({'source_id': args.source} if args.source else {})
             print(ident, flush=True)
-            if args.wait:
-                print(json.dumps(await wait_sync(config,ident),ensure_ascii=False,default=str))
         elif args.action == 'submit':
             from ai_assistant.knowledge.sync import register
             print(json.dumps(await register(config, args.path, tags=args.tag), ensure_ascii=False))
@@ -93,18 +90,14 @@ async def execute(config, args):
             await worker(store, once=args.once, app_config=config)
         elif args.action == 'search':
             from ai_assistant.knowledge.retrieval import create_knowledge_retriever, render_evidence
-            filters = {key: getattr(args, key) for key in ('document_id', 'media_type', 'source_name') if getattr(args, key)}
+            filters = {key: getattr(args, key) for key in ('document_id', 'source_id', 'media_type', 'source_name') if getattr(args, key)}
             if args.tag:
                 filters['tags'] = args.tag
-            from ai_assistant.knowledge.sync import configure,wait_sync
-            await configure(config,store)
-            scope = {key:getattr(args,key) for key in ('document_id','source_id') if getattr(args,key,None)}
-            ident = await store.request_sync(scope)
-            state = await wait_sync(config,ident)
-            docs = await create_knowledge_retriever(c, filters=filters, builds=state['builds']).ainvoke(args.query)
+            docs = await create_knowledge_retriever(c, filters=filters).ainvoke(args.query)
             print(render_evidence(docs))
-            if state['errors']:
-                print('本轮覆盖不完整：'+json.dumps(state['errors'],ensure_ascii=False))
+            print('检索范围：已发布快照；查询不自动同步。')
+            if not docs:
+                print('暂无可检索内容或相关证据；可提交入库、主动同步或查询任务状态。')
         elif args.action == 'delete':
             print(f'退出查询范围的文档数：{await store.delete(args.document_id)}')
         elif args.action == 'rebuild':
@@ -117,13 +110,13 @@ async def execute(config, args):
             if args.database:
                 from sqlalchemy import text
                 async with store.engine.connect() as conn:
-                    for table in ('rag_documents', 'rag_versions', 'rag_jobs', 'rag_builds', 'rag_chunks', 'upsertion_record', 'rag_sources', 'rag_sync_runs', 'rag_query_runs', 'rag_management_operations'):
+                    for table in ('rag_documents', 'rag_versions', 'rag_jobs', 'rag_builds', 'rag_chunks', 'upsertion_record', 'rag_sources', 'rag_sync_runs', 'rag_management_operations'):
                         if not (await conn.execute(text('SELECT to_regclass(:name)'), dict(name=table))).scalar():
                             raise KnowledgeError('缺少 schema，请显式运行 init。')
                     columns = set((await conn.execute(text("""SELECT attname FROM pg_attribute
                         WHERE attrelid=to_regclass('rag_builds') AND attnum>0 AND NOT attisdropped"""))).scalars())
                     if not {'attempt_number', 'error_code', 'error_message', 'diagnostic_path'} <= columns:
-                        raise KnowledgeError('知识库 schema 需要更新，请显式运行 init。')
+                        raise KnowledgeError('知识库结构不受支持；init 仅创建当前结构，不升级旧结构。')
                 print('数据库及 schema 检查通过。')
 
     finally:

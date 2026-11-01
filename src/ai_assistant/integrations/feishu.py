@@ -35,7 +35,7 @@ class OfficialConnection:
     replayed, and every new process must match the session's original tool schemas.
     """
     def __init__(self, config, settings, workspace):
-        self.config, self.settings = config, settings
+        self.config = config
         self.feishu = config.integrations.feishu
         if self.feishu is None:
             raise ConfigError('Configure [integrations.feishu].')
@@ -61,7 +61,7 @@ class OfficialConnection:
         from fastmcp import Client
         from fastmcp.client.transports import StdioTransport
         from langchain.mcp import MCPAdapter
-        from ai_assistant.integrations.mcp import decline
+        from ai_assistant.integrations.mcp import decline, owned_adapter
         binary = executable('node')
         env = {**executable_env(binary),
                'APP_ID': self.feishu.app_id,
@@ -74,7 +74,7 @@ class OfficialConnection:
                                 env=env, cwd=str(self.project), keep_alive=False, log_file=Path(os.devnull))
         client = Client(target, elicitation_handler=decline, timeout=self.config.mcp.call_timeout,
                         init_timeout=self.config.mcp.connect_timeout)
-        async with MCPAdapter(client) as adapter:
+        async with owned_adapter(MCPAdapter(client)) as adapter:
             yield adapter
 
     async def discover(self):
@@ -89,7 +89,7 @@ class OfficialConnection:
                     async with self.connect() as adapter:
                         current = {t.name: t for t in await adapter.list_tools()}
                         if {key: t.args_schema for key, t in current.items()} != self.schemas:
-                            raise ConfigError('Feishu MCP schema changed; restart the session and reload tools.')
+                            raise ConfigError('Feishu MCP schema changed; reopen the session.')
                         return await current[name].coroutine(**arguments)
             return invoke
         for tool in tools:

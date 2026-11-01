@@ -18,9 +18,9 @@ class SessionStorageError(SessionError):
 DDL = '''CREATE TABLE IF NOT EXISTS assistant_sessions (
     id uuid PRIMARY KEY, workspace text NOT NULL, thread_id text NOT NULL,
     thread_ids text[] NOT NULL, complete jsonb,
-    status text NOT NULL CHECK(status IN ('ready','running','interrupted','deleting','waiting')),
-    pending jsonb, pending_input text,
+    status text NOT NULL CHECK(status IN ('ready','running','interrupted','deleting')),
     format_version integer NOT NULL DEFAULT 1,
+    binding text, title text NOT NULL DEFAULT '', last_input_id text,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 )'''
@@ -60,11 +60,9 @@ class SessionRepository:
     async def check_schema(self):
         row = await (await self.execute(
             'SELECT version FROM assistant_session_schema WHERE singleton = true')).fetchone()
-        if not row or row['version'] != 3:
+        if not row or row['version'] != 4:
             raise SessionError('Unsupported session schema; run init with a compatible application.')
-        await self.execute('SELECT binding,title FROM assistant_sessions LIMIT 0')
-        await self.execute('SELECT call_id FROM assistant_model_usage LIMIT 0')
-        await self.execute('SELECT enabled_at FROM assistant_usage_schema LIMIT 0')
+        await self.execute('SELECT binding,title,last_input_id FROM assistant_sessions LIMIT 0')
         # Also fail before any model calls if native Saver initialization is missing.
         for table in ('checkpoints', 'checkpoint_blobs', 'checkpoint_writes', 'checkpoint_migrations'):
             await self.execute(f'SELECT 1 FROM {table} LIMIT 0')
@@ -96,7 +94,7 @@ class SessionRepository:
         row = await (await self.execute('SELECT * FROM assistant_sessions WHERE id=%s', (ident,))).fetchone()
         if not row:
             raise SessionError('Session not found.')
-        if binding is not None and row['binding'] not in (None, binding):
+        if binding is not None and row['binding'] != binding:
             raise SessionError('会话不属于当前聊天。')
         if row['format_version'] != 1:
             raise SessionError('Unsupported session format.')
@@ -151,8 +149,8 @@ class SessionRepository:
         row = await (await self.execute('SELECT thread_ids,status,binding FROM assistant_sessions WHERE id=%s', (ident,))).fetchone()
         if not row or (binding is not None and row['binding'] != binding):
             raise SessionError('未找到可删除的会话。')
-        if row['status'] == 'waiting' or (binding is not None and row['status'] == 'running'):
-            raise SessionError('会话正在执行或等待续接，请先 /cancel 并等待清理结束。')
+        if binding is not None and row['status'] == 'running':
+            raise SessionError('会话正在执行，请先 /cancel 并等待清理结束。')
         await self.execute("UPDATE assistant_sessions SET status='deleting' WHERE id=%s", (ident,))
         try:
             for thread in row['thread_ids']:
@@ -164,16 +162,6 @@ class SessionRepository:
             if exists['name']:
                 await self.execute('DELETE FROM assistant_channel_sessions WHERE session_id=%s', (ident,))
             await self.execute('DELETE FROM assistant_sessions WHERE id=%s', (ident,))
-
-    async def waiting(self, pending, input_id):
-        from psycopg.types.json import Jsonb
-        await self.update_current("UPDATE assistant_sessions SET status='waiting',pending=%s,pending_input=%s WHERE id=%s",
-                                  (Jsonb(pending), input_id, self.current))
-
-    async def clear_waiting(self):
-        await self.update_current("UPDATE assistant_sessions SET status='ready',pending=NULL,pending_input=NULL WHERE id=%s",
-                                  (self.current,))
-
 
 @asynccontextmanager
 async def session_storage(settings, *, initialize=False):
@@ -201,30 +189,34 @@ async def session_storage(settings, *, initialize=False):
                     if initialize:
                         await repo.execute('SELECT pg_advisory_lock(%s)', (SCHEMA_LOCK,))
                         try:
+                            # 先拒绝旧结构；不在失败前升级原生 saver 或补建应用表。
+                            present = await (await repo.execute("SELECT to_regclass('assistant_sessions') AS name")).fetchone()
+                            if present['name']:
+                                await repo.check_schema()
                             await saver.setup()
                             async with conn.transaction():
                                 await repo.execute('''CREATE TABLE IF NOT EXISTS assistant_session_schema (
                                     singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), version integer NOT NULL)''')
                                 row = await (await repo.execute('SELECT version FROM assistant_session_schema')).fetchone()
-                                if row and row['version'] not in (1, 2, 3):
+                                if row and row['version'] != 4:
                                     raise SessionError('Unsupported session schema version.')
                                 await repo.execute(DDL)
-                                await repo.execute('ALTER TABLE assistant_sessions ADD COLUMN IF NOT EXISTS binding text')
-                                await repo.execute("ALTER TABLE assistant_sessions ADD COLUMN IF NOT EXISTS title text NOT NULL DEFAULT ''")
                                 await repo.execute('CREATE INDEX IF NOT EXISTS assistant_sessions_binding ON assistant_sessions(binding,updated_at DESC,id)')
-                                from ai_assistant.storage.usage import DDL as USAGE_DDL
-                                await repo.execute(USAGE_DDL)
-                                await repo.execute('CREATE INDEX IF NOT EXISTS assistant_model_usage_session ON assistant_model_usage(session_id)')
-                                await repo.execute('CREATE TABLE IF NOT EXISTS assistant_usage_schema (singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), enabled_at timestamptz NOT NULL DEFAULT clock_timestamp())')
-                                await repo.execute('INSERT INTO assistant_usage_schema(singleton) VALUES(true) ON CONFLICT DO NOTHING')
-                                await repo.execute('ALTER TABLE assistant_sessions ADD COLUMN IF NOT EXISTS pending jsonb')
-                                await repo.execute('ALTER TABLE assistant_sessions ADD COLUMN IF NOT EXISTS pending_input text')
-                                await repo.execute('ALTER TABLE assistant_sessions DROP CONSTRAINT IF EXISTS assistant_sessions_status_check')
-                                await repo.execute("ALTER TABLE assistant_sessions ADD CONSTRAINT assistant_sessions_status_check CHECK(status IN ('ready','running','interrupted','deleting','waiting'))")
-                                await repo.execute('INSERT INTO assistant_session_schema VALUES(true,3) ON CONFLICT(singleton) DO UPDATE SET version=3')
+                                await repo.execute('INSERT INTO assistant_session_schema VALUES(true,4) ON CONFLICT(singleton) DO NOTHING')
                         finally:
                             await repo.execute('SELECT pg_advisory_unlock(%s)', (SCHEMA_LOCK,))
                     await repo.check_schema()
+                    if initialize:
+                        # 核心结构已成功初始化；统计连接和建表失败单独提示。
+                        try:
+                            from ai_assistant.storage.usage import DDL as USAGE_DDL, usage_storage
+                            async with usage_storage(settings) as usage:
+                                await usage.conn.execute(USAGE_DDL)
+                                await usage.conn.execute('CREATE INDEX IF NOT EXISTS assistant_model_usage_session ON assistant_model_usage(session_id)')
+                        except Exception as error:
+                            import logging
+                            logging.getLogger(__name__).warning(
+                                '核心会话初始化成功；累计用量统计初始化失败：%s', type(error).__name__)
                     yield repo
                 finally:
                     # Closing the connection releases its locks even if explicit

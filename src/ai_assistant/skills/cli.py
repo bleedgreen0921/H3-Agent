@@ -41,7 +41,6 @@ async def execute(config, args):
         invalid = sorted(set(channel.default_group_skill_ids + [s for g in groups.values() for s in g['skill_ids']]) - set(catalog.skills))
         result['group_authorization'] = dict(default=channel.default_group_skill_ids, groups=groups, invalid_ids=invalid)
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        unmet = any(not dep.get('satisfied', False) for dep in result.get('check', {}).get('known_python_dependencies', []))
-        return 2 if invalid or catalog.diagnostics or unmet else 0
+        return 2 if invalid or catalog.diagnostics else 0
     finally:
         catalog.close()

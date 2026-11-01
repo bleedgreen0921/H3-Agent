@@ -9,7 +9,7 @@ max_input_tokens = 1048576  # DeepSeek 官方 1M 上下文；应用另保留 10%
 [models.deepseek.parameters]
 use_responses_api = true
 reasoning = { effort = "none" }
-timeout = 60
+timeout = 180
 max_retries = 0
 [workspace]
 root = "."
@@ -17,7 +17,7 @@ root = "."
 database_url = "postgresql://user@127.0.0.1:55432/H3-Agent"
 [mcp]
 connect_timeout = 15
-call_timeout = 30
+call_timeout = 60
 # Must be outside workspace; ~ is expanded only for this explicit state path.
 state_dir = "~/.local/state/ai-assistant"
 [integrations.feishu]
@@ -28,6 +28,7 @@ owner_open_id = "REPLACE_OWNER_OPEN_ID"
 redirect_uri = "http://127.0.0.1:3000/callback"
 scopes = ["offline_access", "im:message", "im:message:readonly", "im:chat:readonly", "docx:document", "drive:drive", "wiki:wiki", "bitable:app", "calendar:calendar", "task:task", "contact:user.base:readonly"]
 node_project = "deploy/feishu"
+# tools 白名单直接提供给模型；超出完整输入预算时精简清单，无搜索/加载步骤。
 [mcp.servers.feishu_user]
 transport = "feishu"
 identity = "user"
@@ -50,24 +51,28 @@ tools = ["upload_drive", "download_drive", "upload_message_file", "download_mess
 write_tools = ["upload_drive", "upload_message_file"]
 allow_write = true
 [channels.feishu]
+delivery_max_attempts = 3
+final_delivery_timeout_seconds = 30
+delivery_attempt_timeout_seconds = 8
 # 从 skill list 获取完整 ID；默认未授权。仅加入适合向群公开的 Skills。
 default_group_skill_ids = []
 enabled = false
-streaming = false
-stream_interval_seconds = 1
-card_max_bytes = 24576
 # Explicitly enable only your test group after applying the schema and OAuth login.
 # [channels.feishu.groups.oc_REPLACE.resources]
 # feishu_bot = ["oc_REPLACE"]
 
 [context]
-summary_every_turns = 10
+summary_every_turns = 20
+recent_turns = 6
 summary_tokens = 10000
-tool_result_tokens = 4000
-mcp_schema_tokens = 6000
+tool_result_tokens = 12000
 
 # 办公入口也可启用长期知识库。先填写数据库并显式执行 init。
 # [knowledge]
+# vector_k = 40
+# keyword_k = 40
+# top_k = 8
+# evidence_chars = 24000
 # database_url = "postgresql+asyncpg://USER:password@127.0.0.1:5432/assistant"
 # knowledge_base_id = "default"
 # [knowledge.sources.team_wiki]
@@ -78,9 +83,13 @@ mcp_schema_tokens = 6000
 
 # 个人风格文件路径相对本配置文件；删除此项即可使用默认风格。
 [agent]
-model_call_limit = 20
-tool_call_limit = 40
-summary_call_limit = 10
-turn_timeout_seconds = 300
+model_call_limit = 40
+tool_call_limit = 100
+summary_call_limit = 20
+turn_timeout_seconds = 900
 timezone = "Asia/Shanghai"
 persona_file = "PERSONA.md"
+
+# 可选本地 Skills；由用户管理资源并提前准备依赖。
+# [skills]
+# roots = ["skills"]

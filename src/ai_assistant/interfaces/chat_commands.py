@@ -1,4 +1,5 @@
 """飞书管理命令：可信归属、原生会话锁和持久回执，不创建模型。"""
+import json
 from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -47,14 +48,16 @@ def parse_command(text):
         return ('error', '用法：' + USAGE[name])
 
 
-async def reply(conn, row, text):
+async def reply(conn, row, text, settings):
     """调用方事务内提交回执及待投递消息，稳定 ID 防止重复投递。"""
     from psycopg.types.json import Jsonb
+    from ai_assistant.interfaces.delivery import metadata
     for offset in range(0, len(text), 3000):
         await conn.execute('''INSERT INTO assistant_outbox(id,input_id,body,part)
             VALUES(%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING''', (
                 str(uuid5(NAMESPACE_URL, row['id'] + ':reply:' + str(offset // 3000))),
-                row['id'], Jsonb({'chat_id': row['body']['chat_id'], 'text': text[offset:offset + 3000]}), offset // 3000))
+                row['id'], Jsonb({'chat_id': row['body']['chat_id'], 'text': text[offset:offset + 3000],
+                                  'delivery': {**metadata(settings), 'purpose': 'diagnostic'}}), offset // 3000))
     await conn.execute("UPDATE assistant_inbox SET status='completed' WHERE id=%s", (row['id'],))
 
 
@@ -65,6 +68,56 @@ async def bind(conn, binding, session_id):
         raise SessionError('会话不属于当前聊天。')
     await conn.execute('''INSERT INTO assistant_channel_sessions(binding,session_id) VALUES(%s,%s)
         ON CONFLICT(binding) DO UPDATE SET session_id=EXCLUDED.session_id''', (binding, session_id))
+
+
+async def prepare_session_end(repo, row, *, active_input_id=None):
+    """先固定取消目标，崩溃后不能把旧命令绑定到新的会话。"""
+    stored = await (await repo.execute(
+        'SELECT * FROM assistant_chat_commands WHERE input_id=%s', (row['id'],))).fetchone()
+    if stored:
+        return stored
+    current = await (await repo.execute(
+        'SELECT s.id,s.thread_id FROM assistant_sessions s JOIN assistant_channel_sessions c '
+        'ON c.session_id=s.id WHERE c.binding=%s', (row['binding'],))).fetchone()
+    target = {'active_input_id': active_input_id}
+    if current:
+        target.update(session_id=str(current['id']))
+    await repo.execute('INSERT INTO assistant_chat_commands(input_id,binding,action,target) '
+                       'VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING',
+                       (row['id'], row['binding'], row['body']['text'].strip(), json.dumps(target)))
+    return await (await repo.execute(
+        'SELECT * FROM assistant_chat_commands WHERE input_id=%s', (row['id'],))).fetchone()
+
+
+async def handle_session_end(worker, repo, row, name):
+    stored = await prepare_session_end(repo, row)
+    if stored['result']:
+        async with repo.conn.transaction():
+            await reply(repo.conn, row, stored['result'], worker.config.channels.feishu)
+        return
+    target = json.loads(stored['target'] or '{}')
+    sid = target.get('session_id')
+    if sid:
+        await repo.acquire(sid)
+        owned = await (await repo.execute('SELECT binding FROM assistant_sessions WHERE id=%s', (sid,))).fetchone()
+        if not owned or owned['binding'] != row['binding']:
+            raise SessionError('取消目标会话不存在或不属于当前聊天。')
+    async with repo.conn.transaction():
+        active = target.get('active_input_id')
+        if active:
+            # 取消已等待工具清理；旧输入只保留回执，不再补发旧预览。
+            await repo.execute("UPDATE assistant_outbox SET status='blocked' WHERE input_id=%s AND status='pending'", (active,))
+            await repo.execute("UPDATE assistant_inbox SET status='completed' WHERE id=%s AND binding=%s AND status='running'", (active, row['binding']))
+        if name == '/new':
+            base = worker.config.config_path.parent if worker.config.config_path else Path.cwd()
+            root = (base / worker.config.workspace.root).resolve()
+            session = await repo.open(root)
+            await bind(repo.conn, row['binding'], session['id'])
+            text = f"已创建新会话。\nID：{session['id']}"
+        else:
+            text = '已停止当前执行；已发生的操作保留，已提交的知识库任务继续执行。'
+        await repo.execute('UPDATE assistant_chat_commands SET result=%s WHERE input_id=%s', (text, row['id']))
+        await reply(repo.conn, row, text, worker.config.channels.feishu)
 
 
 async def handle(worker, row, caller, parsed, *, recover=False):
@@ -84,7 +137,10 @@ async def handle(worker, row, caller, parsed, *, recover=False):
         stored = await (await conn.execute('SELECT * FROM assistant_chat_commands WHERE input_id=%s', (row['id'],))).fetchone()
         if stored and stored['result']:
             async with conn.transaction():
-                await reply(conn, row, stored['result'])
+                await reply(conn, row, stored['result'], worker.config.channels.feishu)
+            return True
+        if name in {'/new', '/cancel'}:
+            await handle_session_end(worker, repo, row, name)
             return True
         if name == '/delete':
             # 删除原生 Saver 可能分步提交：先持久目标，再删除，最后提交回执。
@@ -96,8 +152,8 @@ async def handle(worker, row, caller, parsed, *, recover=False):
                 try:
                     await repo.acquire(target)
                     current = await (await conn.execute('SELECT status FROM assistant_sessions WHERE id=%s AND binding=%s', (target, row['binding']))).fetchone()
-                    if not current or current['status'] in {'running', 'waiting'}:
-                        raise SessionError('会话正在执行或等待续接，请先 /cancel 并等待清理结束。')
+                    if not current or current['status'] == 'running':
+                        raise SessionError('会话正在执行，请先 /cancel 并等待清理结束。')
                     await conn.execute('''INSERT INTO assistant_chat_commands(input_id,binding,action,target)
                         VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING''', (row['id'], row['binding'], name, target))
                     await repo.delete(target, binding=row['binding'])
@@ -107,27 +163,14 @@ async def handle(worker, row, caller, parsed, *, recover=False):
                     if check and check['status'] == 'deleting':
                         # 保留未完成记录，恢复/新指令可继续清理。
                         raise
-                    text = '会话正在使用或等待续接，请先 /cancel 并等待清理结束。'
+                    text = '会话正在使用，请先 /cancel 并等待清理结束。'
             async with conn.transaction():
                 await conn.execute('''INSERT INTO assistant_chat_commands(input_id,binding,action,target,result)
                     VALUES(%s,%s,%s,%s,%s) ON CONFLICT(input_id) DO UPDATE SET result=EXCLUDED.result''', (row['id'], row['binding'], name, target, text))
-                await reply(conn, row, text)
+                await reply(conn, row, text, worker.config.channels.feishu)
             return True
         async with conn.transaction():
-            if name == '/new':
-                old = await (await conn.execute('SELECT session_id FROM assistant_channel_sessions WHERE binding=%s', (row['binding'],))).fetchone()
-                if old:
-                    await repo.acquire(old['session_id'])
-                    await conn.execute("UPDATE assistant_sessions SET pending=NULL,pending_input=NULL,status=CASE WHEN status='waiting' THEN 'ready' ELSE status END WHERE id=%s", (old['session_id'],))
-                    waiting = await (await conn.execute("SELECT * FROM assistant_inbox WHERE binding=%s AND status='waiting'", (row['binding'],))).fetchall()
-                    for item in waiting:
-                        await reply(conn, item, '旧会话等待已取消；已入库资料仍保留。')
-                base = worker.config.config_path.parent if worker.config.config_path else Path.cwd()
-                root = (base / worker.config.workspace.root).resolve()
-                session = await repo.open(root)
-                await bind(conn, row['binding'], session['id'])
-                text = f"已创建新会话。\nID：{session['id']}"
-            elif name == '/list':
+            if name == '/list':
                 rows = await (await conn.execute('''SELECT s.id,s.title,s.updated_at,s.status,
                     (c.session_id=s.id) AS current FROM assistant_sessions s
                     LEFT JOIN assistant_channel_sessions c ON c.binding=s.binding
@@ -151,5 +194,5 @@ async def handle(worker, row, caller, parsed, *, recover=False):
                 text = value
             await conn.execute('''INSERT INTO assistant_chat_commands(input_id,binding,action,result)
                 VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING''', (row['id'], row['binding'], name, text))
-            await reply(conn, row, text)
+            await reply(conn, row, text, worker.config.channels.feishu)
     return True

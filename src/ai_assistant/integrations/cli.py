@@ -13,7 +13,7 @@ def _safe_operation(row):
     result = {key: row[key] for key in ('id', 'input_id', 'principal', 'tool', 'status', 'created_at', 'updated_at') if key in row}
     needs_verification = row.get('needs_verification') or bool((row.get('result') or {}).get('business_outcome'))
     result.update(kind='tool_operation', target=row.get('tool'), receipt=(
-        '业务核对未通过，需人工核实' if needs_verification else
+        ('字段核验不符，需人工核实' if (row.get('result') or {}).get('verification', row.get('verification')) == 'mismatch' else '字段未核验，需人工核实') if needs_verification else
         {'succeeded': '已有成功回执', 'failed': '操作失败，未自动重放',
          'unknown': '结果未知，需核实', 'pending': '尚未确认完成'}.get(row['status'], '请核实状态')))
     return result
@@ -130,6 +130,10 @@ async def execute(config, args):
         return 0
     narrowed = config.model_copy(update={'mcp': config.mcp.model_copy(update={'servers': chosen})})
     async with mcp_resources(narrowed, workspace) as catalog:
+        if catalog.unavailable:
+            print(json.dumps({'ok': False, 'unavailable': {
+                name: status['reason'] for name, status in catalog.unavailable.items()}}, ensure_ascii=False))
+            return 2
         if args.action == 'check':
             import asyncio
             import httpx

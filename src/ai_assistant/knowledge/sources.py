@@ -112,7 +112,7 @@ class FeishuReader:
     """One explicit identity, reused token lifecycle and a bounded HTTP client."""
 
     def __init__(self, config, identity, client):
-        self.config, self.identity, self.client = config, identity, client
+        self.client = client
         self.api = None
         self.tokens = None
         if identity == "user":

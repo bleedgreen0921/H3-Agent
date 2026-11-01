@@ -25,17 +25,11 @@ DDL = (
     '''CREATE TABLE IF NOT EXISTS rag_builds (
       id text PRIMARY KEY, version_id text NOT NULL REFERENCES rag_versions(id),
       job_id text NOT NULL REFERENCES rag_jobs(id), token text NOT NULL,
-      published boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT clock_timestamp())''',
+      published boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+      attempt_number integer, error_code text, error_message text, diagnostic_path text)''',
     '''CREATE TABLE IF NOT EXISTS rag_chunks (
       langchain_id text PRIMARY KEY, content text NOT NULL, embedding vector(1024) NOT NULL,
       langchain_metadata jsonb NOT NULL, content_tsv tsvector NOT NULL DEFAULT ''::tsvector)''',
-    'ALTER TABLE rag_builds ADD COLUMN IF NOT EXISTS attempt_number integer',
-    'ALTER TABLE rag_builds ADD COLUMN IF NOT EXISTS error_code text',
-    'ALTER TABLE rag_builds ADD COLUMN IF NOT EXISTS error_message text',
-    'ALTER TABLE rag_builds ADD COLUMN IF NOT EXISTS diagnostic_path text',
-    '''WITH ordered AS (SELECT id, row_number() OVER (PARTITION BY job_id ORDER BY created_at,id) AS n
-         FROM rag_builds) UPDATE rag_builds b SET attempt_number=ordered.n FROM ordered
-         WHERE b.id=ordered.id AND b.attempt_number IS NULL''',
     'CREATE INDEX IF NOT EXISTS rag_chunks_tsv ON rag_chunks USING gin(content_tsv)',
     'CREATE INDEX IF NOT EXISTS rag_chunks_metadata ON rag_chunks USING gin(langchain_metadata)',
     'CREATE INDEX IF NOT EXISTS rag_jobs_claim ON rag_jobs(state,available_at)',
@@ -53,14 +47,20 @@ class RagStore(SourceStore):
     async def check_schema(self):
         from ai_assistant.knowledge import KnowledgeError
         async with self.engine.connect() as conn:
-            for name in ('rag_documents','rag_source_documents','rag_sync_runs','rag_query_runs','rag_management_operations'):
+            for name in ('rag_documents','rag_source_documents','rag_sync_runs','rag_management_operations'):
                 if not (await conn.execute(text('SELECT to_regclass(:name)'),dict(name=name))).scalar():
-                    raise KnowledgeError('知识库 schema 需要更新，请显式运行 init。')
+                    raise KnowledgeError('知识库结构不受支持；init 仅创建当前结构，不升级旧结构。')
 
     async def init(self):
         # This is the only schema-mutating entry point.
         async with self.engine.begin() as conn:
             await conn.execute(text('SELECT pg_advisory_xact_lock(741268501)'))
+            present = (await conn.execute(text("SELECT to_regclass('rag_documents')"))).scalar()
+            if present:
+                # 缺失现行列或表时拒绝，不为历史库补列、补登记或回填。
+                for name in ('rag_sources', 'rag_source_documents', 'rag_sync_runs', 'rag_management_operations'):
+                    await conn.execute(text(f'SELECT 1 FROM {name} LIMIT 0'))
+                await conn.execute(text('SELECT attempt_number,error_code,error_message,diagnostic_path FROM rag_builds LIMIT 0'))
             for statement in DDL + SOURCE_DDL:
                 await conn.execute(text(statement))
         from langchain_classic.indexes import SQLRecordManager
@@ -209,6 +209,13 @@ class RagStore(SourceStore):
             params[key] = json.dumps(value) if key == 'tags' else value
             if key == 'document_id':
                 clauses.append('d.id=:document_id')
+            elif key == 'source_id':
+                clauses.append("""EXISTS(SELECT 1 FROM rag_source_documents scope_member
+                    JOIN rag_sources scope_source ON scope_source.kb=scope_member.kb
+                    AND scope_source.id=scope_member.source_id
+                    WHERE scope_member.kb=d.kb AND scope_member.uri=d.source_uri
+                    AND scope_member.source_id=:source_id AND scope_source.enabled
+                    AND scope_member.state='available')""")
             elif key == 'tags':
                 clauses.append("v.metadata->'tags' @> CAST(:tags AS jsonb)")
             else:

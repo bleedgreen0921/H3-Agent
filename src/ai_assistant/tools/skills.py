@@ -1,6 +1,5 @@
 """Native skill tools and checkpoint-safe activation reducer."""
 from typing import Annotated
-from langchain.agents import AgentState
 from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import ToolException
@@ -9,13 +8,6 @@ from pydantic import Field
 from ai_assistant.tools.context import ToolContext
 from ai_assistant.skills.catalog import SkillError
 
-
-def merge_skills(current, updates):
-    return {**(current or {}), **(updates or {})}
-
-
-class SkillState(AgentState):
-    active_skills: Annotated[dict[str, str | None], merge_skills]
 
 
 def catalog(runtime):
@@ -26,7 +18,7 @@ def catalog(runtime):
 
 def selected(runtime, identity):
     try:
-        skill = catalog(runtime).resolve(identity)
+        skill = catalog(runtime).prepare(identity)
         if runtime.state.get('active_skills', {}).get(skill.id) != skill.digest:
             raise SkillError('Load this skill before accessing resources or dependencies.')
         return skill
@@ -46,7 +38,7 @@ async def search_skills(runtime: ToolRuntime[ToolContext], query: str = '',
 async def load_skill(skill_id: str, runtime: ToolRuntime[ToolContext]) -> Command:
     """Activate a skill for subsequent model requests; its instructions do not expand permissions."""
     try:
-        skill = catalog(runtime).resolve(skill_id)
+        skill = catalog(runtime).prepare(skill_id)
     except SkillError as exc:
         raise ToolException(str(exc)) from None
     info = skill.info()

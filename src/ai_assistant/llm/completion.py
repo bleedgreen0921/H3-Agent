@@ -8,7 +8,8 @@ class IncompleteResponseError(RuntimeError):
 def validate_completion(message, *, responses=False):
     metadata = message.response_metadata
     status = metadata.get('status')
-    if status == 'incomplete' or metadata.get('finish_reason') == 'length':
+    if (status == 'incomplete' or metadata.get('finish_reason') == 'length'
+            or metadata.get('stop_reason') == 'max_tokens'):
         raise IncompleteResponseError('模型输出被截断，本轮未完成。')
     if status == 'failed':
         raise IncompleteResponseError('模型请求失败，本轮未完成。')

@@ -8,37 +8,51 @@ max_input_tokens = 1048576  # DeepSeek 官方 1M 上下文；应用另保留 10%
 [models.deepseek.parameters]
 use_responses_api = true
 reasoning = { effort = "none" }
-timeout = 60
+timeout = 180
 max_retries = 0
 
 [sessions]
 database_url = "postgresql://user@127.0.0.1:55432/H3-Agent"
 [context]
-summary_every_turns = 10
+summary_every_turns = 20
+recent_turns = 6
 summary_tokens = 10000
-tool_result_tokens = 4000
-mcp_schema_tokens = 6000
+tool_result_tokens = 12000
 [workspace]
 root = "."
 [tools.files]
+max_file_bytes = 8388608
+result_chars = 48000
+scan_entries = 20000
+scan_bytes = 134217728
 enabled = false
 
-# 本地 Skills 由用户手动放入 .agents/skills 或显式目录。
+# 本地 Skills 由用户手动放入项目 skills/；只扫描显式 roots。
 # [skills]
-# roots = []
+# directory_tokens = 6000
+# roots = ["skills"]
 # disabled = [] # 按名称或完整 ID 排除自动发现的 Skill，不删除共享文件。
 # [tools.terminal]
-# timeout = 120
+# output_lines = 1000
+# output_bytes = 131072
+# timeout = 300
 # allow_network = false
 # read_paths = [] # 显式额外只读目录；不会默认读取用户账号目录。
 # [tools.terminal.env]
 # SERVICE_API_KEY = "REPLACE_KEY" # 只传递明确授权给命令的凭据。
 # [tools.web]
+# timeout = 60
+# search_chars = 16000
+# fetch_chars = 32000
 # credential_profile = "deepseek"
 
 # 知识库：先显式初始化 schema，再 submit / worker / search。
 # chunk_size 和 chunk_overlap 的单位为字符。
 # [knowledge]
+# vector_k = 40
+# keyword_k = 40
+# top_k = 8
+# evidence_chars = 24000
 # database_url = "postgresql+asyncpg://user@127.0.0.1:55432/H3-Agent"
 # knowledge_base_id = "personal"
 # chunk_size = 512
@@ -73,16 +87,19 @@ enabled = false
 
 # 个人风格文件路径相对本配置文件；删除此项即可使用默认风格。
 [agent]
-model_call_limit = 20
-tool_call_limit = 40
-summary_call_limit = 10
-turn_timeout_seconds = 300
+model_call_limit = 40
+tool_call_limit = 100
+summary_call_limit = 20
+turn_timeout_seconds = 900
 timezone = "Asia/Shanghai"
 persona_file = "PERSONA.md"
 
 # 自动长期记忆已删除，不再支持旧 memory 配置。
 
 # [channels.feishu]
+# delivery_max_attempts = 3
+# final_delivery_timeout_seconds = 30
+# delivery_attempt_timeout_seconds = 8
 # default_group_skill_ids = []
 
 # 每群 skill_ids 未设置时继承 default_group_skill_ids，[] 显式禁用。

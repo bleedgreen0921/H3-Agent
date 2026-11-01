@@ -25,6 +25,8 @@ class MCPServer(Settings):
 
     @model_validator(mode='after')
     def validate_transport(self):
+        if self.resources or self.prompts:
+            raise ValueError('MCP resources/prompts 内容接口不再支持，请删除非空配置。')
         if self.transport == 'stdio' and not self.command:
             raise ValueError('stdio requires an explicit command')
         if self.transport == 'http' and (not self.url or not self.url.startswith(('http://', 'https://'))):
@@ -40,7 +42,7 @@ class MCPServer(Settings):
 
 class MCPConfig(Settings):
     connect_timeout: float = Field(default=15, gt=0, allow_inf_nan=False)
-    call_timeout: float = Field(default=30, gt=0, allow_inf_nan=False)
+    call_timeout: float = Field(default=60, gt=0, allow_inf_nan=False)
     state_dir: str = '~/.local/state/ai-assistant'
     servers: dict[str, MCPServer] = Field(default_factory=dict)
 
@@ -65,11 +67,11 @@ class GroupConfig(Settings):
 
 
 class FeishuChannel(Settings):
+    delivery_max_attempts: int = Field(default=3, ge=1, le=100)
+    final_delivery_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
+    delivery_attempt_timeout_seconds: float = Field(default=8, gt=0, allow_inf_nan=False)
     default_group_skill_ids: list[str] = Field(default_factory=list)
     enabled: bool = False
-    streaming: bool = False
-    stream_interval_seconds: float = Field(default=1, ge=0.1, allow_inf_nan=False)
-    card_max_bytes: int = Field(default=24576, ge=1024, le=24576)
     groups: dict[str, GroupConfig] = Field(default_factory=dict)
 
 

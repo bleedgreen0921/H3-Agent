@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     probe = model_commands.add_parser("check", help="Send real requests using profile SDK retries")
     probe.add_argument("--config", default="assistant.toml", metavar="PATH")
     probe.add_argument("--model", metavar="NAME")
-    probe.add_argument("--capability", choices=("all", "chat", "stream", "tools", "json_mode", "json_schema"), default="all")
+    probe.add_argument("--capability", choices=("all", "chat", "tools"), default="all")
     probe.add_argument("--timeout", type=_positive_timeout, default=60.0)
     from ai_assistant.knowledge.cli import add_commands
     add_commands(commands)

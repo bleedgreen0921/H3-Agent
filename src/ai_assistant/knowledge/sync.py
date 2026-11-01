@@ -3,7 +3,6 @@
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
 
 from sqlalchemy import text
 from ai_assistant.knowledge import KnowledgeError
@@ -44,7 +43,11 @@ async def resolve_submission(config, reference, *, identity="user", tags=None):
         root = root if root.is_absolute() else base / root
         workspace = ReadOnlyWorkspace(root, exclude_patterns=config.workspace.exclude_patterns,
                                       config_path=config.config_path)
-        path = workspace._path(reference)
+        from ai_assistant.workspace.files import WorkspaceError
+        try:
+            path = workspace._path(reference)
+        except WorkspaceError as exc:
+            raise KnowledgeError(str(exc)) from None
         if not path.is_file() or path.suffix.lower() not in EXTENSIONS:
             raise KnowledgeError("不支持的文档类型或文件不存在。")
         uri, descriptor = path.as_uri(), local_descriptor(path, root)
@@ -76,19 +79,6 @@ async def configure(config, store):
             )
         sources[name] = value
     await store.configure_sources(sources)
-    # 将旧版显式提交的工作区文档纳入刷新，首次查询即可核实旧资料。
-    known = {m["uri"] for m in await store.members(include_disabled=True)}
-    root = Path(config.workspace.root)
-    root = (root if root.is_absolute() else base / root).resolve()
-    for doc in await store.document_list():
-        if (
-            not doc["deleted"]
-            and doc["source_uri"] not in known
-            and doc["source_uri"].startswith("file://")
-        ):
-            p = Path(unquote(urlsplit(doc["source_uri"]).path))
-            if p.is_relative_to(root):
-                await store.add_submission(doc["source_uri"], local_descriptor(p, root), restore=False)
 
 
 async def synchronize(config, store, run):
@@ -353,21 +343,6 @@ async def sync_once(config, store):
         await asyncio.gather(task, pulse, return_exceptions=True)
     await store.finish_syncs()
     return True
-
-
-async def wait_sync(config, ident):
-    store = RagStore(settings(config))
-    try:
-        while True:
-            await store.finish_syncs()
-            row = await store.sync_status(ident)
-            if row is None:
-                raise KnowledgeError("同步任务不存在。")
-            if row["state"] == "ready":
-                return row
-            await asyncio.sleep(1)
-    finally:
-        await store.close()
 
 
 from contextlib import asynccontextmanager

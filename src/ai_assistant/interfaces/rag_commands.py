@@ -49,9 +49,9 @@ def stamp(config, value):
 
 def render_result(action, result):
     if action == 'add':
-        return f"已登记来源：{result['source_id']}\n同步任务：{result['sync_id']}\n已提交后台处理，可用 /rag status 查询。"
+        return f"已登记来源：{result['source_id']}\n同步任务：{result['sync_id']}\n已提交后台处理，尚未确认可检索，可用 /rag status 查询。"
     if action == 'sync':
-        return f"同步任务：{result['sync_id']}\n已提交后台处理，可用 /rag status 查询。"
+        return f"同步任务：{result['sync_id']}\n已提交后台处理，尚未确认可检索，可用 /rag status 查询。"
     return f"文档：{result['document_id']}\n" + ('已移出检索范围；原始资料和历史快照保留。' if result['removed'] else '未找到该文档。')
 
 
@@ -67,7 +67,7 @@ async def handle(worker, row, caller, value, *, recover=False):
         stored = await (await channel.conn.execute('SELECT result FROM assistant_chat_commands WHERE input_id=%s', (row['id'],))).fetchone()
         if stored and stored['result']:
             async with channel.conn.transaction():
-                await reply(channel.conn, row, stored['result'])
+                await reply(channel.conn, row, stored['result'], worker.config.channels.feishu)
             return
         await channel.conn.execute('''INSERT INTO assistant_chat_commands(input_id,binding,action,target)
             VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING''',
@@ -81,7 +81,7 @@ async def handle(worker, row, caller, value, *, recover=False):
             try:
                 principal = 'feishu_private:' + worker.config.integrations.feishu.app_id + ':' + worker.config.integrations.feishu.owner_open_id + ':' + row['binding']
                 if action in {'add', 'sync', 'remove'}:
-                    result = await receipt(store, principal, row['id'])
+                    result = await receipt(store, principal, row['id'], action=action, target=target)
                     if result is None and recover:
                         message = '管理操作未完成，未自动重做；已提交的知识库任务继续执行。请核实状态后再发起新指令。'
                     else:
@@ -123,7 +123,7 @@ async def handle(worker, row, caller, value, *, recover=False):
                     if result['kind'] == 'sync':
                         errors = result['errors']
                         message += f"\n创建：{stamp(worker.config, result.get('created_at'))}\n关联索引任务：" + (', '.join(j['job_id'] for j in result['jobs']) or '无')
-                        message += f'\n覆盖不完整：{len(errors)} 项未核实。' if errors else ('\n同步完成。' if result['state'] == 'ready' else '\n后台处理中。')
+                        message += f"\n{result['summary']}；可检索构建：{result['searchable_builds']}；覆盖缺口：{result['coverage_gaps']}。"
                     elif result.get('error') or result.get('error_code'):
                         message += '\n索引失败，请在终端查看诊断。'
                     if result.get('document_deleted'):
@@ -137,4 +137,4 @@ async def handle(worker, row, caller, value, *, recover=False):
             await channel.conn.execute('''INSERT INTO assistant_chat_commands(input_id,binding,action,target,result)
                 VALUES(%s,%s,%s,%s,%s) ON CONFLICT(input_id) DO UPDATE SET result=EXCLUDED.result''',
                 (row['id'], row['binding'], '/rag ' + action, str(target) if target is not None else None, message))
-            await reply(channel.conn, row, message)
+            await reply(channel.conn, row, message, worker.config.channels.feishu)
