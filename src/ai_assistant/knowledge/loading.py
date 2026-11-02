@@ -39,6 +39,8 @@ MESSAGES = {
     'parser_timeout': '本地解析超时。',
     'parser_process_failed': '本地解析子进程异常退出，请查看诊断。',
     'parser_protocol_error': '本地解析结果文件无效，请查看诊断。',
+    'pdf_encrypted': 'PDF 已加密，暂不支持读取。',
+    'pdf_invalid': 'PDF 已损坏或格式无效。',
     'parser_failed': '本地解析失败，请查看诊断中的具体原因。',
 }
 
@@ -90,14 +92,14 @@ async def _stop_parser(process):
     await process.wait()
 
 
-async def parse_snapshot(path: Path, *, timeout: float):
+async def parse_snapshot(path: Path, *, timeout: float, attachment=False):
     # 独立解释器隔离解析资源，并允许超时终止。
     with tempfile.TemporaryDirectory(prefix='rag-parse-') as directory:
         output = Path(directory) / 'documents.json'
         env = dict(os.environ, HF_HUB_OFFLINE='1',
                    TRANSFORMERS_OFFLINE='1', UNSTRUCTURED_DOWNLOAD_NLTK='False')
         process = await asyncio.create_subprocess_exec(
-            __import__('sys').executable, '-m', 'ai_assistant.knowledge.loading', str(path), str(output),
+            __import__('sys').executable, '-m', 'ai_assistant.knowledge.loading', str(path), str(output), *(['attachment'] if attachment else []),
             env=env, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
             start_new_session=True)
         stderr_task = asyncio.create_task(_stderr_tail(process.stderr))
@@ -206,12 +208,30 @@ def _main():
     import sys
     import traceback
     try:
-        docs = _run_local_loader(sys.argv[1])
+        if len(sys.argv) > 3 and sys.argv[3] == 'attachment':
+            from pypdf import PdfReader
+            from pypdf.errors import PdfReadError
+            try:
+                reader = PdfReader(sys.argv[1])
+                if reader.is_encrypted:
+                    raise IngestionError('pdf_encrypted', MESSAGES['pdf_encrypted'])
+                docs = []
+                for number, page in enumerate(reader.pages, 1):
+                    try:
+                        text = page.extract_text() or ''
+                        gap = not text.strip()
+                    except Exception:
+                        text, gap = '', True
+                    docs.append(Document(page_content=text, metadata={'page_number': number, 'gap': gap}))
+            except PdfReadError:
+                raise IngestionError('pdf_invalid', MESSAGES['pdf_invalid']) from None
+        else:
+            docs = _run_local_loader(sys.argv[1])
         payload = dict(status='ok', documents=[
             dict(page_content=d.page_content, metadata=d.metadata) for d in docs])
         code = 0
     except Exception as exc:
-        payload = dict(status='error', code=classify_parser_error(exc), diagnostic=bounded(traceback.format_exc()))
+        payload = dict(status='error', code=exc.code if isinstance(exc, IngestionError) else classify_parser_error(exc), diagnostic=bounded(traceback.format_exc()))
         code = 1
     Path(sys.argv[2]).write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding='utf-8')
     raise SystemExit(code)

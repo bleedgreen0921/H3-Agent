@@ -414,6 +414,16 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             directory = getattr(resources, "catalog", resources) if resources is not None else await stack.enter_async_context(
                 mcp_resources(config, context.workspace, caller=caller))
             context = replace(context, mcp=directory.for_caller(caller), caller=caller, operations=operations)
+        pdf_enabled = (config.tools.pdf.enabled and caller.owner and caller.scope == 'private'
+                       and caller.channel == 'feishu_private')
+        if pdf_enabled:
+            from ai_assistant.tools.pdf import PDFAttachments
+            from ai_assistant.integrations.feishu_files import FeishuAPI
+            import httpx
+            client = await stack.enter_async_context(httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=60))
+            pdf = PDFAttachments(FeishuAPI(config.integrations.feishu, client), config.tools.pdf.timeout)
+            stack.callback(pdf.close)
+            context = replace(context, pdf=pdf)
         model = await stack.enter_async_context(model_session(config, selected,
             config.models[selected].parameters.get('timeout', 180), factory=create_model))
         summary_name = (config.context.summary_model or selected) if config.context else selected
@@ -424,6 +434,9 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         tools = create_builtin_tools(include_web=config.tools.web is not None,
             include_write=config.tools.files.enabled,
             include_terminal=config.tools.terminal is not None)
+        if pdf_enabled:
+            from ai_assistant.tools.pdf import read_pdf_attachment
+            tools.append(read_pdf_attachment)
         if config.knowledge is not None or retriever is not None:
             from ai_assistant.knowledge.tools import knowledge_tools
             tools.extend(knowledge_tools(include_management=config.knowledge is not None))

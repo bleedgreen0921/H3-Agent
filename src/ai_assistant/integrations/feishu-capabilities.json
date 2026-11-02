@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "official_mcp_version": "0.5.1",
   "tools": [
     {
@@ -165,6 +165,18 @@
       ],
       "path": "/open-apis/im/v1/messages/:message_id",
       "method": "PATCH"
+    },
+    {
+      "name": "docx.builtin.search",
+      "native_name": "docx_builtin_search",
+      "domain": "docx",
+      "write": false,
+      "identities": [
+        "user"
+      ],
+      "scopes": [
+        "docx:document"
+      ]
     },
     {
       "name": "docx.v1.document.get",
@@ -347,6 +359,21 @@
       "method": "POST"
     },
     {
+      "name": "drive.v1.file.taskCheck",
+      "native_name": "drive_v1_file_taskCheck",
+      "domain": "drive",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "drive:drive"
+      ],
+      "path": "/open-apis/drive/v1/files/task_check",
+      "method": "GET"
+    },
+    {
       "name": "wiki.v2.space.list",
       "native_name": "wiki_v2_space_list",
       "domain": "wiki",
@@ -437,8 +464,22 @@
       "method": "POST"
     },
     {
-      "name": "wiki.v2.spaceNode.updateTitle",
-      "native_name": "wiki_v2_spaceNode_updateTitle",
+      "name": "wiki.v1.node.search",
+      "native_name": "wiki_v1_node_search",
+      "domain": "wiki",
+      "write": false,
+      "identities": [
+        "user"
+      ],
+      "scopes": [
+        "wiki:wiki"
+      ],
+      "path": "/open-apis/wiki/v1/nodes/search",
+      "method": "POST"
+    },
+    {
+      "name": "wiki.v2.spaceNode.moveDocsToWiki",
+      "native_name": "wiki_v2_spaceNode_moveDocsToWiki",
       "domain": "wiki",
       "write": true,
       "identities": [
@@ -448,8 +489,23 @@
       "scopes": [
         "wiki:wiki"
       ],
-      "path": "/open-apis/wiki/v2/spaces/:space_id/nodes/:node_token/update_title",
+      "path": "/open-apis/wiki/v2/spaces/:space_id/nodes/move_docs_to_wiki",
       "method": "POST"
+    },
+    {
+      "name": "wiki.v2.task.get",
+      "native_name": "wiki_v2_task_get",
+      "domain": "wiki",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "wiki:wiki"
+      ],
+      "path": "/open-apis/wiki/v2/tasks/:task_id",
+      "method": "GET"
     },
     {
       "name": "bitable.v1.app.get",

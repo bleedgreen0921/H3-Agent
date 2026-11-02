@@ -67,8 +67,8 @@ def caller_for(config, row):
 
 
 class BotWorker:
-    def __init__(self, config, store, resources, api):
-        self.config, self.store, self.resources, self.api = config, store, resources, api
+    def __init__(self, config, store, resources):
+        self.config, self.store, self.resources = config, store, resources
         self.active = None
         self.active_row = None
 
@@ -187,92 +187,6 @@ class BotWorker:
             await self.enqueue_reply(row, display.text, snapshot=display.snapshot())
             await session.after_reply()
 
-    async def send_pending(self):
-        rows = await (await self.store.conn.execute("SELECT o.* FROM assistant_outbox o WHERE o.status='pending' AND o.kind='text' AND o.next_attempt_at<=now() AND NOT EXISTS(SELECT 1 FROM assistant_outbox p WHERE p.input_id=o.input_id AND p.part>=0 AND p.part<o.part AND p.status!='delivered') ORDER BY o.created_at,o.input_id,o.part,o.id")).fetchall()
-        from psycopg.types.json import Jsonb
-        from ai_assistant.interfaces.chat_commands import parse_command
-        from ai_assistant.interfaces.delivery import classify, exhausted
-        import time
-        settings = self.config.channels.feishu
-        for row in rows:
-            # 慢投递期间出现可立即处理的输入（命令或空闲时的业务请求）先让位；主循环处理后下一轮续发。
-            incoming = await (await self.store.conn.execute(
-                "SELECT body->>'text' AS text FROM assistant_inbox WHERE status='received' ORDER BY received_at,id LIMIT 1")).fetchone()
-            if incoming and (self.active is None or parse_command(incoming['text'] or '')):
-                return
-            body = row['body'] or {}
-            delivery = body.get('delivery')
-            # 旧记录仅供诊断，升级不能自动补发。
-            if not delivery or delivery.get('version') != 1:
-                continue
-            if exhausted(delivery, settings):
-                async with self.store.conn.transaction():
-                    await self.store.conn.execute("UPDATE assistant_outbox SET status='unknown' WHERE id=%s", (row['id'],))
-                    await self.store.conn.execute("UPDATE assistant_outbox SET status='blocked' WHERE input_id=%s AND part>%s AND status='pending'", (row['input_id'], row['part']))
-                continue
-            delivery['attempts'] += 1
-            if delivery.get('first_terminal_at') is not None:
-                delivery['terminal_attempts'] = delivery.get('terminal_attempts', 0) + 1
-            delivery['last_outcome'] = 'in_flight'
-            attempt_patch = {key: delivery[key] for key in ('attempts', 'terminal_attempts', 'last_outcome') if key in delivery}
-            claimed = await (await self.store.conn.execute(
-                "UPDATE assistant_outbox SET status='sending',body=jsonb_set(body,'{delivery}',body->'delivery' || %s) WHERE id=%s AND status='pending' RETURNING *",
-                (Jsonb(attempt_patch), row['id']))).fetchone()
-            if claimed is None:
-                continue
-            row = claimed
-            body = row['body']
-            delivery = body['delivery']
-            started = time.monotonic()
-            try:
-                remaining = delivery.get('deadline')
-                timeout = min(settings.delivery_attempt_timeout_seconds,
-                              max(0, remaining - time.time()) if remaining else settings.delivery_attempt_timeout_seconds)
-                async with asyncio.timeout(timeout):
-                    if 'message' in body:
-                        from ai_assistant.interfaces.feishu_message import validate_message
-                        validate_message(body['message'])
-                        data = await self.api.send_message(body['chat_id'], body['message'], row['id'])
-                    else:
-                        data = await self.api.send_text(body['chat_id'], body['text'], row['id'])
-                    if not isinstance(data.get('message_id'), str) or not data['message_id']:
-                        raise RuntimeError('Missing delivery receipt')
-            except Exception as error:
-                category, diagnostic = classify(error)
-                delivery['last_error'] = diagnostic
-                delivery['last_outcome'] = category
-                retry = category == 'temporary' and not exhausted(delivery, settings)
-                status = 'pending' if retry else 'rejected' if category in {'rejected', 'temporary'} else 'unknown'
-                delay = 1 if delivery.get('terminal_attempts', delivery['attempts']) <= 1 else 3
-                if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 429:
-                    try:
-                        requested_delay = float(error.response.headers.get('Retry-After', delay))
-                    except ValueError:
-                        requested_delay = delay
-                    if 0 <= requested_delay <= max(0, (delivery.get('deadline') or time.time()) - time.time()):
-                        delay = requested_delay
-                async with self.store.conn.transaction():
-                    await self.store.conn.execute("UPDATE assistant_outbox SET status=%s,body=jsonb_set(body,'{delivery}',body->'delivery' || %s),next_attempt_at=now()+%s*interval '1 second' WHERE id=%s",
-                        (status, Jsonb({'last_error': diagnostic, 'last_outcome': category}), delay, row['id']))
-                    logger.warning('Delivery operation=send_message elapsed=%.3f diagnostic=%s',
-                                   time.monotonic()-started, diagnostic)
-                    if not retry:
-                        await self.store.conn.execute("UPDATE assistant_outbox SET status='blocked' WHERE input_id=%s AND part>%s AND status='pending'", (row['input_id'], row['part']))
-                continue
-            logger.info('Delivery operation=send_message elapsed=%.3f outcome=confirmed',
-                        time.monotonic()-started)
-            delivery['last_outcome'] = 'confirmed'
-            await self.store.conn.execute("UPDATE assistant_outbox SET status='delivered',remote_id=%s,body=%s WHERE id=%s",
-                                          (data.get('message_id'), Jsonb({'delivery': delivery}), row['id']))
-            await self.store.conn.execute('''UPDATE assistant_inbox SET body=NULL,status='delivered'
-                WHERE id=%s AND status='completed' AND NOT EXISTS(SELECT 1 FROM assistant_outbox WHERE input_id=%s AND (part>=0 OR kind='card') AND (status!='delivered' AND NOT (kind='card' AND status='rejected' AND EXISTS(SELECT 1 FROM assistant_outbox t WHERE t.input_id=assistant_outbox.input_id AND t.part>=0))))''',
-                (row['input_id'], row['input_id']))
-
-        await self.store.conn.execute("""UPDATE assistant_inbox i SET body=NULL,status='delivered'
-            WHERE i.status='completed' AND EXISTS(SELECT 1 FROM assistant_outbox o WHERE o.input_id=i.id)
-            AND NOT EXISTS(SELECT 1 FROM assistant_outbox o WHERE o.input_id=i.id
-                AND (o.part>=0 OR o.kind='card') AND (o.status!='delivered' AND NOT (o.kind='card' AND o.status='rejected' AND EXISTS(SELECT 1 FROM assistant_outbox t WHERE t.input_id=o.input_id AND t.part>=0))))""")
-
     async def stop_for_command(self, row):
         """用户取消意图先落盘，再等待执行任务和工具清理，最后处理命令回执。"""
         from ai_assistant.storage.sessions import session_storage
@@ -301,13 +215,10 @@ class BotWorker:
             self.active = self.active_row = None
 
     async def recover(self):
-        # 卡片机制已删除：本地确认中断的投递不推测远端结果，一律 unknown 且不重发。
-        await self.store.conn.execute("UPDATE assistant_outbox SET status='unknown' WHERE status='sending' AND body->'delivery'->>'version'='1'")
-        await self.store.conn.execute("UPDATE assistant_outbox o SET status='blocked' WHERE o.status='pending' AND o.part>=0 AND o.body->'delivery'->>'version'='1' AND EXISTS(SELECT 1 FROM assistant_outbox p WHERE p.input_id=o.input_id AND p.part>=0 AND p.part<o.part AND p.status IN ('unknown','blocked','rejected'))")
+        """仅恢复已保存回复；启动发送循环前由 serve 顺序调用。"""
         rows = await (await self.store.conn.execute("SELECT i.* FROM assistant_inbox i WHERE i.status='running' AND (i.body->>'delivery_version'='1' OR EXISTS(SELECT 1 FROM assistant_outbox o WHERE o.input_id=i.id AND o.body->'delivery'->>'version'='1')) ORDER BY i.received_at,i.id")).fetchall()
         for row in rows:
             await self.execute(row, recover=True)
-        await self.send_pending()
 
     async def recover_rag(self, row):
         """失败后的补交只读业务回执；渠道仍不可用时留待重启恢复。"""
@@ -318,7 +229,6 @@ class BotWorker:
                          row['id'], type(exc).__name__)
 
     async def run(self):
-        await self.recover()
         try:
             while True:
                 if self.active and self.active.done():
@@ -370,13 +280,12 @@ class BotWorker:
                         await self.store.conn.execute("UPDATE assistant_inbox SET status='running',body=jsonb_set(body,'{delivery_version}','1'::jsonb) WHERE id=%s", (row['id'],))
                         self.active_row = row
                         self.active = asyncio.create_task(self.execute(row))
-                await self.send_pending()
                 await asyncio.sleep(0.25)
         finally:
             if self.active:
                 self.active.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await self.active
+                from ai_assistant.cancellation import _drain_worker
+                await _drain_worker(self.active)
 
 
 @asynccontextmanager
@@ -431,18 +340,19 @@ async def serve(config):
     if not receiver.is_file() or not (project / 'node_modules/pg/package.json').is_file():
         raise ConfigError('Deploy the pinned Feishu Node project with npm ci.')
     async with AsyncExitStack() as stack:
-        if config.knowledge is not None:
-            await stack.enter_async_context(optional_knowledge_worker(config))
         store = await stack.enter_async_context(operation_storage(config.sessions))
         leader = await (await store.conn.execute('SELECT pg_try_advisory_lock(714160004) AS locked')).fetchone()
         if not leader['locked']:
             raise ConfigError('Another Feishu executor is already running.')
+        delivery_store = await stack.enter_async_context(operation_storage(config.sessions))
         # Fail before starting reception if migration has not been explicitly run.
         await store.conn.execute('SELECT last_input_id FROM assistant_sessions LIMIT 0')
         await store.conn.execute('SELECT binding,title FROM assistant_sessions LIMIT 0')
         await store.conn.execute('SELECT input_id FROM assistant_chat_commands LIMIT 0')
         await store.conn.execute('SELECT id FROM assistant_inbox LIMIT 0')
         await store.conn.execute('SELECT kind,display_version,final_state FROM assistant_outbox LIMIT 0')
+        if config.knowledge is not None:
+            await stack.enter_async_context(optional_knowledge_worker(config))
         context = await stack.enter_async_context(tool_context(config))
         directory = await stack.enter_async_context(mcp_resources(config, context.workspace))
         from ai_assistant.skills.catalog import validate_group_skills
@@ -450,10 +360,17 @@ async def serve(config):
         resources = ProcessResources(directory, context.skills)
         client = await stack.enter_async_context(httpx.AsyncClient(timeout=30, trust_env=False))
         api = FeishuAPI(config.integrations.feishu, client)
+        from ai_assistant.interfaces.feishu_delivery import FeishuOutboxSender
+        bot = BotWorker(config, store, resources)
+        sender = FeishuOutboxSender(config.channels.feishu, delivery_store, api)
+        # 恢复只登记回复；完成之后才允许接收和发送新消息。
+        await sender.recover()
+        await bot.recover()
         binary = executable('node')
         process = await asyncio.create_subprocess_exec(binary, str(receiver), cwd=str(project),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             env=executable_env(binary))
+        stack.push_async_callback(_stop_receiver, process)
         payload = dict(final_delivery_timeout_seconds=config.channels.feishu.final_delivery_timeout_seconds, app_id=config.integrations.feishu.app_id,
             app_secret=config.integrations.feishu.app_secret.get_secret_value(),
             owner_open_id=config.integrations.feishu.owner_open_id,
@@ -463,23 +380,42 @@ async def serve(config):
         payload['groups'] = {key: True for key in payload['groups']}
         process.stdin.write((json.dumps(payload) + '\n').encode())
         await process.stdin.drain()
-        worker = asyncio.create_task(BotWorker(config, store, resources, api).run())
-        receiver_wait = asyncio.create_task(process.wait())
+        await _run_workers(bot, sender, process)
+
+
+async def _stop_receiver(process):
+    """接收器退出必须等待，随后才能释放服务资源和单实例锁。"""
+    if process.returncode is None:
+        with suppress(ProcessLookupError):
+            process.terminate()
         try:
-            done, _ = await asyncio.wait([worker, receiver_wait], return_when=asyncio.FIRST_COMPLETED)
-            if receiver_wait in done:
-                raise ConfigError('Feishu receiver stopped; check Node deployment and application permissions.')
-            await worker
-        finally:
-            worker.cancel()
-            with suppress(asyncio.CancelledError, Exception):
-                await worker
-            if process.returncode is None:
+            await asyncio.wait_for(process.wait(), 10)
+        except TimeoutError:
+            with suppress(ProcessLookupError):
+                process.kill()
+            await process.wait()
+
+
+async def _run_workers(bot, sender, process):
+    """统一监督主任务，等待取消清理后才允许资源栈关闭。"""
+    from ai_assistant.cancellation import _drain_worker
+
+    worker = asyncio.create_task(bot.run())
+    delivery = asyncio.create_task(sender.run())
+    receiver_wait = asyncio.create_task(process.wait())
+    tasks = (worker, delivery, receiver_wait)
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        # 先传播任务原始异常；正常意外结束也必须关闭整个服务。
+        for task in tasks:
+            if task in done:
+                await task
+        raise ConfigError('飞书接收器、执行器或投递器意外停止，请检查服务日志与操作回执。')
+    finally:
+        if process.returncode is None:
+            with suppress(ProcessLookupError):
                 process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), 10)
-                except TimeoutError:
-                    process.kill(); await process.wait()
-            receiver_wait.cancel()
-            with suppress(asyncio.CancelledError):
-                await receiver_wait
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            await _drain_worker(task)

@@ -23,6 +23,7 @@ class ToolContext:
     effect_facts: list = field(default_factory=list, kw_only=True, repr=False, compare=False)
     inflight_tools: set = field(default_factory=set, kw_only=True, repr=False, compare=False)
     executed_tool_calls: set = field(default_factory=set, kw_only=True, repr=False, compare=False)
+    pdf: object | None = field(default=None, kw_only=True)
     web: DeepSeekWeb | None = None
     writes: WritableWorkspace | None = None
     terminal: TerminalService | None = None

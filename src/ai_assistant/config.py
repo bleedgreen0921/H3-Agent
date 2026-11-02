@@ -97,8 +97,15 @@ class TerminalConfig(BaseModel):
     timeout: float = Field(default=300, gt=0, le=1800, allow_inf_nan=False)
 
 
+class PDFConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    enabled: bool = False
+    timeout: float = Field(default=60, gt=0, le=300, allow_inf_nan=False)
+
+
 class ToolsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    pdf: PDFConfig = Field(default_factory=PDFConfig)
     web: WebConfig | None = None
     files: FilesConfig = Field(default_factory=FilesConfig)
     terminal: TerminalConfig | None = None
@@ -220,6 +227,8 @@ class AppConfig(BaseModel):
                 raise ValueError('Cloud knowledge sources require explicit Feishu integration and token state configuration')
         if self.context and self.context.summary_model is not None and self.context.summary_model not in self.models:
             raise ValueError("Unknown summary model profile")
+        if self.tools.pdf.enabled and self.integrations.feishu is None:
+            raise ValueError('PDF attachments require integrations.feishu')
         if self.tools.web is not None:
             profile = self.models.get(self.tools.web.credential_profile)
             if profile is None or profile.provider != "deepseek" or profile.api_key is None:

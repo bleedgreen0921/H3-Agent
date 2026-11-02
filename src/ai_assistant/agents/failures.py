@@ -13,7 +13,7 @@ FAILURE_REPLY = '未完成：工具执行失败，本轮已停止，不再重试
 
 
 READ_TOOLS = frozenset({'read_text', 'read_file', 'search_text', 'search_files',
-    'list_directory', 'web_search', 'web_fetch', 'search_knowledge', 'knowledge_status',
+    'read_pdf_attachment', 'list_directory', 'web_search', 'web_fetch', 'search_knowledge', 'knowledge_status',
     'search_skills', 'load_skill', 'unload_skill', 'read_skill_resource',
     'get_current_identity', 'resolve_datetime'})
 
@@ -107,6 +107,8 @@ class ToolFailureMiddleware(AgentMiddleware):
         if batch and errors:
             names = '、'.join(dict.fromkeys(message.name or '工具' for message in errors))
             reply = FAILURE_REPLY + ('\n失败事项：' + names if names else '\n远端业务核对未通过。')
+            from ai_assistant.integrations.feishu_adapter import unfinished_document_notice
+            reply += await unfinished_document_notice(runtime.context)
             unknown = any((m.artifact or {}).get('execution_fact', {}).get('error_category') in {'unknown', 'unclassified'} for m in errors)
             return {'messages': [AIMessage(reply)], 'execution': {'status': 'unknown' if unknown else 'failed',
                     'phase': 'tool', 'reason': 'tool_error' if errors else 'business_check_failed'}, 'jump_to': 'end'}
