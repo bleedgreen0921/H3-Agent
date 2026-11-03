@@ -56,7 +56,11 @@ class MCPMiddleware(AgentMiddleware):
             if writing:
                 if context.operations is None or context.input_id is None:
                     raise ToolException('External writes require durable operations and an input ID.')
-                fresh, operation = await context.operations.begin(context.input_id, operation_principal(context.caller), entry.id, arguments)
+                source_key = None
+                if adapter and hasattr(adapter, 'email_source_key'):
+                    source_key = adapter.email_source_key(entry, arguments, context)
+                options = {'source_key': source_key} if source_key else {}
+                fresh, operation = await context.operations.begin(context.input_id, operation_principal(context.caller), entry.id, arguments, **options)
                 if not fresh:
                     return ToolMessage(str({'operation_id': operation['id'], 'status': operation['status'], 'result': operation['result']}),
                         tool_call_id=request.tool_call['id'], name=entry.id, status='success' if operation['status'] == 'succeeded' and not ((operation['result'] or {}).get('verification') == 'mismatch' or (operation['result'] or {}).get('business_outcome')) else 'error')
@@ -76,7 +80,14 @@ class MCPMiddleware(AgentMiddleware):
                 operation['status'] = status
                 receipt = {'version': 1, 'accepted': status == 'succeeded', 'verification': 'unverified',
                     **({'content': result.content, 'artifact': result.artifact} if isinstance(result, ToolMessage) else {'receipt': str(result)})}
-                await context.operations.finish(operation['id'], status, receipt)
+                try:
+                    await context.operations.finish(operation['id'], status, receipt)
+                except Exception:
+                    return ToolMessage('远端调用已返回，但本地回执保存未确认；任务效果待核实，不得自动重发。',
+                        tool_call_id=request.tool_call['id'], name=entry.id, status='error',
+                        artifact={'protected_receipt': True, 'remote_result': receipt,
+                                  'execution_fact': {'version': 1, 'nature': 'effect',
+                                                     'error_category': 'unknown', 'control': 'stop'}})
                 if adapter:
                     result, detail = await adapter.verify(entry, operation, arguments, expected, result, context, request.runtime.config)
                     if detail:

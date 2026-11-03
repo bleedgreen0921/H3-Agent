@@ -1,11 +1,11 @@
 // No SDK or account access: trusted validation and durable admission.
 import crypto from 'node:crypto';
-// 仅补充私聊 PDF 附件 post：正文与附件引用作为同一次请求入队。
-function pdfPostText(content,messageId){
+// 仅补充私聊 PDF、DOCX、Markdown 附件 post：正文与附件引用作为同一次请求入队。
+function attachmentPostText(content,messageId){
  if(!content||typeof content!=='object'||!Array.isArray(content.files))return null;
  const files=content.files.filter(file=>file&&file.is_folder!==true&&
   typeof file.file_key==='string'&&file.file_key.length>0&&
-  typeof file.file_name==='string'&&/\.pdf$/i.test(file.file_name));
+  typeof file.file_name==='string'&&/\.(pdf|docx|md)$/i.test(file.file_name));
  if(!files.length)return null;
  const parts=[];
  if(typeof content.title==='string'&&content.title.trim())parts.push(content.title);
@@ -29,7 +29,7 @@ export function validateEvent(config,botId,event){
  if(!group&&m.chat_type!=='p2p')return null;
  let content;try{content=JSON.parse(m.content);}catch{return null;}
  if(!content||typeof content!=='object')return null;
- let text=m.message_type==='post'?pdfPostText(content,m.message_id):m.message_type==='text'?content.text:`File reference: ${JSON.stringify({file_key:content.file_key,file_name:content.file_name,message_id:m.message_id})}`;
+ let text=m.message_type==='post'?attachmentPostText(content,m.message_id):m.message_type==='text'?content.text:`File reference: ${JSON.stringify({file_key:content.file_key,file_name:content.file_name,message_id:m.message_id})}`;
  if(typeof text!=='string'||text.length>100000)return null;
  for(const mention of m.mentions||[])text=text.replaceAll(mention.key,'').trim();
  return {id:m.message_id,binding:`${config.app_id}:${m.chat_id}:${config.owner_open_id}`,

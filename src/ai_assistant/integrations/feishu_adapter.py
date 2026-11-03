@@ -38,7 +38,21 @@ def guidance(entries, context):
     return text
 
 
+def email_source_key(entry, arguments, context):
+    extra = arguments.get('data', {}).get('extra')
+    if not isinstance(extra, str) or not extra.startswith('email-task:'):
+        return None
+    from ai_assistant.tools.mail import allowed
+    from langchain_core.tools import ToolException
+    if (entry.original_name != 'task_v2_task_create' or entry.settings.transport != 'feishu'
+            or entry.settings.identity != 'user' or not allowed(context.caller)
+            or getattr(context, 'mail', None) is None):
+        raise ToolException('邮件来源任务仅允许主人私聊通过 user 身份创建。')
+    return context.mail.validate(arguments)
+
+
 async def prepare(entry, arguments, context, state, config=None):
+    email_source_key(entry, arguments, context)
     return (prepare_task(context, entry, arguments) if task_write(entry) else {}), None
 
 

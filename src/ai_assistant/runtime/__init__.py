@@ -404,9 +404,11 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
                           skills_directory_tokens=config.skills.directory_tokens if config.skills else 6000)
         if config.knowledge is not None:
             context = replace(context, knowledge_config=config)
+        from ai_assistant.tools.mail import MailService, allowed as mail_allowed, email_tools
+        mail_enabled = config.mail.enabled and mail_allowed(caller)
         from ai_assistant.storage.integrations import operation_storage
         operations = (await stack.enter_async_context(operation_storage(config.sessions))
-                      if config.sessions and (config.tools.terminal is not None or
+                      if config.sessions and (mail_enabled or config.tools.terminal is not None or
                           (config.mcp is not None and config.mcp.servers)) else None)
         context = replace(context, operations=operations)
         if config.mcp is not None and config.mcp.servers:
@@ -414,6 +416,16 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             directory = getattr(resources, "catalog", resources) if resources is not None else await stack.enter_async_context(
                 mcp_resources(config, context.workspace, caller=caller))
             context = replace(context, mcp=directory.for_caller(caller), caller=caller, operations=operations)
+        if mail_enabled:
+            if operations is None:
+                raise ConfigError('启用邮箱需要持久回执 [sessions]，请配置并显式 init。')
+            try:
+                await operations.by_source('mail:schema-check')
+            except Exception:
+                raise ConfigError('邮箱来源回执结构不可用，请检查存储并显式 init 后重启。') from None
+            mail = MailService(config.mail, config.agent.timezone)
+            stack.push_async_callback(mail.aclose)
+            context = replace(context, mail=mail)
         pdf_enabled = (config.tools.pdf.enabled and caller.owner and caller.scope == 'private'
                        and caller.channel == 'feishu_private')
         if pdf_enabled:
@@ -434,9 +446,11 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         tools = create_builtin_tools(include_web=config.tools.web is not None,
             include_write=config.tools.files.enabled,
             include_terminal=config.tools.terminal is not None)
+        if mail_enabled:
+            tools.extend(email_tools())
         if pdf_enabled:
-            from ai_assistant.tools.pdf import read_pdf_attachment
-            tools.append(read_pdf_attachment)
+            from ai_assistant.tools.pdf import read_pdf_attachment, read_document_attachment
+            tools.extend([read_pdf_attachment, read_document_attachment])
         if config.knowledge is not None or retriever is not None:
             from ai_assistant.knowledge.tools import knowledge_tools
             tools.extend(knowledge_tools(include_management=config.knowledge is not None))

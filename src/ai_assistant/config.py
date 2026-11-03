@@ -179,6 +179,7 @@ class SkillsConfig(BaseModel):
 
 
 from ai_assistant.integrations.config import MCPConfig, IntegrationsConfig, ChannelsConfig
+from ai_assistant.integrations.mail_config import MailConfig
 
 
 class AppConfig(BaseModel):
@@ -186,6 +187,7 @@ class AppConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
+    mail: MailConfig = Field(default_factory=MailConfig)
     mcp: MCPConfig | None = None
     integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)

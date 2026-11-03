@@ -155,7 +155,7 @@ class BotWorker:
     async def execute(self, row, *, recover=False):
         caller = caller_for(self.config, row)
         from ai_assistant.interfaces.chat_commands import parse_command, handle
-        from ai_assistant.skills.catalog import skills_for_caller
+        from ai_assistant.skills.catalog import SkillError, skills_for_caller
         text = row['body']['text'].strip()
         parsed = parse_command(text)
         if parsed and parsed[0] not in {'/skill'}:
@@ -169,8 +169,11 @@ class BotWorker:
                 if catalog is None:
                     await self.enqueue_reply(row, '本群未配置可用 Skills。' if caller.channel == 'feishu_group' else '未配置 Skills。')
                     return
-                if identity not in catalog.skills:
-                    await self.enqueue_reply(row, 'Skill ID 不存在或未授权，请使用 /skills 查看可用 ID。')
+                try:
+                    # 仅在当前调用者的授权目录内解析名称，随后统一使用完整 ID。
+                    identity = catalog.resolve(identity).id
+                except SkillError:
+                    await self.enqueue_reply(row, 'Skill 不存在、名称不唯一或未授权，请使用 /skills 中带 skill: 前缀的完整 ID。')
                     return
             skill_ids = [identity]
         if recover:

@@ -53,7 +53,7 @@ assert.equal(validateEvent(config,'bot',{...pdfEvent,message:{...pdfEvent.messag
 const postWith=content=>validateEvent(config,'bot',{...pdfEvent,message:{...pdfEvent.message,content:JSON.stringify(content)}});
 for(const content of [null,{}, {content:pdfContent.content}, {...pdfContent,files:{}},
  {...pdfContent,files:[null,{}, {file_key:'key',file_name:'folder.pdf',is_folder:true}]},
- {...pdfContent,files:[{file_key:'key',file_name:'fixture.docx'}]},
+ {...pdfContent,files:[{file_key:'key',file_name:'fixture.doc'}]},
  {...pdfContent,files:[{file_key:'',file_name:'fixture.pdf'}]}])assert.equal(postWith(content),null);
 assert.equal(validateEvent(config,'bot',{...pdfEvent,message:{...pdfEvent.message,content:'{invalid'}}),null);
 assert.equal(postWith({...pdfContent,title:'x'.repeat(100001)}),null);
@@ -79,3 +79,15 @@ assert.equal(await persistInbox(pdfDb,pdfInput,config),'received');
 assert.deepEqual(inserted,['message','app:private:owner',pdfInput.body,'received']);
 assert.equal(await persistInbox(pdfDb,pdfInput,config),'duplicate');
 console.log('Private PDF post text, attachment references, admission/deduplication and existing boundaries passed.');
+
+// 三种格式独立、混合及普通 file 消息沿用原有身份边界。
+for(const name of ['file.PDF','file.DOCX','file.Md']){
+ const file={file_key:name,file_name:name};
+ const input=postWith({files:[file]});
+ assert.match(input.body.text,new RegExp(name.replace('.', '\\.')));
+ assert.ok(validateEvent(config,'bot',{...pdfEvent,message:{...pdfEvent.message,
+  message_type:'file',content:JSON.stringify(file)}}));
+}
+const mixed=postWith({content:pdfContent.content,files:['a.pdf','b.docx','c.md'].map(file_name=>({file_key:file_name,file_name}))});
+assert.equal((mixed.body.text.match(/File reference:/g)||[]).length,3);
+assert.match(mixed.body.text,/分析这份 PDF/);

@@ -40,6 +40,9 @@ MESSAGES = {
     'parser_process_failed': '本地解析子进程异常退出，请查看诊断。',
     'parser_protocol_error': '本地解析结果文件无效，请查看诊断。',
     'pdf_encrypted': 'PDF 已加密，暂不支持读取。',
+    'docx_invalid': 'DOCX 已损坏、加密或不是有效的 Word 文档包。',
+    'docx_too_large': 'DOCX 解压总量超过 100 MiB。',
+    'markdown_invalid': 'Markdown 必须是 UTF-8 文本，不能是二进制附件。',
     'pdf_invalid': 'PDF 已损坏或格式无效。',
     'parser_failed': '本地解析失败，请查看诊断中的具体原因。',
 }
@@ -208,7 +211,10 @@ def _main():
     import sys
     import traceback
     try:
-        if len(sys.argv) > 3 and sys.argv[3] == 'attachment':
+        if len(sys.argv) > 3 and sys.argv[3] == 'attachment' and Path(sys.argv[1]).suffix != '.pdf':
+            from ai_assistant.tools.attachment_parsing import parse_text_attachment
+            docs = parse_text_attachment(sys.argv[1])
+        elif len(sys.argv) > 3 and sys.argv[3] == 'attachment':
             from pypdf import PdfReader
             from pypdf.errors import PdfReadError
             try:

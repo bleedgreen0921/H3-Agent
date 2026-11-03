@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS assistant_operations (
  updated_at timestamptz NOT NULL DEFAULT now(),
  UNIQUE(input_id,principal,tool,args_digest)
 );
+ALTER TABLE assistant_operations ADD COLUMN IF NOT EXISTS source_key text;
+CREATE UNIQUE INDEX IF NOT EXISTS assistant_operations_source_key ON assistant_operations(source_key)
+ WHERE source_key IS NOT NULL;
 CREATE TABLE IF NOT EXISTS assistant_channel_sessions (
  binding text PRIMARY KEY, session_id uuid NOT NULL
 );
@@ -49,19 +52,35 @@ class OperationStore:
                 await self.conn.execute('SELECT kind,display_version,delivered_version,next_attempt_at,final_state,part FROM assistant_outbox LIMIT 0')
             await self.conn.execute(DDL)
 
-    async def begin(self, input_id, principal, tool, arguments):
+    async def begin(self, input_id, principal, tool, arguments, source_key=None):
         digest = hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False,
                                           separators=(',', ':'), allow_nan=False).encode()).hexdigest()
         ident = str(uuid4())
-        row = await (await self.conn.execute('''INSERT INTO assistant_operations
+        # 未使用来源键的旧方案仍可使用原有表结构；邮箱迁移仅通过显式 init。
+        query = '''INSERT INTO assistant_operations
             (id,input_id,principal,tool,args_digest,status) VALUES(%s,%s,%s,%s,%s,'pending')
-            ON CONFLICT DO NOTHING RETURNING *''', (ident, input_id, principal, tool, digest))).fetchone()
+            ON CONFLICT DO NOTHING RETURNING *'''
+        parameters = (ident, input_id, principal, tool, digest)
+        if source_key is not None:
+            query = '''INSERT INTO assistant_operations
+                (id,input_id,principal,tool,args_digest,source_key,status) VALUES(%s,%s,%s,%s,%s,%s,'pending')
+                ON CONFLICT DO NOTHING RETURNING *'''
+            parameters += (source_key,)
+        row = await (await self.conn.execute(query, parameters)).fetchone()
         if row:
             return True, row
+        if source_key:
+            existing = await self.by_source(source_key)
+            if existing:
+                return False, existing
         row = await (await self.conn.execute('''SELECT * FROM assistant_operations
             WHERE input_id=%s AND principal=%s AND tool=%s AND args_digest=%s''',
             (input_id, principal, tool, digest))).fetchone()
         return False, row
+
+    async def by_source(self, source_key):
+        return await (await self.conn.execute(
+            'SELECT * FROM assistant_operations WHERE source_key=%s', (source_key,))).fetchone()
 
     async def finish(self, ident, status, result=None):
         from psycopg.types.json import Jsonb
@@ -132,16 +151,23 @@ class MemoryOperationStore:
     def __init__(self):
         self.rows = {}
 
-    async def begin(self, input_id, principal, tool, arguments):
+    async def begin(self, input_id, principal, tool, arguments, source_key=None):
         digest = hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False,
             separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+        if source_key:
+            existing = await self.by_source(source_key)
+            if existing:
+                return False, existing
         key = (input_id, principal, tool, digest)
         if key in self.rows:
             return False, dict(self.rows[key])
         row = dict(id=str(uuid4()), input_id=input_id, principal=principal, tool=tool,
-                   args_digest=digest, status='pending', result=None)
+                   args_digest=digest, source_key=source_key, status='pending', result=None)
         self.rows[key] = row
         return True, dict(row)
+
+    async def by_source(self, source_key):
+        return next((dict(row) for row in self.rows.values() if row.get('source_key') == source_key), None)
 
     async def finish(self, ident, status, result=None):
         row = next(row for row in self.rows.values() if row['id'] == ident)

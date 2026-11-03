@@ -13,9 +13,9 @@ FAILURE_REPLY = '未完成：工具执行失败，本轮已停止，不再重试
 
 
 READ_TOOLS = frozenset({'read_text', 'read_file', 'search_text', 'search_files',
-    'read_pdf_attachment', 'list_directory', 'web_search', 'web_fetch', 'search_knowledge', 'knowledge_status',
+    'read_pdf_attachment', 'read_document_attachment', 'list_directory', 'web_search', 'web_fetch', 'search_knowledge', 'knowledge_status',
     'search_skills', 'load_skill', 'unload_skill', 'read_skill_resource',
-    'get_current_identity', 'resolve_datetime'})
+    'get_current_identity', 'resolve_datetime', 'search_email', 'read_email', 'prepare_email_task'})
 
 
 def readonly_call(request):

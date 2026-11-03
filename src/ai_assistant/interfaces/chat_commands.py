@@ -10,7 +10,7 @@ from ai_assistant.skills.catalog import skills_for_caller
 USAGE = {
     '/new': '/new', '/list': '/list [页码]', '/delete': '/delete <会话ID>',
     '/cancel': '/cancel', '/usage': '/usage', '/skills': '/skills',
-    '/skill': '/skill <ID> <请求>',
+    '/skill': '/skill <完整ID或唯一名称> <请求>',
     '/rag': '/rag documents [页码] | sources [页码] | status <任务ID> | sync [来源ID] | add <飞书文档链接> | remove <文档ID>',
 }
 
