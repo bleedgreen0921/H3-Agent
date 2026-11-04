@@ -41,10 +41,20 @@ def _print_result(result) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from langsmith import tracing_context
+    from ai_assistant.observability import configure_logging
+    configure_logging()
+    with tracing_context(enabled=False):
+        return _main(argv)
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m ai_assistant")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init", help="Initialize configured storage explicitly").add_argument(
         "--config", default="assistant.toml", metavar="PATH")
+    from ai_assistant.observability import add_commands as add_observability
+    add_observability(commands)
     model_parser = commands.add_parser("model", help="Live model checks")
     model_commands = model_parser.add_subparsers(dest="action", required=True)
     probe = model_commands.add_parser("check", help="Send real requests using profile SDK retries")
@@ -93,6 +103,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         config = (load_config(args.config) if args.profile is None else
                   load_config(args.config, profile=args.profile))
+        if args.command == 'observability':
+            from ai_assistant.observability import execute
+            try:
+                return asyncio.run(execute(config, args))
+            except ConfigError:
+                raise
+            except Exception:
+                print('观测操作失败：请检查配置、网络及存储结构。', file=sys.stderr)
+                return 2
         if args.command == 'config':
             print('配置校验通过：' + (config.profile or '旧单文件配置'))
             return 0

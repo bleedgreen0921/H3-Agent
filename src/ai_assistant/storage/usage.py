@@ -1,25 +1,37 @@
 """服务已报告的调用用量；独立连接避免随业务 checkpoint 回退。"""
 from contextlib import asynccontextmanager
 
+_legacy_warned = False
+
 DDL = '''CREATE TABLE IF NOT EXISTS assistant_model_usage (
     call_id uuid PRIMARY KEY,
     session_id uuid NOT NULL REFERENCES assistant_sessions(id) ON DELETE CASCADE,
     profile text NOT NULL, role text NOT NULL,
     started_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     ended_at timestamptz, status text NOT NULL DEFAULT 'running',
-    input_tokens bigint, output_tokens bigint, total_tokens bigint
+    input_tokens bigint, output_tokens bigint, total_tokens bigint,
+    input_id text, execution_thread_id text, parent_run_id uuid
 )'''
 
 
 class UsageStore:
-    def __init__(self, conn):
+    def __init__(self, conn, *, linked=False):
         self.conn = conn
+        self.linked = linked
         self.disabled = False
 
-    async def record(self, call_id, session_id, profile, role, started_at, status, usage):
+    async def record(self, call_id, session_id, profile, role, started_at, status, usage, *, input_id=None, execution_thread_id=None, parent_run_id=None):
         if self.disabled or not usage:
             return
         try:
+            if self.linked:
+                await self.conn.execute('''INSERT INTO assistant_model_usage
+                    (call_id,session_id,profile,role,started_at,ended_at,status,input_tokens,output_tokens,total_tokens,
+                     input_id,execution_thread_id,parent_run_id) VALUES(%s,%s,%s,%s,%s,clock_timestamp(),%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(call_id) DO NOTHING''',
+                    (call_id, session_id, profile, role, started_at, status, usage.get('input_tokens'),
+                     usage.get('output_tokens'), usage.get('total_tokens'), input_id, execution_thread_id, parent_run_id))
+                return
             # 一次完成记录；相同调用 ID 重放不会重复累计。
             await self.conn.execute('''INSERT INTO assistant_model_usage
                 (call_id,session_id,profile,role,started_at,ended_at,status,
@@ -70,7 +82,14 @@ async def postgres_usage_storage(settings):
                                          autocommit=True, row_factory=dict_row, connect_timeout=2)
     try:
         await conn.execute("SET statement_timeout = '2000ms'")
-        yield UsageStore(conn)
+        columns = await (await conn.execute("SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='assistant_model_usage'")).fetchall()
+        linked = {'input_id', 'execution_thread_id', 'parent_run_id'} <= {row['column_name'] for row in columns}
+        global _legacy_warned
+        if not linked and not _legacy_warned:
+            _legacy_warned = True
+            from ai_assistant.observability import event
+            event('usage.legacy_schema', status='unlinked')
+        yield UsageStore(conn, linked=linked)
     finally:
         try:
             await conn.close()
@@ -85,3 +104,12 @@ def usage_storage(settings):
         from ai_assistant.config import ConfigError
         raise ConfigError('存储需要显式配置 [sessions]。')
     return backend_factory('usage', settings.backend)(settings)
+
+
+async def initialize_observability(conn):
+    """只扩展用量关联，显式命令调用；不回填或重放历史。"""
+    async with conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(714160005)")
+        await conn.execute(DDL)
+        await conn.execute("ALTER TABLE assistant_model_usage ADD COLUMN IF NOT EXISTS input_id text, ADD COLUMN IF NOT EXISTS execution_thread_id text, ADD COLUMN IF NOT EXISTS parent_run_id uuid")
+        await conn.execute("CREATE INDEX IF NOT EXISTS assistant_model_usage_input ON assistant_model_usage(input_id)")

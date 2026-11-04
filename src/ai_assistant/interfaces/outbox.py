@@ -7,6 +7,10 @@ from ai_assistant.interfaces.delivery import metadata
 from ai_assistant.interfaces.feishu_message import markdown_message, split_markdown
 
 
+from ai_assistant.observability import observed
+
+
+@observed("reply.enqueue", lambda conn, settings, row, text, **kw: {"input_id": row["id"]})
 async def enqueue_text(conn, settings, row, text, *, purpose='answer', snapshot=None):
     # 整批复用：旧批次即使残缺也不能追加另一版正文。
     await conn.execute('SELECT id FROM assistant_inbox WHERE id=%s FOR UPDATE', (row['id'],))

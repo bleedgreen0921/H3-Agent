@@ -1,4 +1,6 @@
 """Durable external effects, separate from checkpoint transactions."""
+from ai_assistant.observability import observed, event
+
 import hashlib
 import json
 from contextlib import asynccontextmanager
@@ -52,6 +54,8 @@ class OperationStore:
                 await self.conn.execute('SELECT kind,display_version,delivered_version,next_attempt_at,final_state,part FROM assistant_outbox LIMIT 0')
             await self.conn.execute(DDL)
 
+    @observed("operation.claim",
+        lambda self, input_id, principal, tool, arguments, source_key=None: {"input_id": input_id, "tool": tool})
     async def begin(self, input_id, principal, tool, arguments, source_key=None):
         digest = hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False,
                                           separators=(',', ':'), allow_nan=False).encode()).hexdigest()
@@ -68,6 +72,7 @@ class OperationStore:
             parameters += (source_key,)
         row = await (await self.conn.execute(query, parameters)).fetchone()
         if row:
+            event("operation.claimed", operation_id=row["id"], input_id=input_id, tool=tool, status=row["status"])
             return True, row
         if source_key:
             existing = await self.by_source(source_key)
@@ -82,6 +87,8 @@ class OperationStore:
         return await (await self.conn.execute(
             'SELECT * FROM assistant_operations WHERE source_key=%s', (source_key,))).fetchone()
 
+    @observed("operation.finish",
+        lambda self, ident, status, result=None: {"operation_id": ident, "status": status})
     async def finish(self, ident, status, result=None):
         from psycopg.types.json import Jsonb
         # pending 可转任意终态；已终态仅允许同状态补充回执（jsonb 顶层合并，原键保留）。

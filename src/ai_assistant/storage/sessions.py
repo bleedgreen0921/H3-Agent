@@ -213,6 +213,8 @@ async def postgres_session_storage(settings, *, initialize=False):
                             async with usage_storage(settings) as usage:
                                 await usage.conn.execute(USAGE_DDL)
                                 await usage.conn.execute('CREATE INDEX IF NOT EXISTS assistant_model_usage_session ON assistant_model_usage(session_id)')
+                            if usage.linked:
+                                await usage.conn.execute('CREATE INDEX IF NOT EXISTS assistant_model_usage_input ON assistant_model_usage(input_id)')
                         except Exception as error:
                             import logging
                             logging.getLogger(__name__).warning(

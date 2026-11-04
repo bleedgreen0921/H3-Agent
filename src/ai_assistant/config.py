@@ -182,11 +182,15 @@ from ai_assistant.integrations.config import MCPConfig, IntegrationsConfig, Chan
 from ai_assistant.integrations.mail_config import MailConfig
 
 
+from ai_assistant.observability import ObservabilityConfig
+
+
 class AppConfig(BaseModel):
     """Validated application settings; no clients or global state are stored."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
+    observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     mail: MailConfig = Field(default_factory=MailConfig)
     mcp: MCPConfig | None = None
     integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)

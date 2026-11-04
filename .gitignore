@@ -29,8 +29,9 @@ smoke-results*.json
 constraints/
 TODO.md
 outputs/
-docs/
-/tests/
+docs/*
+/tests/*
 assistant.office.example.toml
 assistant.office.example.toml
-config.example/
+config.example/*
+config.example/observability.toml

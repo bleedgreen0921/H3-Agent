@@ -29,9 +29,12 @@ class TurnObserver(AsyncCallbackHandler):
     raise_error = True
     run_inline = True
 
-    def __init__(self, summary_limit, model_profile='', usage_store=None, session_id=None, *, input_id=None):
+    def __init__(self, summary_limit, model_profile='', usage_store=None, session_id=None, *, input_id=None, execution_thread_id=None):
         self.store, self.session_id = usage_store, session_id
         self.input_id = input_id
+        self.execution_thread_id = execution_thread_id
+        self._model_times = {}
+        self._model_parents = {}
         self.summary_limit = summary_limit
         self._completed = set()
         self.model_profile = model_profile
@@ -49,7 +52,11 @@ class TurnObserver(AsyncCallbackHandler):
         if self.store is None:
             return
         try:
-            await self.store.record(*args)
+            options = {}
+            if getattr(self.store, "linked", False):
+                options = dict(input_id=self.input_id, execution_thread_id=self.execution_thread_id,
+                               parent_run_id=self._model_parents.get(args[0]))
+            await self.store.record(*args, **options)
         except Exception as error:
             self.store = None
             logging.getLogger(__name__).warning('Usage unavailable: input_id=%s session_id=%s phase=%s category=%s',
@@ -59,6 +66,9 @@ class TurnObserver(AsyncCallbackHandler):
         if run_id in self._model_started or run_id in self._completed:
             return
         self._model_started.add(run_id)
+        self._model_times[run_id] = monotonic()
+        self._model_parents[run_id] = kwargs.get("parent_run_id")
+        self._event("model.start", run_id=run_id, parent_run_id=kwargs.get("parent_run_id"))
         metadata = metadata or {}
         if metadata.get('lc_source') == 'summarization':
             if self.usage.summary_model_calls >= self.summary_limit:
@@ -77,6 +87,7 @@ class TurnObserver(AsyncCallbackHandler):
         if run_id in self._completed:
             return
         self._completed.add(run_id)
+        self._model_finished(run_id, "succeeded")
         profile, role, started_at = self._models.pop(run_id, (self.model_profile, 'main', datetime.now(timezone.utc)))
         message = response.generations[0][0].message if response.generations and response.generations[0] else None
         usage = response_usage(message) if message is not None else None
@@ -88,12 +99,14 @@ class TurnObserver(AsyncCallbackHandler):
                 totals[key] = totals.get(key, 0) + value
 
         if usage is not None:
+            self._event("model.usage", profile=profile, role=role, **usage)
             await self._record(run_id, self.session_id, profile, role, started_at, 'succeeded', usage)
 
     async def on_llm_error(self, error, *, run_id, **kwargs):
         if run_id in self._completed:
             return
         self._completed.add(run_id)
+        self._model_finished(run_id, 'failed', type(error).__name__)
         response = kwargs.get('response')
         message = (response.generations[0][0].message if response and response.generations and response.generations[0] else None)
         usage = response_usage(message) if message is not None else None
@@ -108,6 +121,17 @@ class TurnObserver(AsyncCallbackHandler):
 
             if usage is not None:
                 await self._record(run_id, self.session_id, profile, role, started_at, 'failed', usage)
+
+    def _event(self, name, **values):
+        from ai_assistant.observability import event
+        event(name, input_id=self.input_id, session_id=self.session_id,
+              execution_thread_id=self.execution_thread_id, **values)
+
+    def _model_finished(self, run_id, status, category=None):
+        started = self._model_times.pop(run_id, None)
+        self._event("model.end", run_id=run_id, parent_run_id=self._model_parents.get(run_id),
+                    status=status, category=category,
+                    elapsed_seconds=monotonic() - started if started is not None else None)
 
     async def on_chain_start(self, serialized, inputs, *, run_id, parent_run_id=None, **kwargs):
         self._parents[run_id] = parent_run_id
@@ -132,17 +156,23 @@ class TurnObserver(AsyncCallbackHandler):
             self._parents[run_id] = parent_run_id
         self.usage.tool_calls += 1
         self._tool_started[run_id] = monotonic()
+        self._event("tool.start", run_id=run_id, parent_run_id=parent_run_id, tool=(serialized or {}).get("name"))
 
-    def _finish_tool(self, run_id):
+    def _finish_tool(self, run_id, status="succeeded", category=None):
         started = self._tool_started.pop(run_id, None)
         if started is not None:
-            self.usage.tool_seconds += monotonic() - started
+            elapsed = monotonic() - started
+            self.usage.tool_seconds += elapsed
+            self._event("tool.end", run_id=run_id, parent_run_id=self._parents.get(run_id),
+                        status=status, category=category, elapsed_seconds=elapsed)
 
     async def on_tool_error(self, error, **kwargs):
-        self._finish_tool(kwargs.get('run_id'))
+        self._finish_tool(kwargs.get('run_id'), 'failed', type(error).__name__)
 
     async def on_tool_end(self, output, **kwargs):
-        self._finish_tool(kwargs.get('run_id'))
+        failed = isinstance(output, ToolMessage) and output.status == 'error'
+        self._finish_tool(kwargs.get('run_id'), 'failed' if failed else 'succeeded',
+                          'tool_result_error' if failed else None)
         if isinstance(output, ToolMessage) and isinstance(output.artifact, list):
             for doc in output.artifact:
                 if isinstance(doc, Document) and doc.id not in self._seen:

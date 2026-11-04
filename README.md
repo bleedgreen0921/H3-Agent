@@ -87,3 +87,7 @@ cp assistant.example.toml assistant.toml
 Spark 使用现有 OpenAI 兼容 provider，模型为 `spark-x2.6`，首版关闭思考；无需增加依赖，环境缺少所选集成时手动执行 `"$(cat .python-path)" -m pip install -e '.[openai]'`。离线配置校验不验证 API Key 或远端权限；`model check` 会发送真实请求并可能产生费用，本次交付不自动执行。
 
 主人飞书私聊附件阅读通过 `[tools.pdf] enabled = true` 启用，覆盖 PDF、DOCX、Markdown（`.md`），无需迁移配置。每个附件最多 25 MiB；PDF 使用现有 pypdf，DOCX/Markdown 使用标准库，均在可终止子进程中解析。统一工具 `read_document_attachment` 返回正文、位置、覆盖范围及续读游标；旧 `read_pdf_attachment` 保持兼容。DOCX 仅覆盖正文和表格文字，不提供物理页码，解压总量最多 100 MiB；Markdown 仅接受 UTF-8/BOM 原文，不加载链接或图片。读取不自动入库或授权外部写入。
+
+## Trace 与 LangSmith
+
+观测默认关闭，可显式启用 LangSmith；默认隐藏正文，通过 `input_id` 关联接收日志、Agent 调用树、结果提交、摘要与独立投递。示例见 [观测配置](config.example/observability.toml)，部署、显式存储扩展与模拟验收见 [观测说明](docs/observability.md)。不接入评测集或评测流水线。

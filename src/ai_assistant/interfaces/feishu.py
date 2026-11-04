@@ -14,6 +14,8 @@ from ai_assistant.runtime import assistant_session
 from ai_assistant.storage.integrations import operation_storage
 from ai_assistant.tools.context import tool_context
 
+from ai_assistant.observability import event, span, ObservabilityConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -153,6 +155,19 @@ class BotWorker:
             await bind(conn, row['binding'], session_id)
 
     async def execute(self, row, *, recover=False):
+        # 回复已登记后结束执行 trace；摘要独立记录，资源和会话锁仍由同一作用域清理。
+        async with AsyncExitStack() as stack:
+            with span("request.execute", input_id=row["id"]):
+                session = await self._execute(row, stack, recover=recover)
+            if session is not None:
+                await session.after_reply()
+
+    async def _execute(self, row, stack, *, recover=False):
+        from datetime import datetime, timezone
+        from time import monotonic
+        preparation_started = monotonic()
+        if row.get("received_at"):
+            event("request.dequeued", queue_wait_seconds=max(0, (datetime.now(timezone.utc) - row["received_at"]).total_seconds()))
         caller = caller_for(self.config, row)
         from ai_assistant.interfaces.chat_commands import parse_command, handle
         from ai_assistant.skills.catalog import SkillError, skills_for_caller
@@ -180,15 +195,16 @@ class BotWorker:
             await self.recover_reply(row)
             return
         session_id = await self.binding_session(row)
-        async with assistant_session(self.config, session_id=session_id, caller=caller,
-                                     resources=self.resources) as session:
-            await self.save_binding(row, session.session_id, session.repository.conn)
-            result = await session.run_turn(text, skill_ids=skill_ids, input_id=row['id'],
-                user_source=text)
-            from ai_assistant.runtime.presentation import project, saved_body
-            display = project(result.result, saved_body(result.result, result.messages))
-            await self.enqueue_reply(row, display.text, snapshot=display.snapshot())
-            await session.after_reply()
+        session = await stack.enter_async_context(assistant_session(
+            self.config, session_id=session_id, caller=caller, resources=self.resources))
+        await self.save_binding(row, session.session_id, session.repository.conn)
+        event("request.prepared", session_id=session.session_id, preparation_seconds=monotonic() - preparation_started)
+        result = await session.run_turn(text, skill_ids=skill_ids, input_id=row['id'],
+            user_source=text)
+        from ai_assistant.runtime.presentation import project, saved_body
+        display = project(result.result, saved_body(result.result, result.messages))
+        await self.enqueue_reply(row, display.text, snapshot=display.snapshot())
+        return session
 
     async def stop_for_command(self, row):
         """用户取消意图先落盘，再等待执行任务和工具清理，最后处理命令回执。"""
@@ -326,13 +342,13 @@ async def optional_knowledge_worker(config):
 
 
 async def serve(config):
-    application_logger = logging.getLogger('ai_assistant')
-    application_logger.setLevel(logging.INFO)
-    if not application_logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s %(message)s'))
-        application_logger.addHandler(handler)
-        application_logger.propagate = False
+    from ai_assistant.observability import ObservationService, configure_logging, configuration_secrets
+    configure_logging()
+    async with ObservationService(getattr(config, "observability", ObservabilityConfig()), secrets=configuration_secrets(config)):
+        await _serve(config)
+
+
+async def _serve(config):
     if not config.channels.feishu.enabled or config.integrations.feishu is None or config.sessions is None:
         raise ConfigError('Enable [channels.feishu] and configure Feishu and sessions.')
     from ai_assistant.integrations.mcp import mcp_resources
@@ -371,7 +387,7 @@ async def serve(config):
         await bot.recover()
         binary = executable('node')
         process = await asyncio.create_subprocess_exec(binary, str(receiver), cwd=str(project),
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
             env=executable_env(binary))
         stack.push_async_callback(_stop_receiver, process)
         payload = dict(final_delivery_timeout_seconds=config.channels.feishu.final_delivery_timeout_seconds, app_id=config.integrations.feishu.app_id,
@@ -406,7 +422,9 @@ async def _run_workers(bot, sender, process):
     worker = asyncio.create_task(bot.run())
     delivery = asyncio.create_task(sender.run())
     receiver_wait = asyncio.create_task(process.wait())
-    tasks = (worker, delivery, receiver_wait)
+    tasks = [worker, delivery, receiver_wait]
+    if getattr(process, 'stderr', None) is not None:
+        tasks.append(asyncio.create_task(_forward_receiver_logs(process.stderr)))
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         # 先传播任务原始异常；正常意外结束也必须关闭整个服务。
@@ -422,3 +440,17 @@ async def _run_workers(bot, sender, process):
             task.cancel()
         for task in tasks:
             await _drain_worker(task)
+
+
+async def _forward_receiver_logs(stream):
+    """只转发接收器约定的安全事件，丢弃 SDK 原始异常和非结构化输出。"""
+    while line := await stream.readline():
+        try:
+            record = json.loads(line)
+            if record.get('event') not in {'inbox.persisted', 'inbox.failed'}:
+                continue
+            event(record['event'], input_id=record.get('input_id'),
+                  status=record.get('status'), category=record.get('category'),
+                  elapsed_seconds=record.get('elapsed_seconds'))
+        except (ValueError, AttributeError, TypeError):
+            continue

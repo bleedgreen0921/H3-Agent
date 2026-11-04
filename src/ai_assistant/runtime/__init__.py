@@ -22,6 +22,8 @@ from ai_assistant.cancellation import _drain_worker
 from ai_assistant.storage.sessions import SessionError, SessionStorageError, session_storage
 from ai_assistant.runtime.observation import TurnObserver, TurnUsage
 
+from ai_assistant.observability import observed, span, event as observation_event, current_service, ObservationService
+
 logger = logging.getLogger(__name__)
 
 RECOVERY_NOTICE = ('应用状态：上一轮未完成，已发生的文件或命令效果不会回滚。'
@@ -124,6 +126,11 @@ class AssistantSession:
             await asyncio.sleep(1)
 
     async def run_turn(self, text, **kwargs):
+        kwargs["input_id"] = kwargs.get("input_id") or str(uuid4())
+        with span("agent.turn", input_id=kwargs["input_id"], session_id=self.session_id, execution_thread_id=self._thread):
+            return await self._locked_turn(text, **kwargs)
+
+    async def _locked_turn(self, text, **kwargs):
         # 输入校验也会读取 checkpoint，必须纳入同一轮互斥范围。
         if self._turn_lock.locked():
             raise RuntimeError('A turn is already running.')
@@ -178,14 +185,16 @@ class AssistantSession:
                                                recovered, as_node='__start__')
                 self._thread = branch
                 self._threads.append(branch)
+                observation_event('request.branch', execution_thread_id=branch)
             if self.repository is not None:
                 await self.repository.start(self._thread)
             timings.setdefault('first_status_seconds', monotonic() - started)
             observer = TurnObserver(self.settings.summary_call_limit, self.model_name,
-                self.context.usage_store, self.session_id, input_id=input_id)
+                self.context.usage_store, self.session_id, input_id=input_id, execution_thread_id=self._thread)
             config = {'configurable': {'thread_id': self._thread},
                       'recursion_limit': 9_999, 'callbacks': [observer],
-                      'metadata': {'assistant_model_profile': self.model_name}}
+                      'metadata': {'assistant_model_profile': self.model_name, 'input_id': input_id,
+                          'session_id': self.session_id, 'execution_thread_id': self._thread}}
             inputs = []
             graph_input = recovered or {}
             if recovered is not None:
@@ -205,36 +214,40 @@ class AssistantSession:
             result = None
             root_id = None
             phase = 'execution'
-            async with asyncio.timeout(self.settings.turn_timeout_seconds):
-                async for event in self.agent.astream_events(
-                    graph_input, config=config, context=turn_context,
-                    version='v2', durability='sync'
-                ):
-                    if root_id is None:
-                        root_id = event['run_id']
-                    # 流式回调已删除；仅记录首个正文块的耗时指标。
-                    if event['event'] == 'on_chat_model_stream':
-                        metadata = event.get('metadata', {})
-                        chunk = event.get('data', {}).get('chunk')
-                        if (metadata.get('langgraph_node') == 'model' and metadata.get('lc_source') != 'summarization'
-                                and isinstance(chunk, AIMessage) and not timings.get('first_body_seconds')
-                                and any(block.get('text') for block in chunk.content_blocks if block.get('type') == 'text')):
-                            timings['first_body_seconds'] = monotonic() - started
-                    if event['event'] == 'on_tool_end'  and event.get('name') == 'load_skill' and self.context.skills:
-                        from langgraph.types import Command
-                        output = event.get('data', {}).get('output')
-                        if isinstance(output, Command) and isinstance(output.update, dict):
-                            activated_skills.update(s.id for s in self.context.skills.active(output.update.get('active_skills', {})))
-                    if event['event'] in {'on_tool_start', 'on_tool_end', 'on_tool_error'} and on_event and event_enabled:
-                        try:
-                            returned = on_event(event)
-                            if inspect.isawaitable(returned):
-                                await returned
-                        except Exception as callback_error:
-                            event_enabled = False
-                            logger.warning('Turn auxiliary failure: input_id=%s phase=on_event category=%s', input_id, type(callback_error).__name__)
-                    if event['event'] == 'on_chain_end' and event['run_id'] == root_id:
-                        result = event['data']['output']
+            agent_started = monotonic()
+            with span('agent.execute', execution_thread_id=self._thread):
+                async with asyncio.timeout(self.settings.turn_timeout_seconds):
+                    async for event in self.agent.astream_events(
+                        graph_input, config=config, context=turn_context,
+                        version='v2', durability='sync'
+                    ):
+                        if root_id is None:
+                            root_id = event['run_id']
+                        # 流式回调已删除；仅记录首个正文块的耗时指标。
+                        if event['event'] == 'on_chat_model_stream':
+                            metadata = event.get('metadata', {})
+                            chunk = event.get('data', {}).get('chunk')
+                            if (metadata.get('langgraph_node') == 'model' and metadata.get('lc_source') != 'summarization'
+                                    and isinstance(chunk, AIMessage) and not timings.get('first_body_seconds')
+                                    and any(block.get('text') for block in chunk.content_blocks if block.get('type') == 'text')):
+                                timings['first_body_seconds'] = monotonic() - started
+                                observation_event('model.first_body', model_first_body_seconds=monotonic() - agent_started)
+                        if event['event'] == 'on_tool_end'  and event.get('name') == 'load_skill' and self.context.skills:
+                            from langgraph.types import Command
+                            output = event.get('data', {}).get('output')
+                            if isinstance(output, Command) and isinstance(output.update, dict):
+                                activated_skills.update(s.id for s in self.context.skills.active(output.update.get('active_skills', {})))
+                        if event['event'] in {'on_tool_start', 'on_tool_end', 'on_tool_error'} and on_event and event_enabled:
+                            try:
+                                returned = on_event(event)
+                                if inspect.isawaitable(returned):
+                                    await returned
+                            except Exception as callback_error:
+                                event_enabled = False
+                                logger.warning('Turn auxiliary failure: input_id=%s phase=on_event category=%s', input_id, type(callback_error).__name__)
+                        if event['event'] == 'on_chain_end' and event['run_id'] == root_id:
+                            result = event['data']['output']
+            observation_event('agent.finished', execution_thread_id=self._thread, agent_seconds=monotonic() - agent_started)
             if not result or not final_text(result['messages']):
                 raise RuntimeError('Agent returned no final answer.')
             if self._storage_lost:
@@ -258,14 +271,18 @@ class AssistantSession:
             if state.values.get('last_counted_input_id') != input_id:
                 completed = state.values.get('completed_turns', 0) + 1
                 update.update(completed_turns=completed, last_counted_input_id=input_id)
+            commit_started = monotonic()
             phase = 'result_commit'
-            state_config = await self.agent.aupdate_state(state.config, update)
+            with span('result.commit'):
+                state_config = await self.agent.aupdate_state(state.config, update)
             saved_result = unified
             phase = 'session_index'
             if self.repository is not None:
-                await self.repository.complete(state_config, input_id=input_id,
-                    title=update.get('conversation_title') or state.values.get('conversation_title') or request_preview(user_source))
+                with span('session.index'):
+                    await self.repository.complete(state_config, input_id=input_id,
+                        title=update.get('conversation_title') or state.values.get('conversation_title') or request_preview(user_source))
             state = await latest_state(self.agent, self._thread)
+            observation_event('result.committed', status=unified['status'], result_commit_seconds=monotonic() - commit_started)
             self._complete = state.config
             self._failed = False
             self._maintenance = (input_id, turn_context, config, observer)
@@ -281,6 +298,7 @@ class AssistantSession:
             except BaseException as cleanup_error:
                 self._storage_lost = True
                 logger.error('Turn cleanup failure: input_id=%s phase=tools category=%s', input_id, type(cleanup_error).__name__)
+            observation_event('turn.stopped', phase=phase, category=type(error).__name__, status='failed')
             logger.error('Turn stopped: input_id=%s phase=%s category=%s', input_id, phase, type(error).__name__)
             self._failed = True
             self._maintenance = None
@@ -315,11 +333,15 @@ class AssistantSession:
             self._running = False
             self._active_task = None
 
+    @observed("session.maintenance", lambda self: {"session_id": self.session_id,
+        "execution_thread_id": self._thread, "input_id": self._maintenance[0] if self._maintenance else None}, root=True)
     async def after_reply(self):
         """入口成功处理最终回复后，在同一任务、会话锁内整理；不改写回答。"""
+        maintenance_started = monotonic()
         pending = getattr(self, '_maintenance', None)
         self._maintenance = None
         if pending is None or self._storage_lost or self._closed:
+            observation_event('maintenance.skipped', status='skipped')
             return
         async with self._turn_lock:
             input_id, context, config, observer = pending
@@ -337,13 +359,16 @@ class AssistantSession:
                         or not every or not summarizer
                         or completed - state.values.get('summarized_turns', 0) < every
                         or observer.usage.summary_model_calls >= self.settings.summary_call_limit):
+                    observation_event('maintenance.skipped', status='skipped')
                     return
                 update = await summarizer.periodic_update(state.values, context, config)
                 if update:
                     await self.agent.aupdate_state(state.config, {**update, 'summarized_turns': completed})
+                observation_event('maintenance.finished', status='complete', maintenance_seconds=monotonic() - maintenance_started)
             except Exception as error:
                 if isinstance(error, SessionStorageError):
                     self._storage_lost = True
+                observation_event('maintenance.failed', status='failed', category=type(error).__name__, maintenance_seconds=monotonic() - maintenance_started)
                 logger.warning('Turn auxiliary failure: input_id=%s phase=periodic_summary category=%s', input_id, type(error).__name__)
             finally:
                 self._active_task = None
@@ -379,6 +404,9 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         if config.models[selected].max_input_tokens is None:
             raise ConfigError('启用 MCP 工具的模型必须显式配置 max_input_tokens。')
     async with AsyncExitStack() as stack:
+        if current_service() is None:
+            from ai_assistant.observability import configuration_secrets
+            await stack.enter_async_context(ObservationService(config.observability, configuration_secrets(config)))
         repository = await stack.enter_async_context(session_storage(config.sessions)) if config.sessions else None
         usage_store = None
         if repository:

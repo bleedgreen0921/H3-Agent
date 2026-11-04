@@ -16,8 +16,16 @@ const dispatcher = new lark.EventDispatcher({}).register({
  'im.message.receive_v1': async event => {
   const input=validateEvent(config,botId,event);
   if(!input)return;
-  const db=await pool.connect();
-  try{await persistInbox(db,input,config);}finally{db.release();}
+  const started=performance.now();
+  let db;
+  try{
+   db=await pool.connect();
+   const status=await persistInbox(db,input,config);
+   console.error(JSON.stringify({time:new Date().toISOString(),level:'INFO',component:'feishu.receiver',event:'inbox.persisted',input_id:input.id,status,elapsed_seconds:(performance.now()-started)/1000}));
+  }catch(error){
+   console.error(JSON.stringify({time:new Date().toISOString(),level:'ERROR',component:'feishu.receiver',event:'inbox.failed',input_id:input.id,category:'database_error'}));
+   throw error;
+  }finally{db?.release();}
  }
 });
 const socket = new lark.WSClient({appId:config.app_id,appSecret:config.app_secret,loggerLevel:lark.LoggerLevel.error});
