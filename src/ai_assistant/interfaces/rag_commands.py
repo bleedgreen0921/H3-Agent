@@ -122,7 +122,8 @@ async def handle(worker, row, caller, value, *, recover=False):
                     message = f"任务：{result['id']}\n类型：{result['kind']}｜阶段：{result['state']}"
                     if result['kind'] == 'sync':
                         errors = result['errors']
-                        message += f"\n创建：{stamp(worker.config, result.get('created_at'))}\n关联索引任务：" + (', '.join(j['job_id'] for j in result['jobs']) or '无')
+                        from ai_assistant.knowledge.management import progress_text
+                        message += '\n' + progress_text(result)
                         message += f"\n{result['summary']}；可检索构建：{result['searchable_builds']}；覆盖缺口：{result['coverage_gaps']}。"
                     elif result.get('error') or result.get('error_code'):
                         message += '\n索引失败，请在终端查看诊断。'

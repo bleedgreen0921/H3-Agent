@@ -66,7 +66,7 @@ async def pgvector_store(config, embeddings):
         raise
 
 
-async def build(store, job):
+async def prepare_chunks(store, job):
     c = store.config
     if job['config_hash'] != c.fingerprint():
         raise KnowledgeError('任务索引配置与 Worker 不一致；请显式重新提交。')
@@ -81,26 +81,37 @@ async def build(store, job):
     else:
         docs = await parse_snapshot(path, timeout=c.parse_timeout)
     docs = require_content(docs, 'empty_document', '未提取到有效正文。')
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    identity = job['metadata'] | dict(knowledge_base_id=job['kb'], document_id=job['document_id'],
+        document_version_id=job['version_id'], source_uri=job['source_uri'],
+        parse_config_fingerprint=job['config_hash'], index_version=job['build_id'])
+    parser = {'.ragjson':'feishu','.txt':'text','.md':'text','.pdf':'pypdf','.csv':'csv','.xlsx':'openpyxl'}.get(path.suffix,'unstructured')
+    normalized = [normalize(doc, identity=identity, parser=parser,
+        mapping={'page_start':'page_number','page_end':'page_number'} if parser=='pypdf' else None) for doc in docs]
+    if path.suffix in ('.ragjson','.csv','.xlsx'):
+        for doc, original in zip(normalized, docs):
+            doc.metadata.update(original.metadata)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=c.chunk_size, chunk_overlap=c.chunk_overlap, length_function=len,
+        add_start_index=True, strip_whitespace=False,
+        separators=['\n\n', '\n', '。', '！', '？', '；', ' ', ''])
+    chunks = await asyncio.to_thread(splitter.split_documents, normalized)
+    chunks = require_content(chunks, 'empty_chunks', '未生成有效片段。')
+    for i, chunk in enumerate(chunks):
+        chunk.metadata['chunk_index'] = i
+    return chunks
+
+
+async def build(store, job):
+    c = store.config
+    limiter = getattr(store, 'parse_limiter', None)
+    if limiter is None:
+        chunks = await prepare_chunks(store, job)
+    else:
+        async with limiter:
+            chunks = await prepare_chunks(store, job)
+    from langchain_classic.indexes import SQLRecordManager, aindex
     async with embedding(c) as model:
-        from langchain_text_splitters import RecursiveCharacterTextSplitter
-        from langchain_classic.indexes import SQLRecordManager, aindex
-        identity = job['metadata'] | dict(knowledge_base_id=job['kb'], document_id=job['document_id'],
-            document_version_id=job['version_id'], source_uri=job['source_uri'],
-            parse_config_fingerprint=job['config_hash'], index_version=job['build_id'])
-        parser = {'.ragjson':'feishu','.txt':'text','.md':'text','.pdf':'pypdf','.csv':'csv','.xlsx':'openpyxl'}.get(path.suffix,'unstructured')
-        normalized = [normalize(doc, identity=identity, parser=parser,
-            mapping={'page_start':'page_number','page_end':'page_number'} if parser=='pypdf' else None) for doc in docs]
-        if path.suffix in ('.ragjson','.csv','.xlsx'):
-            for doc, original in zip(normalized, docs):
-                doc.metadata.update(original.metadata)
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=c.chunk_size, chunk_overlap=c.chunk_overlap, length_function=len,
-            add_start_index=True, strip_whitespace=False,
-            separators=['\n\n', '\n', '。', '！', '？', '；', ' ', ''])
-        chunks = await asyncio.to_thread(splitter.split_documents, normalized)
-        chunks = require_content(chunks, 'empty_chunks', '未生成有效片段。')
-        for i, chunk in enumerate(chunks):
-            chunk.metadata['chunk_index'] = i
         engine, vectors = await vector_store(c, model)
         try:
             # Unique namespace AND build metadata fence all full-cleanup operations.
@@ -171,18 +182,38 @@ async def run_once(store):
 
 
 async def worker(store, *, once=False, app_config=None):
-    while True:
-        synced = False
+    if once:
         if app_config is not None:
             from ai_assistant.knowledge.sync import sync_once
-            synced = await sync_once(app_config, store)
-        found = await run_once(store)
-        if app_config is not None:
+            await sync_once(app_config, store)
+        await run_once(store)
+        await store.finish_syncs()
+        return
+    store.parse_limiter = asyncio.Semaphore(store.config.parse_concurrency)
+    from ai_assistant.knowledge.models import embedding_limiter
+    limiter_token = embedding_limiter.set(asyncio.Semaphore(store.config.embedding_concurrency))
+    async def indices():
+        while True:
+            if not await run_once(store):
+                await asyncio.sleep(1)
+    async def scans():
+        from ai_assistant.knowledge.sync import sync_once
+        while True:
+            if app_config is None or not await sync_once(app_config, store):
+                await asyncio.sleep(1)
+    async def summaries():
+        while True:
             await store.finish_syncs()
-        if once:
-            return
-        if not found and not synced:
             await asyncio.sleep(1)
+    tasks = [asyncio.create_task(indices()) for _ in range(store.config.index_concurrency)]
+    tasks.extend([asyncio.create_task(scans()), asyncio.create_task(summaries())])
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        embedding_limiter.reset(limiter_token)
 
 
 async def vector_store(config, embeddings):

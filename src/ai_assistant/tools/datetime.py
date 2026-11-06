@@ -36,7 +36,3 @@ async def resolve_datetime(value: str, runtime: ToolRuntime[ToolContext], timezo
     result = convert_datetime(value, timezone or runtime.context.timezone)
     runtime.context.resolved_datetimes.add((result['timestamp'], result['is_all_day']))
     return result
-
-
-# 兼容现有 Python 调用方；飞书身份实现由服务适配持有。
-from ai_assistant.integrations.feishu_identity import get_current_identity

@@ -1,17 +1,10 @@
 """已保存轮次的纯呈现投影；不执行模型、工具或业务状态推断。"""
 from dataclasses import asdict, dataclass
 
-from ai_assistant.runtime.outcomes import TERMINAL_STATES
 
 SAFE_MESSAGE = '保存未确认、状态待核实；请读取历史记录及操作回执核实，未自动重跑。'
-RESPONSE_STATES = TERMINAL_STATES
 LABELS = {'partial': '部分完成', 'failed': '未完成', 'unknown': '状态待核实',
           'cancelled': '已取消', 'needs_clarification': '需要补充信息'}
-
-
-def response_finished(state):
-    """当前轮次回复结束。"""
-    return state in RESPONSE_STATES
 
 
 @dataclass(frozen=True)

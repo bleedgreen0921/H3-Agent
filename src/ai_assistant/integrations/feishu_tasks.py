@@ -153,7 +153,3 @@ def verification(expected, actual, guid=None):
     return {'verification': 'mismatch' if issues else 'unverified' if unchecked else 'passed',
             'verification_source': '本次接口返回', 'checked_fields': checked,
             'unchecked_fields': unchecked, 'issues': issues + [f'{key} 未核对或未返回' for key in unchecked]}
-
-
-def discrepancies(expected, actual, name, guid=None):
-    return verification(expected, actual, guid)['issues']

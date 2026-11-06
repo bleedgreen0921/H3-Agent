@@ -1,4 +1,4 @@
-"""显式配置校验及旧单文件、具名组合入口；不修改进程环境。"""
+"""具名组合配置校验；不修改进程环境。"""
 
 from pathlib import Path
 from typing import Any
@@ -167,8 +167,6 @@ class ContextConfig(BaseModel):
     summary_every_turns: int = Field(default=20, ge=0, strict=True)
     recent_turns: int = Field(default=6, gt=0, strict=True)
     tool_result_tokens: int = Field(default=12000, ge=100)
-    # 兼容旧配置；动态加载已移除，此字段不再限制工具。
-    mcp_schema_tokens: int = Field(default=16000, ge=100, exclude=True)
 
 
 class SkillsConfig(BaseModel):
@@ -258,7 +256,7 @@ class AppConfig(BaseModel):
 
 
 def load_config(path: str | Path = "assistant.toml", *, profile: str | None = None) -> AppConfig:
-    """读取旧单文件或显式组合；相对应用路径始终以入口目录为基准。"""
+    """读取显式组合；相对应用路径始终以入口目录为基准。"""
     from ai_assistant.configuration import resolve_config
     data, sources, selected_profile = resolve_config(path, profile)
     # 在通用 schema 校验前给未实现后端明确摘要，不导入任何数据库客户端。
@@ -280,10 +278,6 @@ def load_config(path: str | Path = "assistant.toml", *, profile: str | None = No
                 raise ConfigError('MCP resources/prompts 内容接口不再支持，请删除非空配置。')
     try:
         config = AppConfig.model_validate(data)
-        if config.context and 'mcp_schema_tokens' in config.context.model_fields_set:
-            import logging
-            logging.getLogger(__name__).warning(
-                'context.mcp_schema_tokens 已弃用且不再生效；工具大小统一由模型 max_input_tokens 检查。')
         config._config_path = Path(path).absolute()
         config._config_files = sources
         config._profile = selected_profile

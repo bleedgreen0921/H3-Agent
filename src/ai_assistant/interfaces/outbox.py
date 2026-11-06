@@ -25,7 +25,7 @@ async def enqueue_text(conn, settings, row, text, *, purpose='answer', snapshot=
             await conn.execute('''INSERT INTO assistant_outbox(id,input_id,body,part)
                 VALUES(%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING''',
                 (str(uuid5(NAMESPACE_URL, identity)), row['id'], Jsonb({
-                    'chat_id': row['body']['chat_id'], 'text': value,
+                    'chat_id': row['body']['chat_id'],
                     'message': markdown_message(value),
                     'presentation': snapshot,
                     'delivery': {**metadata(settings), 'purpose': purpose}}), part))

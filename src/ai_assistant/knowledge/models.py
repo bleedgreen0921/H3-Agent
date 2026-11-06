@@ -1,6 +1,9 @@
 """Thin HTTP adapters; model loading and hardware selection belong to the service."""
 
 import math
+from contextvars import ContextVar
+
+embedding_limiter = ContextVar("embedding_limiter", default=None)
 from types import SimpleNamespace
 from contextlib import asynccontextmanager
 
@@ -127,9 +130,13 @@ async def embedding(config):
                 return _ordered_embeddings(sync_api.create(**kwargs), kwargs["input"])
 
             async def acreate(**kwargs):
-                return _ordered_embeddings(
-                    await async_api.create(**kwargs), kwargs["input"]
-                )
+                limiter = embedding_limiter.get()
+                if limiter is None:
+                    response = await async_api.create(**kwargs)
+                else:
+                    async with limiter:
+                        response = await async_api.create(**kwargs)
+                return _ordered_embeddings(response, kwargs['input'])
 
             native.client = SimpleNamespace(create=create)
             native.async_client = SimpleNamespace(create=acreate)

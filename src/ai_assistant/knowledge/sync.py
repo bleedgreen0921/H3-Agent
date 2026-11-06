@@ -168,6 +168,7 @@ async def synchronize(config, store, run):
                     else type(exc).__name__,
                 }
             )
+            await store.record_scan_errors(run, errors)
             continue
         for uri, descriptor in descriptors:
             async with store.engine.connect() as conn:
@@ -266,6 +267,7 @@ async def synchronize(config, store, run):
                     snapshot=path,
                     metadata=metadata,
                     sync_run=run,
+                    source_id=name,
                 )
                 await store.observe(name, uri, descriptor, "available", sync_run=run)
                 jobs.append({"job_id": job, "source_id": name, "uri": uri})
@@ -295,6 +297,7 @@ async def synchronize(config, store, run):
                         "reason": reason,
                     }
                 )
+            await store.record_scan_errors(run, errors)
         async with store.engine.begin() as conn:
             await conn.execute(
                 text(

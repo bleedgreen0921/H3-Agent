@@ -15,13 +15,12 @@ CREATE TABLE IF NOT EXISTS assistant_chat_commands (
 );
 CREATE TABLE IF NOT EXISTS assistant_operations (
  id text PRIMARY KEY, input_id text NOT NULL, principal text NOT NULL,
- tool text NOT NULL, args_digest text NOT NULL,
+ tool text NOT NULL, args_digest text NOT NULL, source_key text,
  status text NOT NULL CHECK(status IN ('pending','succeeded','failed','unknown')),
  result jsonb, created_at timestamptz NOT NULL DEFAULT now(),
  updated_at timestamptz NOT NULL DEFAULT now(),
  UNIQUE(input_id,principal,tool,args_digest)
 );
-ALTER TABLE assistant_operations ADD COLUMN IF NOT EXISTS source_key text;
 CREATE UNIQUE INDEX IF NOT EXISTS assistant_operations_source_key ON assistant_operations(source_key)
  WHERE source_key IS NOT NULL;
 CREATE TABLE IF NOT EXISTS assistant_channel_sessions (
@@ -35,9 +34,7 @@ CREATE TABLE IF NOT EXISTS assistant_outbox (
  id text PRIMARY KEY, input_id text NOT NULL REFERENCES assistant_inbox(id),
  body jsonb, status text NOT NULL DEFAULT 'pending', remote_id text,
  created_at timestamptz NOT NULL DEFAULT now(), part integer NOT NULL DEFAULT 0,
- kind text NOT NULL DEFAULT 'text', display_version bigint NOT NULL DEFAULT 0,
- delivered_version bigint NOT NULL DEFAULT 0, next_attempt_at timestamptz NOT NULL DEFAULT now(),
- final_state text NOT NULL DEFAULT 'stage'
+ next_attempt_at timestamptz NOT NULL DEFAULT now()
 );
 '''
 
@@ -51,7 +48,7 @@ class OperationStore:
             await self.conn.execute('SELECT pg_advisory_xact_lock(714160002)')
             present = await (await self.conn.execute("SELECT to_regclass('assistant_outbox') AS name")).fetchone()
             if present['name']:
-                await self.conn.execute('SELECT kind,display_version,delivered_version,next_attempt_at,final_state,part FROM assistant_outbox LIMIT 0')
+                await self.conn.execute('SELECT next_attempt_at,part FROM assistant_outbox LIMIT 0')
             await self.conn.execute(DDL)
 
     @observed("operation.claim",
@@ -60,16 +57,10 @@ class OperationStore:
         digest = hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False,
                                           separators=(',', ':'), allow_nan=False).encode()).hexdigest()
         ident = str(uuid4())
-        # 未使用来源键的旧方案仍可使用原有表结构；邮箱迁移仅通过显式 init。
         query = '''INSERT INTO assistant_operations
-            (id,input_id,principal,tool,args_digest,status) VALUES(%s,%s,%s,%s,%s,'pending')
+            (id,input_id,principal,tool,args_digest,source_key,status) VALUES(%s,%s,%s,%s,%s,%s,'pending')
             ON CONFLICT DO NOTHING RETURNING *'''
-        parameters = (ident, input_id, principal, tool, digest)
-        if source_key is not None:
-            query = '''INSERT INTO assistant_operations
-                (id,input_id,principal,tool,args_digest,source_key,status) VALUES(%s,%s,%s,%s,%s,%s,'pending')
-                ON CONFLICT DO NOTHING RETURNING *'''
-            parameters += (source_key,)
+        parameters = (ident, input_id, principal, tool, digest, source_key)
         row = await (await self.conn.execute(query, parameters)).fetchone()
         if row:
             event("operation.claimed", operation_id=row["id"], input_id=input_id, tool=tool, status=row["status"])
@@ -108,7 +99,7 @@ class OperationStore:
 
     async def replies(self):
         return await (await self.conn.execute('''SELECT id,input_id,status,remote_id,part,created_at,
-            display_version,delivered_version,final_state,body->'delivery' AS delivery,
+            body->'delivery' AS delivery,
             (body->'delivery'->>'version'='1') IS NOT TRUE AS unsupported_format,'channel_reply' AS kind
             FROM assistant_outbox ORDER BY created_at DESC LIMIT 100''')).fetchall()
 
@@ -128,7 +119,7 @@ class OperationStore:
         if row is not None:
             return row
         row = await (await self.conn.execute("""SELECT id,input_id,status,remote_id,part,created_at,
-            display_version,delivered_version,final_state,body->'delivery' AS delivery,
+            body->'delivery' AS delivery,
             (body->'delivery'->>'version'='1') IS NOT TRUE AS unsupported_format,
             'channel_reply' AS kind FROM assistant_outbox WHERE id=%s""", (ident,))).fetchone()
         return row if row is not None else await self.commands(ident)
@@ -146,7 +137,7 @@ async def postgres_operation_storage(settings, *, initialize=False):
         store = OperationStore(conn)
         if initialize:
             await store.initialize()
-        await conn.execute('SELECT id FROM assistant_operations LIMIT 0')
+        await conn.execute('SELECT id,source_key FROM assistant_operations LIMIT 0')
         await conn.execute('SELECT last_input_id FROM assistant_sessions LIMIT 0')
         await conn.execute('SELECT input_id FROM assistant_chat_commands LIMIT 0')
         yield store

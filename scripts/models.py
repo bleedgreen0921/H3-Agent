@@ -44,6 +44,9 @@ def main():
         name = config.get(args.service + "_model_name", name)
         if not isinstance(name, str) or not name.strip():
             raise ValueError("模型标识不能为空。")
+        slots = config.get(args.service + "_parallel_slots", 1)
+        if type(slots) is not int or slots < 1:
+            raise ValueError("parallel slots must be positive")
         cmd = [
             binary,
             "-m",
@@ -56,13 +59,13 @@ def main():
             "--gpu-layers",
             "all",
             "-c",
-            str(context),
+            str(context * slots),
             "-b",
-            str(context),
+            str(context * slots),
             "-ub",
-            str(context),
+            str(context * slots),
             "-np",
-            "1",
+            str(slots),
             "--host",
             "127.0.0.1",
             "--port",

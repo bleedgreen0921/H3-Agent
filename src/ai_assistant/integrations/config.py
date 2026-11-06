@@ -18,15 +18,11 @@ class MCPServer(Settings):
     tools: list[str] = Field(default_factory=list)
     write_tools: list[str] = Field(default_factory=list)
     allow_write: bool = False
-    resources: list[str] = Field(default_factory=list)
-    prompts: list[str] = Field(default_factory=list)
     # Every group tool must declare the exact argument paths that select resources.
     resource_arguments: dict[str, list[str]] = Field(default_factory=dict)
 
     @model_validator(mode='after')
     def validate_transport(self):
-        if self.resources or self.prompts:
-            raise ValueError('MCP resources/prompts 内容接口不再支持，请删除非空配置。')
         if self.transport == 'stdio' and not self.command:
             raise ValueError('stdio requires an explicit command')
         if self.transport == 'http' and (not self.url or not self.url.startswith(('http://', 'https://'))):

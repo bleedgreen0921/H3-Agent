@@ -477,8 +477,8 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         if mail_enabled:
             tools.extend(email_tools())
         if pdf_enabled:
-            from ai_assistant.tools.pdf import read_pdf_attachment, read_document_attachment
-            tools.extend([read_pdf_attachment, read_document_attachment])
+            from ai_assistant.tools.pdf import read_document_attachment
+            tools.append(read_document_attachment)
         if config.knowledge is not None or retriever is not None:
             from ai_assistant.knowledge.tools import knowledge_tools
             tools.extend(knowledge_tools(include_management=config.knowledge is not None))

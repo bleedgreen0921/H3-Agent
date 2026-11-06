@@ -67,7 +67,7 @@ class PgvectorStore(SourceStore):
         manager = SQLRecordManager('rag:init', engine=self.engine, async_mode=True)
         await manager.acreate_schema()
 
-    async def submit(self, *, source_uri, digest, snapshot, metadata, force=False, sync_run=None, restore=True):
+    async def submit(self, *, source_uri, digest, snapshot, metadata, force=False, sync_run=None, restore=True, source_id=None):
         c = self.config
         async with self.engine.begin() as conn:
             if sync_run:
@@ -95,6 +95,8 @@ class PgvectorStore(SourceStore):
                 job = (await conn.execute(text('''SELECT id FROM rag_jobs WHERE version_id=:v
                     AND state IN ('queued','running','succeeded') ORDER BY created_at DESC LIMIT 1'''), dict(v=version))).scalar_one_or_none()
                 if job:
+                    if sync_run:
+                        await self.link_sync_job(conn, sync_run, source_id, source_uri, job)
                     return job
             job = str(uuid4())
             await conn.execute(text('''UPDATE rag_documents SET desired_version=:v,desired_job=:job,deleted=false WHERE id=:id'''), dict(v=version, job=job, id=doc))
@@ -103,7 +105,18 @@ class PgvectorStore(SourceStore):
                 AND state IN ('queued','running')'''), dict(doc=doc))
             await conn.execute(text('''INSERT INTO rag_jobs(id,version_id,deadline)
                 VALUES(:id,:v,clock_timestamp()+make_interval(secs=>:seconds))'''), dict(id=job, v=version, seconds=c.deadline_seconds))
+            if sync_run:
+                await self.link_sync_job(conn, sync_run, source_id, source_uri, job)
             return job
+
+    async def link_sync_job(self, conn, run, source, uri, job):
+        # submit 已持有同步行锁，与任务提交一起保存可见进度。
+        item = dict(source_id=source, uri=uri, job_id=job)
+        await conn.execute(text("""UPDATE rag_sync_runs SET jobs=COALESCE(
+            (SELECT jsonb_agg(x) FROM jsonb_array_elements(jobs) x
+             WHERE NOT (x->>'source_id'=:source AND x->>'uri'=:uri)), '[]'::jsonb)
+             || CAST(:item AS jsonb) WHERE id=:id"""),
+             dict(source=source, uri=uri, item=json.dumps([item]), id=run['id']))
 
     async def claim(self):
         c = self.config

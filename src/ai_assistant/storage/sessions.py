@@ -60,7 +60,7 @@ class SessionRepository:
     async def check_schema(self):
         row = await (await self.execute(
             'SELECT version FROM assistant_session_schema WHERE singleton = true')).fetchone()
-        if not row or row['version'] != 4:
+        if not row or row['version'] != 5:
             raise SessionError('Unsupported session schema; run init with a compatible application.')
         await self.execute('SELECT binding,title,last_input_id FROM assistant_sessions LIMIT 0')
         # Also fail before any model calls if native Saver initialization is missing.
@@ -198,23 +198,19 @@ async def postgres_session_storage(settings, *, initialize=False):
                                 await repo.execute('''CREATE TABLE IF NOT EXISTS assistant_session_schema (
                                     singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), version integer NOT NULL)''')
                                 row = await (await repo.execute('SELECT version FROM assistant_session_schema')).fetchone()
-                                if row and row['version'] != 4:
+                                if row and row['version'] != 5:
                                     raise SessionError('Unsupported session schema version.')
                                 await repo.execute(DDL)
                                 await repo.execute('CREATE INDEX IF NOT EXISTS assistant_sessions_binding ON assistant_sessions(binding,updated_at DESC,id)')
-                                await repo.execute('INSERT INTO assistant_session_schema VALUES(true,4) ON CONFLICT(singleton) DO NOTHING')
+                                await repo.execute('INSERT INTO assistant_session_schema VALUES(true,5) ON CONFLICT(singleton) DO NOTHING')
                         finally:
                             await repo.execute('SELECT pg_advisory_unlock(%s)', (SCHEMA_LOCK,))
                     await repo.check_schema()
                     if initialize:
                         # 核心结构已成功初始化；统计连接和建表失败单独提示。
                         try:
-                            from ai_assistant.storage.usage import DDL as USAGE_DDL, usage_storage
-                            async with usage_storage(settings) as usage:
-                                await usage.conn.execute(USAGE_DDL)
-                                await usage.conn.execute('CREATE INDEX IF NOT EXISTS assistant_model_usage_session ON assistant_model_usage(session_id)')
-                            if usage.linked:
-                                await usage.conn.execute('CREATE INDEX IF NOT EXISTS assistant_model_usage_input ON assistant_model_usage(input_id)')
+                            from ai_assistant.storage.usage import initialize_usage
+                            await initialize_usage(settings)
                         except Exception as error:
                             import logging
                             logging.getLogger(__name__).warning(

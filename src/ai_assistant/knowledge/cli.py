@@ -21,6 +21,7 @@ def add_commands(commands):
             command.add_argument('--source')
         if action == 'status':
             command.add_argument('job_id')
+            command.add_argument('--json', action='store_true')
             command.add_argument('--diagnostics', action='store_true')
         if action == 'worker':
             command.add_argument('--once', action='store_true')
@@ -79,7 +80,11 @@ async def execute(config, args):
             result = await status(store, args.job_id)
             if result is None:
                 raise KnowledgeError('任务不存在。')
-            print(json.dumps(result, ensure_ascii=False, default=str))
+            if result['kind'] == 'sync' and not args.json:
+                from ai_assistant.knowledge.management import progress_text
+                print(f"任务：{result['id']}\n阶段：{result['state']}\n" + progress_text(result))
+            else:
+                print(json.dumps(result, ensure_ascii=False, default=str))
             if args.diagnostics and result['kind'] == 'index':
                 import sys
                 from ai_assistant.knowledge.diagnostics import read_diagnostic
@@ -89,7 +94,8 @@ async def execute(config, args):
             from ai_assistant.knowledge.ingestion import worker
             await worker(store, once=args.once, app_config=config)
         elif args.action == 'search':
-            from ai_assistant.knowledge.retrieval import create_knowledge_retriever, render_evidence
+            from ai_assistant.knowledge.retrieval import create_knowledge_retriever
+            from ai_assistant.knowledge.evidence import render_evidence
             filters = {key: getattr(args, key) for key in ('document_id', 'source_id', 'media_type', 'source_name') if getattr(args, key)}
             if args.tag:
                 filters['tags'] = args.tag

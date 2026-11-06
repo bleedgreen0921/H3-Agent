@@ -59,10 +59,6 @@ class FeishuAPI:
         return await self.request('POST', '/im/v1/messages', params={'receive_id_type': 'chat_id'},
                                   json=request_body(chat_id, message, operation_id))
 
-    async def send_text(self, chat_id, text, operation_id):
-        return await self.request('POST', '/im/v1/messages', params={'receive_id_type': 'chat_id'},
-            json={'receive_id': chat_id, 'msg_type': 'text',
-                  'content': json.dumps({'text': text}, ensure_ascii=False), 'uuid': operation_id})
 
 
 class FileBridge:

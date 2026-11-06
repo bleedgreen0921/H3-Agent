@@ -22,7 +22,7 @@ def read_toml(path):
 def profile_options(document):
     from ai_assistant.config import ConfigError
     if not {'profiles', 'default_profile', 'includes'}.intersection(document):
-        return None
+        raise ConfigError('配置入口必须使用 profiles 和 default_profile；业务配置请放入组件。')
     if set(document) - {'profiles', 'default_profile', 'includes'}:
         raise ConfigError('组合配置入口只允许 includes、default_profile 和 profiles。')
     profiles = document.get('profiles')
@@ -57,10 +57,6 @@ def resolve_config(path, profile=None):
     path = Path(path).absolute()
     document = read_toml(path)
     options = profile_options(document)
-    if options is None:
-        if profile is not None:
-            raise ConfigError('旧单文件配置不支持 --profile；请使用组合配置入口。')
-        return document, (path.resolve(),), None
     profiles, default = options
     selected = default if profile is None else profile
     if selected not in profiles:

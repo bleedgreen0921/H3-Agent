@@ -7,7 +7,6 @@ import tempfile
 from langchain_core.documents import Document
 from ai_assistant.knowledge import IngestionError
 from ai_assistant.knowledge.diagnostics import MAX_BYTES, bounded
-from ai_assistant.knowledge.metadata import normalize
 
 
 def require_content(documents, code, message):
@@ -18,18 +17,6 @@ def require_content(documents, code, message):
     return valid
 
 
-def prepare_documents(loader, *, identity, parser, granularity, splitter, mapping=None, zero_based=()):
-    """Accept a native BaseLoader without inventing a parser plugin hierarchy."""
-    if granularity not in ('document', 'elements', 'chunks'):
-        raise ValueError('Loader granularity must be explicit')
-    loaded = require_content(loader.lazy_load(), 'empty_document', '未提取到有效正文。')
-    docs = [normalize(d, identity=identity, parser=parser, mapping=mapping, zero_based=zero_based)
-            for d in loaded]
-    chunks = docs if granularity == 'chunks' else splitter.split_documents(docs)
-    chunks = require_content(chunks, 'empty_chunks', '未生成有效片段。')
-    for i, chunk in enumerate(chunks):
-        chunk.metadata['chunk_index'] = i
-    return chunks
 
 
 MESSAGES = {

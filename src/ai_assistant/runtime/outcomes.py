@@ -86,12 +86,3 @@ def turn_result(state, operations=(), *, interrupted=None, executed_tool_calls=N
     else:
         status = 'complete'
     return TurnResult(status, items, execution, state.get('diagnostics') or [])
-
-def receipt_lines(items):
-    labels = {'saved': '已保存', 'unchanged': '未变化', 'needs_clarification': '需要补充信息',
-              'rejected': '未执行', 'conflict': '版本冲突', 'failed': '操作失败', 'unknown': '状态待核实',
-              'found': '已找到', 'deleted': '已删除', 'not_found': '未找到', 'unavailable': '暂不可用',
-              'succeeded': '已有回执', 'pending': '状态待核实'}
-    return [(item['target_label'] + '：' if item.get('target_label') else '') + labels.get(item['status'], '未完成') + '：' + item.get('summary', '请查询操作结果核实') +
-            ('；相同条件已停止' if item.get('stopped') else '') +
-            ('\n读取警告：' + item['read_warning'] if item.get('read_warning') else '') for item in items]

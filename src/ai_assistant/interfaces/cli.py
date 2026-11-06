@@ -89,17 +89,11 @@ def _main(argv: list[str] | None = None) -> int:
     try:
         if args.command == 'config' and args.action == 'list':
             from ai_assistant.configuration import read_toml, profile_options
-            options = profile_options(read_toml(args.config))
-            if options is None:
-                if args.profile is not None:
-                    raise ConfigError('旧单文件配置不支持 --profile。')
-                print('旧单文件配置（无具名方案）')
-            else:
-                profiles, default = options
-                if args.profile is not None and args.profile not in profiles:
-                    raise ConfigError('未知配置方案。')
-                for name in profiles:
-                    print(name + ('（默认）' if name == default else ''))
+            profiles, default = profile_options(read_toml(args.config))
+            if args.profile is not None and args.profile not in profiles:
+                raise ConfigError('未知配置方案。')
+            for name in profiles:
+                print(name + ('（默认）' if name == default else ''))
             return 0
         config = (load_config(args.config) if args.profile is None else
                   load_config(args.config, profile=args.profile))
@@ -113,7 +107,7 @@ def _main(argv: list[str] | None = None) -> int:
                 print('观测操作失败：请检查配置、网络及存储结构。', file=sys.stderr)
                 return 2
         if args.command == 'config':
-            print('配置校验通过：' + (config.profile or '旧单文件配置'))
+            print('配置校验通过：' + config.profile)
             return 0
         if args.command == "init":
             from ai_assistant.interfaces.initialization import execute

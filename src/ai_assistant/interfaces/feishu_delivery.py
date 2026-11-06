@@ -16,20 +16,20 @@ class FeishuOutboxSender:
 
     async def recover(self):
         """启动时处理未确认投递；必须在发送循环之前调用。"""
-        # 卡片机制已删除：本地确认中断的投递不推测远端结果，一律 unknown 且不重发。
+        # 本地确认中断的投递不推测远端结果，一律 unknown 且不重发。
         await self.store.conn.execute("UPDATE assistant_outbox SET status='unknown' WHERE status='sending' AND body->'delivery'->>'version'='1'")
         await self.store.conn.execute("UPDATE assistant_outbox o SET status='blocked' WHERE o.status='pending' AND o.part>=0 AND o.body->'delivery'->>'version'='1' AND EXISTS(SELECT 1 FROM assistant_outbox p WHERE p.input_id=o.input_id AND p.part>=0 AND p.part<o.part AND p.status IN ('unknown','blocked','rejected'))")
 
     async def send_pending(self):
         """按既有顺序投递已提交消息；发送时不持有事务。"""
-        rows = await (await self.store.conn.execute("SELECT o.* FROM assistant_outbox o WHERE o.status='pending' AND o.kind='text' AND o.next_attempt_at<=now() AND NOT EXISTS(SELECT 1 FROM assistant_outbox p WHERE p.input_id=o.input_id AND p.part>=0 AND p.part<o.part AND p.status!='delivered') ORDER BY o.created_at,o.input_id,o.part,o.id")).fetchall()
+        rows = await (await self.store.conn.execute("SELECT o.* FROM assistant_outbox o WHERE o.status='pending' AND o.next_attempt_at<=now() AND NOT EXISTS(SELECT 1 FROM assistant_outbox p WHERE p.input_id=o.input_id AND p.part>=0 AND p.part<o.part AND p.status!='delivered') ORDER BY o.created_at,o.input_id,o.part,o.id")).fetchall()
         for row in rows:
             await self.send_one(row)
 
         await self.store.conn.execute("""UPDATE assistant_inbox i SET body=NULL,status='delivered'
             WHERE i.status='completed' AND EXISTS(SELECT 1 FROM assistant_outbox o WHERE o.input_id=i.id)
             AND NOT EXISTS(SELECT 1 FROM assistant_outbox o WHERE o.input_id=i.id
-                AND (o.part>=0 OR o.kind='card') AND (o.status!='delivered' AND NOT (o.kind='card' AND o.status='rejected' AND EXISTS(SELECT 1 FROM assistant_outbox t WHERE t.input_id=o.input_id AND t.part>=0))))""")
+                AND o.status!='delivered')""")
 
     @observed("reply.delivery", lambda self, row: {
         "input_id": row["input_id"], "outbox_id": row["id"], "part": row["part"],
@@ -70,12 +70,9 @@ class FeishuOutboxSender:
             timeout = min(settings.delivery_attempt_timeout_seconds,
                           max(0, remaining - time.time()) if remaining else settings.delivery_attempt_timeout_seconds)
             async with asyncio.timeout(timeout):
-                if 'message' in body:
-                    from ai_assistant.interfaces.feishu_message import validate_message
-                    validate_message(body['message'])
-                    data = await self.api.send_message(body['chat_id'], body['message'], row['id'])
-                else:
-                    data = await self.api.send_text(body['chat_id'], body['text'], row['id'])
+                from ai_assistant.interfaces.feishu_message import validate_message
+                validate_message(body['message'])
+                data = await self.api.send_message(body['chat_id'], body['message'], row['id'])
                 if not isinstance(data.get('message_id'), str) or not data['message_id']:
                     raise RuntimeError('Missing delivery receipt')
         except Exception as error:
@@ -105,7 +102,7 @@ class FeishuOutboxSender:
                                       (data.get('message_id'), Jsonb({'delivery': delivery}), row['id']))
         event('delivery.persisted', status='delivered')
         completed = await (await self.store.conn.execute('''UPDATE assistant_inbox SET body=NULL,status='delivered'
-            WHERE id=%s AND status='completed' AND NOT EXISTS(SELECT 1 FROM assistant_outbox WHERE input_id=%s AND (part>=0 OR kind='card') AND (status!='delivered' AND NOT (kind='card' AND status='rejected' AND EXISTS(SELECT 1 FROM assistant_outbox t WHERE t.input_id=assistant_outbox.input_id AND t.part>=0)))) RETURNING received_at''',
+            WHERE id=%s AND status='completed' AND NOT EXISTS(SELECT 1 FROM assistant_outbox WHERE input_id=%s AND status!='delivered') RETURNING received_at''',
             (row['input_id'], row['input_id']))).fetchone()
 
         if completed:

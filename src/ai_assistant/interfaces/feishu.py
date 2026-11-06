@@ -46,11 +46,6 @@ class ProcessResources:
     skills: object = None
 
 
-def add_commands(commands):
-    parser = commands.add_parser('feishu', help='Feishu owner bot')
-    sub = parser.add_subparsers(dest='action', required=True)
-    serve = sub.add_parser('serve')
-    serve.add_argument('--config', default='assistant.toml')
 
 
 def caller_for(config, row):
@@ -89,7 +84,7 @@ class BotWorker:
 
     async def recover_reply(self, row, *, fallback=None):
         """投递恢复只读 saver 和索引，不构建 Agent 或模型。"""
-        from ai_assistant.runtime.presentation import project, response_finished
+        from ai_assistant.runtime.presentation import project
         from ai_assistant.storage.sessions import session_storage
 
         saved = await (await self.store.conn.execute(
@@ -98,23 +93,10 @@ class BotWorker:
         if any((item.get('body') or {}).get('delivery', {}).get('version') != 1 for item in saved):
             logger.warning('不支持的投递格式：input_id=%s；未恢复或发送。', row['id'])
             return
-        # 升级前遗留的流式卡片：终态已确认投递即不重发，正文已在远端。
-        cards = [item for item in saved if item['kind'] == 'card']
-        if any(item['status'] == 'delivered' and response_finished(item['final_state']) for item in cards):
+        # 当前已登记批次复用，不重切或重发；未知格式已在上方拒绝。
+        if saved:
             await self.store.conn.execute("UPDATE assistant_inbox SET status='completed' WHERE id=%s", (row['id'],))
             return
-        # 已登记的文本批次全部复用，残缺旧批次也不重新切分或补发。
-        if any(item['part'] >= 0 for item in saved):
-            await self.store.conn.execute("UPDATE assistant_inbox SET status='completed' WHERE id=%s", (row['id'],))
-            return
-        # 卡片未完成投递：放弃卡片行并降级为文本补发，优先使用已持久化的终态正文。
-        if cards:
-            await self.store.conn.execute("UPDATE assistant_outbox SET status='rejected' WHERE input_id=%s AND kind='card'", (row['id'],))
-            for item in cards:
-                snapshot = (item.get('body') or {}).get('presentation')
-                if snapshot and snapshot.get('version') == 1:
-                    await self.enqueue_reply(row, snapshot['text'], snapshot=snapshot)
-                    return
         async with session_storage(self.config.sessions) as repo:
             session = await (await repo.execute(
                 'SELECT s.* FROM assistant_sessions s JOIN assistant_channel_sessions c ON c.session_id=s.id WHERE c.binding=%s',
@@ -369,7 +351,7 @@ async def _serve(config):
         await store.conn.execute('SELECT binding,title FROM assistant_sessions LIMIT 0')
         await store.conn.execute('SELECT input_id FROM assistant_chat_commands LIMIT 0')
         await store.conn.execute('SELECT id FROM assistant_inbox LIMIT 0')
-        await store.conn.execute('SELECT kind,display_version,final_state FROM assistant_outbox LIMIT 0')
+        await store.conn.execute('SELECT part,next_attempt_at FROM assistant_outbox LIMIT 0')
         if config.knowledge is not None:
             await stack.enter_async_context(optional_knowledge_worker(config))
         context = await stack.enter_async_context(tool_context(config))

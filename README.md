@@ -4,7 +4,7 @@
 
 ## 主要能力
 
-- 持久会话、长对话摘要、流式回复与模型用量查询。
+- 持久会话、长对话摘要、飞书最终文本回复与模型用量查询。
 - 普通聊天：可恢复的只读错误允许纠正；写入失败或效果未知时停止本轮并保留回执；已派发的并发调用需结束或完成取消清理。
 - 本地及飞书资料入库、来源同步与带引用的知识检索。
 - 通过 MCP 使用飞书工具，区分主人私聊与群聊授权。
@@ -24,12 +24,14 @@ Skills 由用户在项目 `skills/` 下管理，显式 roots 不追加私人目�
 
 ```bash
 printf '%s\n' /ABSOLUTE/PATH/TO/EXISTING/ENV/bin/python > .python-path
-cp assistant.example.toml assistant.toml
+cp config.example/assistant.example.toml assistant.toml
+cp config.example/assistant.example.component.toml ./
+# 填写组件中的实际配置。
 ```
 
 `assistant.sh` 和 `models.sh` 优先使用非空 `AI_ASSISTANT_PYTHON`，否则读取项目根目录 `.python-path` 首行；指定解释器无效或不是 Python 3.12 时直接失败，不回退到系统 Python。两个脚本均切换到项目根目录执行，默认配置和相对 `--config` 参数从项目根目录定位。
 
-填写模型、工作区和数据库连接，并按 [办公配置模板](assistant.office.example.toml) 合并飞书配置。配置完成后：
+填写模型、工作区和数据库连接，并按 [办公配置模板](config.example/assistant.office.example.toml) 合并飞书配置。配置完成后：
 
 ```bash
 ./assistant.sh init
@@ -60,7 +62,6 @@ cp assistant.example.toml assistant.toml
 | [配置与运行行为](docs/configuration.md) | Skills、终端权限、个人风格、摘要与用量 |
 | [测试与验收](docs/testing.md) | 自动测试、真实业务验收入口和专项记录 |
 | [开发约定](AGENTS.md) | 项目分层、权限与开发约束 |
-| [待修复事项](TODO.md) | 已知问题与当前优先级 |
 
 
 飞书输入执行与 outbox 投递使用独立循环和数据库连接，慢发送不阻塞取消处理；取消回执仍按投递顺序发送。发送中关闭的未确认消息不会自动重发。
@@ -86,8 +87,16 @@ cp assistant.example.toml assistant.toml
 
 Spark 使用现有 OpenAI 兼容 provider，模型为 `spark-x2.6`，首版关闭思考；无需增加依赖，环境缺少所选集成时手动执行 `"$(cat .python-path)" -m pip install -e '.[openai]'`。离线配置校验不验证 API Key 或远端权限；`model check` 会发送真实请求并可能产生费用，本次交付不自动执行。
 
-主人飞书私聊附件阅读通过 `[tools.pdf] enabled = true` 启用，覆盖 PDF、DOCX、Markdown（`.md`），无需迁移配置。每个附件最多 25 MiB；PDF 使用现有 pypdf，DOCX/Markdown 使用标准库，均在可终止子进程中解析。统一工具 `read_document_attachment` 返回正文、位置、覆盖范围及续读游标；旧 `read_pdf_attachment` 保持兼容。DOCX 仅覆盖正文和表格文字，不提供物理页码，解压总量最多 100 MiB；Markdown 仅接受 UTF-8/BOM 原文，不加载链接或图片。读取不自动入库或授权外部写入。
+主人飞书私聊附件阅读通过 `[tools.pdf] enabled = true` 启用，覆盖 PDF、DOCX、Markdown（`.md`），无需迁移配置。每个附件最多 25 MiB；PDF 使用现有 pypdf，DOCX/Markdown 使用标准库，均在可终止子进程中解析。统一工具 `read_document_attachment` 返回正文、位置、覆盖范围及续读游标；只提供当前附件工具，不保留旧 PDF 工具接口。DOCX 仅覆盖正文和表格文字，不提供物理页码，解压总量最多 100 MiB；Markdown 仅接受 UTF-8/BOM 原文，不加载链接或图片。读取不自动入库或授权外部写入。
 
 ## Trace 与 LangSmith
 
 观测默认关闭，可显式启用 LangSmith；默认隐藏正文，通过 `input_id` 关联接收日志、Agent 调用树、结果提交、摘要与独立投递。示例见 [观测配置](config.example/observability.toml)，部署、显式存储扩展与模拟验收见 [观测说明](docs/observability.md)。不接入评测集或评测流水线。
+
+## 当前接口与会话历史重置
+
+配置入口仅支持具名组合方案；单文件业务配置、`context.mcp_schema_tokens` 及 MCP server 的 `resources`/`prompts` 字段均拒绝。模型内部保留原生流式执行；飞书等待最终回复后按 Markdown 文本分段投递，无卡片或流式展示。
+
+会话存储使用 v5，旧结构不自动升级。一次性清理及初始化见 [重置说明](docs/cleanup.md)。本次重置只删除会话、checkpoint、用量、渠道队列及工具操作历史，完整保留知识库和知识库管理回执，不重放旧业务。
+
+测试、文档和示例仍沿用当前 Git 忽略规则，其本地更新不会随仓库完整分发。

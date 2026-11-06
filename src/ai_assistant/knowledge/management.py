@@ -35,7 +35,16 @@ async def sources(config, store):
 async def status(store, ident):
     row = await store.sync_status(ident)
     if row is not None:
-        return dict(row, kind='sync', **sync_facts(row))
+        async with store.engine.connect() as conn:
+            counts = (await conn.execute(text("""SELECT j.state,count(*) AS n FROM rag_jobs j
+                WHERE j.id IN (SELECT DISTINCT x->>'job_id' FROM rag_sync_runs r,
+                LATERAL jsonb_array_elements(r.jobs) x WHERE r.id=:id)
+                GROUP BY j.state"""), dict(id=ident))).mappings().all()
+        progress = {x['state']: x['n'] for x in counts}
+        from datetime import datetime, timezone
+        elapsed = ((row.get('finished_at') or datetime.now(timezone.utc))-row['created_at']).total_seconds()
+        return dict(row, kind='sync', progress=progress, total=sum(progress.values()),
+                    elapsed_seconds=int(elapsed), scan_errors=sum(1 for e in row.get('errors', []) if e.get('reason') not in ('index_not_available', 'deadline_exceeded')), **sync_facts(row))
     row = await store.status(ident)
     if row is None:
         raise KnowledgeError('任务不存在。')
@@ -88,3 +97,13 @@ def sync_facts(row):
         'empty': '处理结束，范围为空，无可检索构建'}
     return dict(coverage=coverage, processing_finished=finished, searchable_builds=len(builds),
                 coverage_gaps=len(errors), summary=descriptions[coverage])
+
+
+def progress_text(result):
+    p = result.get('progress', {})
+    label = '已发现' if result['state'] in ('queued', 'running') else '总文档数'
+    message = (f"{label} {result.get('total', 0)}，已成功 {p.get('succeeded', 0)}，"
+               f"处理中 {p.get('running', 0)}，失败 {p.get('failed', 0)}，待处理 {p.get('queued', 0)}")
+    for state in sorted(set(p)-{'succeeded','running','failed','queued'}):
+        message += f"，{state} {p[state]}"
+    return message + f"\n扫描错误 {result.get('scan_errors', 0)}，已用时 {result.get('elapsed_seconds', 0)} 秒"

@@ -70,6 +70,9 @@ class KnowledgeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     database_url: SecretStr
     sources: dict[str, KnowledgeSource] = Field(default_factory=dict)
+    index_concurrency: int = Field(default=8, gt=0)
+    parse_concurrency: int = Field(default=8, gt=0)
+    embedding_concurrency: int = Field(default=8, gt=0)
     sync_deadline_seconds: int = Field(default=14400, gt=0)
     evidence_chars: int = Field(default=24000, ge=1000, le=64000)
     knowledge_base_id: str = Field(default="default", min_length=1)

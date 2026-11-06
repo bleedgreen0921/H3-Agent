@@ -233,10 +233,17 @@ class SourceStore:
             if changed.rowcount != 1:
                 raise LeaseLost("同步任务执行权已过期。")
 
+    async def record_scan_errors(self, run, errors):
+        async with self.engine.begin() as conn:
+            await conn.execute(text("""UPDATE rag_sync_runs SET errors=CAST(:errors AS jsonb)
+                WHERE id=:id AND token=:token AND state='running'
+                AND lease_until>now() AND deadline>now()"""),
+                dict(id=run['id'], token=run['token'], errors=packed(errors)))
+
     async def settle_scan(self, run, jobs, errors):
         async with self.engine.begin() as conn:
             await conn.execute(
-                text("""UPDATE rag_sync_runs SET state='indexing',jobs=CAST(:jobs AS jsonb),
+                text("""UPDATE rag_sync_runs SET state='indexing',jobs=CASE WHEN jobs='[]'::jsonb THEN CAST(:jobs AS jsonb) ELSE jobs END,
                 errors=CAST(:errors AS jsonb),lease_until=NULL WHERE id=:id AND token=:token
                 AND state='running' AND lease_until>now() AND deadline>now()"""),
                 dict(
