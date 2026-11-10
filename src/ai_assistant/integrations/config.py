@@ -18,8 +18,6 @@ class MCPServer(Settings):
     tools: list[str] = Field(default_factory=list)
     write_tools: list[str] = Field(default_factory=list)
     allow_write: bool = False
-    # Every group tool must declare the exact argument paths that select resources.
-    resource_arguments: dict[str, list[str]] = Field(default_factory=dict)
 
     @model_validator(mode='after')
     def validate_transport(self):
@@ -57,18 +55,11 @@ class IntegrationsConfig(Settings):
     feishu: FeishuConfig | None = None
 
 
-class GroupConfig(Settings):
-    skill_ids: list[str] | None = None
-    resources: dict[str, list[str]] = Field(default_factory=dict)
-
-
 class FeishuChannel(Settings):
     delivery_max_attempts: int = Field(default=3, ge=1, le=100)
     final_delivery_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     delivery_attempt_timeout_seconds: float = Field(default=8, gt=0, allow_inf_nan=False)
-    default_group_skill_ids: list[str] = Field(default_factory=list)
     enabled: bool = False
-    groups: dict[str, GroupConfig] = Field(default_factory=dict)
 
 
 class ChannelsConfig(Settings):

@@ -53,13 +53,8 @@ def caller_for(config, row):
     body = row['body']
     if body.get('owner_open_id') != settings.owner_open_id:
         raise ConfigError('Untrusted inbox owner.')
-    if body['group']:
-        grant = config.channels.feishu.groups.get(body['chat_id'])
-        if grant is None:
-            raise ConfigError('Group is no longer authorized.')
-        return Caller('feishu_group', True, row['binding'],
-                      {key: tuple(value) for key, value in grant.resources.items()}, scope='shared',
-                      skill_ids=tuple(grant.skill_ids if grant.skill_ids is not None else config.channels.feishu.default_group_skill_ids))
+    if body.get('group') is not False:
+        raise ConfigError('仅支持主人私聊，群消息不再处理。')
     return Caller('feishu_private', True, row['binding'], scope='private')
 
 
@@ -152,7 +147,7 @@ class BotWorker:
             event("request.dequeued", queue_wait_seconds=max(0, (datetime.now(timezone.utc) - row["received_at"]).total_seconds()))
         caller = caller_for(self.config, row)
         from ai_assistant.interfaces.chat_commands import parse_command, handle
-        from ai_assistant.skills.catalog import SkillError, skills_for_caller
+        from ai_assistant.skills.catalog import SkillError
         text = row['body']['text'].strip()
         parsed = parse_command(text)
         if parsed and parsed[0] not in {'/skill'}:
@@ -162,9 +157,9 @@ class BotWorker:
         if parsed and parsed[0] == '/skill':
             identity, text = parsed[1]
             if not recover:
-                catalog = skills_for_caller(self.config, getattr(self.resources, 'skills', None), caller)
+                catalog = getattr(self.resources, 'skills', None)
                 if catalog is None:
-                    await self.enqueue_reply(row, '本群未配置可用 Skills。' if caller.channel == 'feishu_group' else '未配置 Skills。')
+                    await self.enqueue_reply(row, '未配置 Skills。')
                     return
                 try:
                     # 仅在当前调用者的授权目录内解析名称，随后统一使用完整 ID。
@@ -219,6 +214,9 @@ class BotWorker:
         """仅恢复已保存回复；启动发送循环前由 serve 顺序调用。"""
         rows = await (await self.store.conn.execute("SELECT i.* FROM assistant_inbox i WHERE i.status='running' AND (i.body->>'delivery_version'='1' OR EXISTS(SELECT 1 FROM assistant_outbox o WHERE o.input_id=i.id AND o.body->'delivery'->>'version'='1')) ORDER BY i.received_at,i.id")).fetchall()
         for row in rows:
+            # 旧群记录保留，但不恢复执行或补发回复。
+            if (row.get('body') or {}).get('group') is not False:
+                continue
             await self.execute(row, recover=True)
 
     async def recover_rag(self, row):
@@ -252,6 +250,8 @@ class BotWorker:
                     self.active = self.active_row = None
                 rows = await (await self.store.conn.execute("SELECT * FROM assistant_inbox WHERE status='received' ORDER BY received_at,id LIMIT 100")).fetchall()
                 for row in rows:
+                    if (row.get('body') or {}).get('group') is not False:
+                        continue
                     command = row['body']['text'].strip()
                     if command == '/usage':
                         await self.show_usage(row)
@@ -356,8 +356,6 @@ async def _serve(config):
             await stack.enter_async_context(optional_knowledge_worker(config))
         context = await stack.enter_async_context(tool_context(config))
         directory = await stack.enter_async_context(mcp_resources(config, context.workspace))
-        from ai_assistant.skills.catalog import validate_group_skills
-        validate_group_skills(config, context.skills)
         resources = ProcessResources(directory, context.skills)
         client = await stack.enter_async_context(httpx.AsyncClient(timeout=30, trust_env=False))
         api = FeishuAPI(config.integrations.feishu, client)
@@ -375,10 +373,7 @@ async def _serve(config):
         payload = dict(final_delivery_timeout_seconds=config.channels.feishu.final_delivery_timeout_seconds, app_id=config.integrations.feishu.app_id,
             app_secret=config.integrations.feishu.app_secret.get_secret_value(),
             owner_open_id=config.integrations.feishu.owner_open_id,
-            database_url=config.sessions.database_url.get_secret_value(),
-            groups=list(config.channels.feishu.groups))
-        # Receiver expects a key map, not an ordered list.
-        payload['groups'] = {key: True for key in payload['groups']}
+            database_url=config.sessions.database_url.get_secret_value())
         process.stdin.write((json.dumps(payload) + '\n').encode())
         await process.stdin.drain()
         await _run_workers(bot, sender, process)

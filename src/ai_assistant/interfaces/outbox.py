@@ -12,6 +12,10 @@ from ai_assistant.observability import observed
 
 @observed("reply.enqueue", lambda conn, settings, row, text, **kw: {"input_id": row["id"]})
 async def enqueue_text(conn, settings, row, text, *, purpose='answer', snapshot=None):
+    # 接收端之外的第二道边界：历史群请求也不能登记新的回复。
+    if (row.get('body') or {}).get('group') is not False:
+        from ai_assistant.config import ConfigError
+        raise ConfigError('仅支持私聊回复，未登记群消息投递。')
     # 整批复用：旧批次即使残缺也不能追加另一版正文。
     await conn.execute('SELECT id FROM assistant_inbox WHERE id=%s FOR UPDATE', (row['id'],))
     existing = await (await conn.execute(
@@ -25,7 +29,7 @@ async def enqueue_text(conn, settings, row, text, *, purpose='answer', snapshot=
             await conn.execute('''INSERT INTO assistant_outbox(id,input_id,body,part)
                 VALUES(%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING''',
                 (str(uuid5(NAMESPACE_URL, identity)), row['id'], Jsonb({
-                    'chat_id': row['body']['chat_id'],
+                    'chat_id': row['body']['chat_id'], 'group': False,
                     'message': markdown_message(value),
                     'presentation': snapshot,
                     'delivery': {**metadata(settings), 'purpose': purpose}}), part))

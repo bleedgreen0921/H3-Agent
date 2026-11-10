@@ -74,6 +74,8 @@ class TurnObserver(AsyncCallbackHandler):
             if self.usage.summary_model_calls >= self.summary_limit:
                 raise SummaryCallLimitError('Summary call limit reached.')
             self.usage.summary_model_calls += 1
+            self._event('summary.start', run_id=run_id,
+                kind=metadata.get('assistant_summary_kind', 'compression'))
         else:
             self.usage.main_model_calls += 1
         from ai_assistant.agents.context import count_tokens

@@ -35,3 +35,4 @@ assistant.office.example.toml
 assistant.office.example.toml
 config.example/*
 config.example/observability.toml
+evals/

@@ -87,16 +87,6 @@ class FilesConfig(BaseModel):
     scan_bytes: int = Field(default=128 * 1024 * 1024, gt=0, strict=True)
 
 
-class TerminalConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
-    output_lines: int = Field(default=1000, gt=0, strict=True)
-    output_bytes: int = Field(default=128 * 1024, gt=0, strict=True)
-    allow_network: bool = False
-    env: dict[str, SecretStr] = Field(default_factory=dict)
-    read_paths: list[Path] = Field(default_factory=list)
-    timeout: float = Field(default=300, gt=0, le=1800, allow_inf_nan=False)
-
-
 class PDFConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     enabled: bool = False
@@ -108,7 +98,6 @@ class ToolsConfig(BaseModel):
     pdf: PDFConfig = Field(default_factory=PDFConfig)
     web: WebConfig | None = None
     files: FilesConfig = Field(default_factory=FilesConfig)
-    terminal: TerminalConfig | None = None
 
 
 from ai_assistant.knowledge.config import KnowledgeConfig
@@ -162,10 +151,10 @@ class SessionsConfig(BaseModel):
 
 class ContextConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
-    summary_model: str | None = Field(default=None, min_length=1)
-    summary_tokens: int = Field(default=10000, ge=100)
-    summary_every_turns: int = Field(default=20, ge=0, strict=True)
-    recent_turns: int = Field(default=6, gt=0, strict=True)
+    memory_every_turns: int = Field(default=5, ge=0, strict=True)
+    memory_tokens: int = Field(default=20000, ge=100, strict=True)
+    compression_summary_ratio: float = Field(default=0.1, gt=0, lt=1, strict=True)
+    compression_recent_turns: int = Field(default=30, gt=0, strict=True)
     tool_result_tokens: int = Field(default=12000, ge=100)
 
 
@@ -229,8 +218,6 @@ class AppConfig(BaseModel):
         if self.knowledge and any(s.kind != 'local_directory' for s in self.knowledge.sources.values()):
             if self.integrations.feishu is None or self.mcp is None:
                 raise ValueError('Cloud knowledge sources require explicit Feishu integration and token state configuration')
-        if self.context and self.context.summary_model is not None and self.context.summary_model not in self.models:
-            raise ValueError("Unknown summary model profile")
         if self.tools.pdf.enabled and self.integrations.feishu is None:
             raise ValueError('PDF attachments require integrations.feishu')
         if self.tools.web is not None:
@@ -243,13 +230,6 @@ class AppConfig(BaseModel):
                     raise ValueError('External writes require persistent sessions')
                 if server.transport in {'feishu', 'feishu_files'} and self.integrations.feishu is None:
                     raise ValueError('Feishu services require integrations.feishu')
-        for group in self.channels.feishu.groups.values():
-            for name in group.resources:
-                if self.mcp is None or name not in self.mcp.servers:
-                    raise ValueError('Group refers to an unknown MCP service')
-                server = self.mcp.servers[name]
-                if server.transport != 'feishu' or server.identity != 'bot':
-                    raise ValueError('Groups may only grant official Feishu bot services')
         if self.channels.feishu.enabled and (self.sessions is None or self.integrations.feishu is None):
             raise ValueError('Feishu channel requires sessions and Feishu configuration')
         return self

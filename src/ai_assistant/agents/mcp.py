@@ -41,7 +41,7 @@ class MCPMiddleware(AgentMiddleware):
             return await handler(request)
         adapter = service_adapter(entry)
         try:
-            authorize(context.caller, entry.server, entry.settings, entry.original_name, request.tool_call['args'])
+            authorize(context.caller, entry.settings, entry.original_name)
             arguments = deepcopy(request.tool_call['args'])
             expected, early = await adapter.prepare(entry, arguments, context, request.state, request.runtime.config) if adapter else ({}, None)
             expected = deepcopy(expected)

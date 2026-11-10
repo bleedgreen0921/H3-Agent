@@ -28,19 +28,9 @@ async def execute(config, args):
             skill = catalog.resolve(args.skill_id)
             result = dict(skill.info(), metadata=skill.metadata)
             if args.action == "check":
-                from .diagnostics import check_skill
-
-                result["check"] = check_skill(
-                    skill, terminal_enabled=config.tools.terminal is not None
-                )
-        channel = config.channels.feishu
-        groups = {name: {'mode': 'default' if grant.skill_ids is None else
-                         ('disabled' if not grant.skill_ids else 'override'),
-                         'skill_ids': channel.default_group_skill_ids if grant.skill_ids is None else grant.skill_ids}
-                  for name, grant in channel.groups.items()}
-        invalid = sorted(set(channel.default_group_skill_ids + [s for g in groups.values() for s in g['skill_ids']]) - set(catalog.skills))
-        result['group_authorization'] = dict(default=channel.default_group_skill_ids, groups=groups, invalid_ids=invalid)
+                # 检查本地包能否准备，不执行其中的脚本或安装依赖。
+                result["check"] = catalog.prepare(skill.id).info()
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 2 if invalid or catalog.diagnostics else 0
+        return 2 if catalog.diagnostics else 0
     finally:
         catalog.close()

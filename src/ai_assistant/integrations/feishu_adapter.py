@@ -90,10 +90,6 @@ async def after_read(entry, arguments, result, context):
     return result
 
 
-def shared_identity_allowed(server):
-    return server.transport == 'feishu' and server.identity == 'bot'
-
-
 async def unfinished_document_notice(context):
     """正文写入失败时从本轮成功创建回执恢复链接，避免丢失已创建文档。"""
     import re

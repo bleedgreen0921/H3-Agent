@@ -4,7 +4,6 @@ from pathlib import Path
 from uuid import UUID
 
 from ai_assistant.storage.sessions import SessionError, session_storage
-from ai_assistant.skills.catalog import skills_for_caller
 
 
 USAGE = {
@@ -180,8 +179,8 @@ async def handle(worker, row, caller, parsed, *, recover=False):
                         lines.append(f'下一页：/list {value + 1}')
                     text = '\n\n'.join(lines)
             elif name == '/skills':
-                catalog = skills_for_caller(worker.config, getattr(worker.resources, 'skills', None), caller)
-                text = '\n'.join(f"{s.id} | {s.metadata['name']}：{s.metadata['description']}" for s in catalog.skills.values()) if catalog else ('本群未配置可用 Skills。' if caller.channel == 'feishu_group' else '未配置 Skills。')
+                catalog = getattr(worker.resources, 'skills', None)
+                text = '\n'.join(f"{s.id} | {s.metadata['name']}：{s.metadata['description']}" for s in catalog.skills.values()) if catalog else '未配置 Skills。'
                 text = text or '未配置可用 Skills。'
             else:
                 text = value

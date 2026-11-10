@@ -22,7 +22,7 @@ class FeishuOutboxSender:
 
     async def send_pending(self):
         """按既有顺序投递已提交消息；发送时不持有事务。"""
-        rows = await (await self.store.conn.execute("SELECT o.* FROM assistant_outbox o WHERE o.status='pending' AND o.next_attempt_at<=now() AND NOT EXISTS(SELECT 1 FROM assistant_outbox p WHERE p.input_id=o.input_id AND p.part>=0 AND p.part<o.part AND p.status!='delivered') ORDER BY o.created_at,o.input_id,o.part,o.id")).fetchall()
+        rows = await (await self.store.conn.execute("SELECT o.* FROM assistant_outbox o WHERE o.status='pending' AND COALESCE(o.body->>'group','false')!='true' AND NOT EXISTS(SELECT 1 FROM assistant_inbox i WHERE i.id=o.input_id AND i.body->>'group'='true') AND o.next_attempt_at<=now() AND NOT EXISTS(SELECT 1 FROM assistant_outbox p WHERE p.input_id=o.input_id AND p.part>=0 AND p.part<o.part AND p.status!='delivered') ORDER BY o.created_at,o.input_id,o.part,o.id")).fetchall()
         for row in rows:
             await self.send_one(row)
 
@@ -39,6 +39,17 @@ class FeishuOutboxSender:
         from psycopg.types.json import Jsonb
         from ai_assistant.interfaces.delivery import classify, exhausted
         body = row['body'] or {}
+        # 新回复显式标记私聊；旧记录从原输入确认，群记录只保留不投递。
+        if body.get('group') is True:
+            event('delivery.skipped', status='group_unsupported')
+            return
+        if body.get('group') is not False:
+            source = await (await self.store.conn.execute(
+                "SELECT EXISTS(SELECT 1 FROM assistant_inbox WHERE id=%s AND body->>'group'='true') AS is_group",
+                (row['input_id'],))).fetchone()
+            if source and source.get('is_group') is True:
+                event('delivery.skipped', status='group_unsupported')
+                return
         delivery = body.get('delivery')
         # 旧记录仅供诊断，升级不能自动补发。
         if not delivery or delivery.get('version') != 1:

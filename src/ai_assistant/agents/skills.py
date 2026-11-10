@@ -26,7 +26,7 @@ class SkillsMiddleware(AgentMiddleware):
         if stale:
             chunks.append('Previous activations expired (missing or changed version); reload: ' + ', '.join(stale))
         for skill in active:
-            chunks.append(f'Active skill {skill.id}, SHA-256 {skill.digest}, base {skill.sandbox_path}:\n{skill.body}')
+            chunks.append(f'Active skill {skill.id}, SHA-256 {skill.digest}, base {skill.snapshot_path}:\n{skill.body}')
         original = request.system_message.text if request.system_message else ''
         text = original + '\n\n' + '\n\n'.join(chunks)
         if (active and self.max_input_tokens and

@@ -33,6 +33,7 @@ def turn_result(state, operations=(), *, interrupted=None, executed_tool_calls=N
     for operation in operations:
         stored = operation.get('result') or {}
         problem = stored.get('business_outcome')
+        # 历史终端回执只读兼容：进程退出成功不等于业务效果已确认。
         terminal = operation.get('tool') == 'run_command'
         accepted = operation['status'] == 'succeeded' and not terminal
         confirmed |= accepted

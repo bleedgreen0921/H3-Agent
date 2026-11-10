@@ -13,8 +13,6 @@ from ai_assistant.config import AppConfig
 from ai_assistant.workspace.files import ReadOnlyWorkspace
 from ai_assistant.tools.web import DeepSeekWeb
 from ai_assistant.workspace.writes import WritableWorkspace
-from ai_assistant.tools.terminal import TerminalService
-from ai_assistant.storage.integrations import MemoryOperationStore
 
 
 @dataclass(frozen=True)
@@ -27,14 +25,12 @@ class ToolContext:
     pdf: object | None = field(default=None, kw_only=True)
     web: DeepSeekWeb | None = None
     writes: WritableWorkspace | None = None
-    terminal: TerminalService | None = None
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
     retriever: BaseRetriever | None = None
     skills: object | None = None
     mcp: object | None = None
     caller: object | None = None
     operations: object | None = None
-    terminal_operations: object = field(default_factory=MemoryOperationStore, kw_only=True, repr=False, compare=False)
     project_rules: str = ''
     input_id: str | None = None
     knowledge_config: object | None = None
@@ -56,13 +52,6 @@ async def tool_context(config: AppConfig, *, retriever: BaseRetriever | None = N
         **config.tools.files.model_dump(exclude={"enabled"}),
     )
     lock = asyncio.Lock()
-    terminal_settings = config.tools.terminal
-    terminal = TerminalService(workspace, timeout=terminal_settings.timeout, lock=lock,
-        allow_network=terminal_settings.allow_network,
-        output_lines=terminal_settings.output_lines, output_bytes=terminal_settings.output_bytes,
-        env={k: v.get_secret_value() for k, v in terminal_settings.env.items()},
-        read_paths=[p.expanduser() if p.expanduser().is_absolute() else base / p
-                    for p in terminal_settings.read_paths]) if terminal_settings else None
     async with AsyncExitStack() as stack:
         skills = None
         if config.skills is not None:
@@ -77,9 +66,7 @@ async def tool_context(config: AppConfig, *, retriever: BaseRetriever | None = N
             client = await stack.enter_async_context(httpx.AsyncClient(follow_redirects=False, trust_env=False))
             web = DeepSeekWeb(client, profile.api_key.get_secret_value(), settings.timeout,
                               search_chars=settings.search_chars, fetch_chars=settings.fetch_chars)
-        if terminal is not None:
-            stack.push_async_callback(terminal.aclose)
-        yield ToolContext(workspace, web,
-                          WritableWorkspace(workspace) if config.tools.files.enabled else None,
-                          terminal, lock, retriever, skills,
+        yield ToolContext(workspace=workspace, web=web,
+                          writes=WritableWorkspace(workspace) if config.tools.files.enabled else None,
+                          operation_lock=lock, retriever=retriever, skills=skills,
                           skills_directory_tokens=config.skills.directory_tokens if config.skills else 6000)

@@ -43,8 +43,7 @@ async def load_skill(skill_id: str, runtime: ToolRuntime[ToolContext]) -> Comman
         raise ToolException(str(exc)) from None
     info = skill.info()
     info.update(loaded=True, workspace=str(runtime.context.workspace.root),
-                output='Write outputs to the configured workspace.',
-                execution='run_command' if runtime.context.terminal else 'Terminal disabled; scripts cannot execute.')
+                output='Write outputs to the configured workspace using the available file tools.')
     return Command(update={'active_skills': {skill.id: skill.digest}, 'messages': [
         ToolMessage(content=str(info), tool_call_id=runtime.tool_call_id, name='load_skill')]})
 
@@ -64,7 +63,7 @@ async def unload_skill(skill_id: str, runtime: ToolRuntime[ToolContext]) -> Comm
 async def read_skill_resource(skill_id: str, resource: str, runtime: ToolRuntime[ToolContext],
                               offset: Annotated[int, Field(ge=0)] = 0,
                               limit: Annotated[int, Field(ge=1, le=20000)] = 20000) -> dict:
-    """Read a resource from an active skill; binary files return their sandbox location."""
+    """Read a resource from an active skill; binary files return their snapshot location."""
     skill = selected(runtime, skill_id)
     try:
         return catalog(runtime).read(skill.id, resource, offset, limit)

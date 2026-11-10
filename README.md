@@ -7,12 +7,12 @@
 - 持久会话、长对话摘要、飞书最终文本回复与模型用量查询。
 - 普通聊天：可恢复的只读错误允许纠正；写入失败或效果未知时停止本轮并保留回执；已派发的并发调用需结束或完成取消清理。
 - 本地及飞书资料入库、来源同步与带引用的知识检索。
-- 通过 MCP 使用飞书工具，区分主人私聊与群聊授权。
+- 通过 MCP 在主人私聊中使用飞书工具。
 - 工作区读写、联网、本地 Skills 与受限终端执行。
 
-模型通过 HTTP 服务调用；知识库、MCP、Skills 等能力按配置启用。当前受限终端仅维护 macOS Seatbelt 实现；Skills 和依赖需提前准备。
+模型通过 HTTP 服务调用；知识库、MCP、Skills 等能力按配置启用。不提供通用命令执行或群聊入口；Skills 和依赖需提前准备。
 
-MCP 按 `mcp.servers.<服务>.tools` 白名单直接提供工具，模型无需搜索或加载；执行时仍检查身份、写开关和群聊资源授权。全部工具 schema 计入模型输入预算，工具越多固定输入开销越大；放不下时需精简工具清单。详见 [运行契约](docs/runtime.md)。
+MCP 按 `mcp.servers.<服务>.tools` 白名单直接提供工具，模型无需搜索或加载；执行时仍检查主人身份、工具白名单和写开关。全部工具 schema 计入模型输入预算，工具越多固定输入开销越大；放不下时需精简工具清单。详见 [运行契约](docs/runtime.md)。
 
 Skills 由用户在项目 `skills/` 下管理，显式 roots 不追加私人目录。发现只读 `SKILL.md`，激活时准备包快照；依赖提前安装，修改后重开会话或重启共享服务。单个 MCP 初始化失败会标记当前不可用，其余服务与聊天继续；CLI 诊断仍返回失败。
 
@@ -57,7 +57,7 @@ cp config.example/assistant.example.component.toml ./
 | --- | --- |
 | [安装与部署](docs/setup.md) | Python 依赖、数据库、模型服务和飞书授权 |
 | [命令说明](docs/COMMANDS.md) | 完整终端命令、飞书知识库指令及升级步骤 |
-| [飞书会话管理](docs/FEISHU-CONVERSATIONS.md) | 会话指令、群聊与 Skills 授权 |
+| [飞书会话管理](docs/FEISHU-CONVERSATIONS.md) | 主人私聊会话指令与本地 Skills |
 | [知识库](docs/knowledge.md) | 支持的资料、同步、索引与检索行为 |
 | [配置与运行行为](docs/configuration.md) | Skills、终端权限、个人风格、摘要与用量 |
 | [测试与验收](docs/testing.md) | 自动测试、真实业务验收入口和专项记录 |

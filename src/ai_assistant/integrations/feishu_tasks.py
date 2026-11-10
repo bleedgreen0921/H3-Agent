@@ -72,7 +72,7 @@ def task_model_result(result, context):
     artifact = result.artifact if isinstance(result.artifact, dict) else {'original_artifact': result.artifact}
     if artifact.get('task_model_view'):
         return result
-    timezone = 'UTC' if context.caller and context.caller.scope == 'shared' else context.timezone
+    timezone = context.timezone
     full = artifact.get('full_tool_content', result.content)
     source = result.model_copy(update={'content': full})
     view = task_view(source, timezone)

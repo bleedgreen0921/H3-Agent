@@ -7,7 +7,7 @@ from hashlib import sha256
 
 from ai_assistant.config import ConfigError
 from ai_assistant.executables import executable, executable_env
-from ai_assistant.integrations.policy import Caller, shared_service_allowed
+from ai_assistant.integrations.policy import Caller
 
 
 class MCPCleanupError(RuntimeError):
@@ -64,12 +64,8 @@ class Catalog:
     def for_caller(self, caller):
         if not caller.owner:
             return Catalog(timeout=self.timeout)
-        if caller.scope != 'shared':
-            return self
-        return Catalog([e for e in self.entries.values() if shared_service_allowed(e.settings)
-                        and e.server in caller.resources], timeout=self.timeout,
-                           unavailable={name: status for name, status in self.unavailable.items()
-                                        if shared_service_allowed(status["settings"]) and name in caller.resources})
+        return self
+
 
 
 async def decline(*args, **kwargs):
@@ -96,8 +92,6 @@ async def mcp_resources(config, workspace, *, caller=None):
     async with AsyncExitStack() as stack:
         for name, settings in config.mcp.servers.items():
             if not caller.owner:
-                continue
-            if caller.scope == 'shared' and (not shared_service_allowed(settings) or name not in caller.resources):
                 continue
             if not settings.tools:
                 continue

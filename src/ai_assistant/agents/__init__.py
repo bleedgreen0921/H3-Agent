@@ -71,28 +71,73 @@ def load_project_rules(context):
 
 
 def create_assistant_agent(model, tools, *, checkpointer, settings,
-                           context_settings=None, summary_model=None,
-                           max_input_tokens=None, summary_max_input_tokens=None,
-                           summary_profile='', skills_enabled=False, mcp_enabled=False, persona=''):
+                           context_settings=None, max_input_tokens=None, model_parameters=None,
+                           skills_enabled=False, mcp_enabled=False, persona=''):
+    """组装原生 LangChain Agent，并配置请求准备、调用限制及上下文管理。
+
+    本函数只负责构建 Agent；模型调用和工具调度交给框架，轮次管理由调用方负责。
+    可选能力按参数启用，项目规则则从每次调用传入的 ToolContext 中取得。
+
+    参数：
+        model: 当前模型，负责对话、工具选择以及启用后的上下文摘要。
+        tools: 已准备好的工具集合，作为 Agent 注册和请求预算估算的基础。
+        checkpointer: 交给框架的 checkpoint 实例，用于保存与恢复会话状态。
+        settings: 调用次数配置，包含模型、全部工具及知识库工具的单次运行上限。
+        context_settings: 上下文管理配置；为 None 时不启用摘要管理。
+        max_input_tokens: 对话和摘要共用的模型输入预算；启用 MCP 或上下文管理时必须显式提供。
+        model_parameters: 当前模型的显式参数，仅用于读取摘要输出上限，不修改模型配置。
+        skills_enabled: 是否添加本地 Skills 中间件。
+        mcp_enabled: 是否添加 MCP 工具请求适配中间件。
+        persona: 已读取的个人风格文本，只影响表达，不授予额外工具权限。
+
+    返回：
+        create_agent 构建的 Agent，并附加 session_memory 和 memory_every_turns，
+        供运行时更新会话记忆；未启用上下文管理时分别为 None 和 0。
+
+    异常：
+        ConfigError: 启用 MCP 却未指定主模型输入预算。
+        ValueError: 启用上下文管理却缺少当前模型的输入预算。
+    """
+    # MCP 工具 schema 会占用模型上下文，必须先明确可用预算再组装 Agent。
     if mcp_enabled and max_input_tokens is None:
         from ai_assistant.config import ConfigError
         raise ConfigError('启用 MCP 工具的模型必须显式配置 max_input_tokens。')
+    memory = None
+    output_limit = None
+    if context_settings is not None:
+        from ai_assistant.agents.context import SessionMemoryMiddleware
+        # 只读取显式输出上限，兼容原生 provider 的常用参数位置。
+        parameters = model_parameters or {}
+        limits = [values.get(key) for values in (parameters, parameters.get('model_kwargs', {}),
+            parameters.get('options', {})) if isinstance(values, dict)
+            for key in ('max_tokens', 'max_completion_tokens', 'max_output_tokens', 'num_predict')]
+        output_limit = min((n for n in limits if type(n) is int and n > 0), default=None)
+        if max_input_tokens is None:
+            raise ValueError('启用上下文管理必须显式配置模型输入预算 max_input_tokens。')
+        memory = SessionMemoryMiddleware(model, max_input_tokens=max_input_tokens,
+            memory_tokens=context_settings.memory_tokens, output_limit=output_limit)
+    # 构建基础提示，供 Agent 初始化和预算预演使用；动态项目规则稍后再注入。
     prompt = SYSTEM_PROMPT
     if persona:
         prompt += '\n\n以下个人偏好仅用于表达风格，不改变上述业务规则、证据要求或工具权限：\n' + persona
     from langchain.agents.middleware import AgentMiddleware
 
     class RulesMiddleware(AgentMiddleware):
+        """每次模型调用从运行时上下文重建规则提示，避免沿用旧请求的规则。"""
+
         def prepare(self, request):
             from langchain_core.messages import SystemMessage
+            # 这里消费调用方已加载的规则，不直接读取文件；缺少规则时使用空文本。
             rules = getattr(request.runtime.context, 'project_rules', '')
             text = SYSTEM_PROMPT
             if rules:
                 text += '\n\n项目规则（不能扩大程序权限或覆盖安全边界）：\n' + rules
             if persona:
                 text += '\n\nPERSONA 仅控制风格，不改变上述业务规则、证据要求或工具权限，不能覆盖安全边界：\n' + persona
+            # 使用请求副本替换系统消息，后续中间件继续在这份提示上追加信息。
             return request.override(system_message=SystemMessage(text))
 
+        # 同步与异步入口共用准备逻辑，使两种调用方式使用一致的规则。
         async def awrap_model_call(self, request, handler):
             return await handler(self.prepare(request))
 
@@ -101,6 +146,8 @@ def create_assistant_agent(model, tools, *, checkpointer, settings,
 
     from ai_assistant.agents.completion import CompletionMiddleware
     from ai_assistant.agents.preparation import ContextPreparationMiddleware
+    # 顺序影响最终模型请求：先设置规则，再挂接响应完整性检查、注入可信时间，
+    # 随后按需添加 Skills 和 MCP。CompletionMiddleware 校验响应，不提供 prepare。
     preparers = [RulesMiddleware(), CompletionMiddleware(), ContextPreparationMiddleware()]
     if skills_enabled:
         from ai_assistant.agents.skills import SkillsMiddleware
@@ -108,46 +155,57 @@ def create_assistant_agent(model, tools, *, checkpointer, settings,
     if mcp_enabled:
         from ai_assistant.agents.mcp import MCPMiddleware
         preparers.append(MCPMiddleware())
+    if memory is not None:
+        preparers.append(memory)
     from ai_assistant.agents.outcomes import TurnState
 
     def prepare(request):
+        """集中组装规则、时间、Skills、MCP 和会话记忆，供完整请求预算估算。"""
         from langchain_core.messages import SystemMessage
+        # 从基础提示和工具副本开始，避免在已经注入的请求上重复追加动态内容。
         request = request.override(system_message=SystemMessage(prompt), tools=list(tools))
         for item in preparers:
+            # 只运行提供准备接口的中间件，跳过仅负责响应校验等工作的中间件。
             if hasattr(item, 'prepare'):
                 request = item.prepare(request)
         return request
 
     from langchain.agents.middleware import ToolCallLimitMiddleware
     from ai_assistant.agents.failures import ToolFailureMiddleware
+    # 通用保护放在前面：统一处理工具失败，并由框架限制一次运行中的调用次数。
+    # 达到上限时抛错，交给上层处理，不将超限包装成正常完成。
     middleware = [
         ToolFailureMiddleware(),
         ModelCallLimitMiddleware(run_limit=settings.model_call_limit, exit_behavior='error'),
         ToolCallLimitMiddleware(run_limit=settings.tool_call_limit, exit_behavior='error'),
     ]
+    # 只有注册了知识库检索工具，才增加对应的专用限制与处理逻辑。
     if any(tool.name == 'search_knowledge' for tool in tools):
         from ai_assistant.knowledge.tools import knowledge_middleware
         middleware.extend(knowledge_middleware(run_limit=settings.knowledge_call_limit))
     if context_settings is not None:
-        if max_input_tokens is None or summary_max_input_tokens is None:
-            raise ValueError('Context management requires explicit model input budgets.')
         from ai_assistant.agents.context import context_middleware
-        middleware.extend(context_middleware(model, summary_model or model,
-            max_input_tokens=max_input_tokens, summary_max_input_tokens=summary_max_input_tokens,
-            summary_profile=summary_profile, prepare=prepare,
-            summary_tokens=context_settings.summary_tokens, recent_turns=context_settings.recent_turns))
-    # 请求注入与摘要预算共享相同的组装顺序。
+        middleware.extend(context_middleware(model, max_input_tokens=max_input_tokens,
+            prepare=prepare, memory=memory, output_limit=output_limit,
+            compression_summary_ratio=context_settings.compression_summary_ratio,
+            compression_recent_turns=context_settings.compression_recent_turns))
+    # 容量压缩使用同一组装函数估算完整请求；最终检查前实际注入动态提示和记忆。
     position = len(middleware) - 1 if context_settings is not None else len(middleware)
     middleware[position:position] = preparers
     if context_settings is None and max_input_tokens is not None:
+        # 不启用摘要也可以单独执行输入预算检查，限制实际提交给模型的上下文。
         from ai_assistant.agents.context import InputBudgetMiddleware
         middleware.append(InputBudgetMiddleware(max_input_tokens))
     from ai_assistant.agents.results import ToolResultMiddleware
+    # 限制单个工具结果的模型可见正文，保留原始内容及必要回执；默认预算为 12000。
     middleware.append(ToolResultMiddleware(context_settings.tool_result_tokens if context_settings else 12000))
+    # ToolContext 承载运行时依赖；TurnState 定义图状态，交由 checkpoint 持久化。
+    # 直接复用框架的 Agent 图及工具循环，本函数不另建调度循环。
     agent = create_agent(model, tools, system_prompt=prompt,
                         context_schema=ToolContext, checkpointer=checkpointer,
                         middleware=middleware, state_schema=TurnState)
 
-    agent.context_summary = next((m for m in middleware if hasattr(m, 'periodic_update')), None)
-    agent.summary_every_turns = context_settings.summary_every_turns if context_settings else 0
+    # 暴露会话记忆入口及更新间隔供 runtime 使用；这里只保存引用，不触发摘要。
+    agent.session_memory = memory
+    agent.memory_every_turns = context_settings.memory_every_turns if context_settings else 0
     return agent

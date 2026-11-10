@@ -70,7 +70,7 @@ def recovery_values(values):
 
                         id='unconfirmed:' + call['id'], tool_call_id=call['id'], name='unconfirmed_result',
                         status='error', artifact={'execution_fact': {'control': 'stop', 'error_category': 'unknown'}}))
-    keys = ('conversation_title', 'completed_turns', 'summarized_turns',
+    keys = ('conversation_title', 'completed_turns', 'session_memory', 'memory_covered_turns', 'memory_cursor',
             'last_counted_input_id', 'active_skills')
     return {**{key: values[key] for key in keys if key in values}, 'messages': paired}
 

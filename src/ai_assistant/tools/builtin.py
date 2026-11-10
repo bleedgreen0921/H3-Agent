@@ -11,7 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from ai_assistant.tools.context import ToolContext
 from ai_assistant.tools.web import WebError
 from ai_assistant.workspace.files import WorkspaceError
-from ai_assistant.tools.terminal import TerminalError
 from ai_assistant.cancellation import _drain_worker
 
 
@@ -165,81 +164,12 @@ async def edit_file(path: str, edits: Annotated[list[TextEdit], Field(min_length
                              [edit.model_dump() for edit in edits], expected_sha256)
 
 
-@tool
-async def run_command(command: Annotated[str, Field(min_length=1, max_length=32000)],
-                      runtime: ToolRuntime[ToolContext], cwd: str = '.',
-                      timeout: Annotated[float | None, Field(gt=0, le=1800, allow_inf_nan=False)] = None) -> ToolMessage:
-    """在平台沙箱内执行一次 Bash 命令；权限由应用固定，无跨调用状态或自动重试。"""
-    if runtime.context.terminal is None:
-        raise ToolException('终端工具尚未启用。')
-    context = runtime.context
-    if not context.input_id:
-        raise ToolException('终端缺少可信输入 ID，未执行。')
-    store = context.operations or context.terminal_operations
-    terminal = context.terminal
-    try:
-        directory = str(context.workspace._path(cwd).resolve())
-        effective = float(terminal.timeout if timeout is None else timeout)
-    except (WorkspaceError, OSError) as exc:
-        raise ToolException(str(exc)) from None
-    from ai_assistant.integrations.policy import operation_principal
-    from ai_assistant.storage.sessions import SessionStorageError
-    try:
-        fresh, operation = await store.begin(context.input_id,
-            operation_principal(context.caller), 'run_command',
-            {'command': command, 'cwd': directory, 'timeout': effective})
-    except Exception:
-        raise SessionStorageError('终端操作认领失败，未派发命令。') from None
-    if not fresh:
-        stored = operation.get('result') or {}
-        if operation['status'] == 'succeeded' and stored.get('version') == 1:
-            return ToolMessage(stored['content'], artifact=stored['artifact'],
-                tool_call_id=runtime.tool_call_id, name='run_command')
-        return ToolMessage('相同命令已有待核实记录；未重新派发。', status='error',
-            artifact={'operation_id': operation['id'], 'execution_fact': {
-                'version': 1, 'nature': 'effect', 'control': 'stop', 'error_category': 'unknown'}},
-            tool_call_id=runtime.tool_call_id, name='run_command')
-    try:
-        options = {}
-        if context.skills is not None:
-            options['skills'] = context.skills.active(runtime.state.get('active_skills', {}))
-        result = await terminal.run_command(command, cwd, timeout, **options)
-    except BaseException:
-        # run_command 返回/抛出前已等待子进程清理；未知效果不能重新执行。
-        try:
-            await asyncio.shield(store.finish(operation['id'], 'unknown', {'version': 1,
-                'effect': 'unknown'}))
-        except Exception:
-            raise SessionStorageError('终端回执保存失败，实际效果待核实。') from None
-        raise
-    content = f"进程已退出；退出码：{result['exit_code']}；耗时：{result['elapsed_seconds']:.2f}s\n{result['output']}"
-    if result['timed_out']:
-        content += '\n[命令超时，清理已结束；实际效果待核实]'
-    if result['truncated_by_lines'] or result['truncated_by_bytes']:
-        content += '\n[输出已截断]'
-    artifact = {**result, 'operation_id': operation['id'], 'receipt_version': 1,
-        'process_state': 'unknown' if result['timed_out'] else 'exited',
-        'verification': 'unverified', 'execution_fact': {'version': 1, 'nature': 'effect',
-            'control': 'stop' if result['timed_out'] else 'continue',
-            'error_category': 'unknown' if result['timed_out'] else None}}
-    try:
-        await store.finish(operation['id'], 'unknown' if result['timed_out'] else 'succeeded',
-            {'version': 1, 'content': content, 'artifact': artifact, 'verification': 'unverified'})
-    except Exception:
-        raise SessionStorageError('终端已执行但回执保存失败，实际效果待核实。') from None
-    return ToolMessage(content=content, artifact=artifact, tool_call_id=runtime.tool_call_id,
-                       name='run_command', status='error' if result['timed_out'] else 'success')
-
-
-def create_builtin_tools(*, include_web: bool = False, include_write: bool = False,
-                         include_terminal: bool = False) -> list[BaseTool]:
+def create_builtin_tools(*, include_web: bool = False, include_write: bool = False) -> list[BaseTool]:
     """Return fresh native tool instances with safe expected-error handling."""
     selected = [list_directory, read_text, search_text]
     if include_web:
         selected += [web_search, web_fetch]
     if include_write:
         selected += [create_file, edit_file]
-    if include_terminal:
-        selected += [run_command]
     result = [item.model_copy(update={'handle_tool_error': True}) for item in selected]
     return result

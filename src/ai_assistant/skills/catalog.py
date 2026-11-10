@@ -134,12 +134,12 @@ class Skill:
     warnings: tuple[str, ...]
 
     @property
-    def sandbox_path(self):
+    def snapshot_path(self):
         return str(self.path)
 
     def info(self):
         return dict(id=self.id, name=self.metadata['name'], description=self.metadata['description'],
-                    digest=self.digest, base_path=self.sandbox_path, warnings=self.warnings)
+                    digest=self.digest, base_path=self.snapshot_path, warnings=self.warnings)
 
 
 class SkillCatalog:
@@ -256,7 +256,7 @@ class SkillCatalog:
             raise SkillError('Resource must be a file within the skill package.')
         if offset < 0 or not 1 <= limit <= 20000:
             raise SkillError('Invalid resource pagination.')
-        result = dict(path=skill.sandbox_path + '/' + resource, bytes=path.stat().st_size)
+        result = dict(path=skill.snapshot_path + '/' + resource, bytes=path.stat().st_size)
         binary_suffixes = {'.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.zip', '.gz', '.woff', '.woff2', '.docx', '.xlsx', '.pptx'}
         if path.suffix.lower() in binary_suffixes:
             return dict(result, binary=True)
@@ -281,44 +281,3 @@ class SkillCatalog:
                 result['binary'] = True
         return result
 
-
-class RestrictedSkillCatalog(SkillCatalog):
-    """共享不可变包快照，只暴露当前群明确授权的项目。"""
-
-    def __init__(self, source, identities):
-        self._source = source
-        self.skills = {}
-        self.diagnostics = []
-        for identity in identities:
-            if identity not in source.skills:
-                raise SkillError('群聊授权的 Skill ID 不存在，请检查配置。')
-            self.skills[identity] = source.skills[identity]
-
-    def prepare(self, identity):
-        # 必须先在受限目录解析，旧激活不能触发未授权包的准备。
-        return self._source.prepare(self.resolve(identity).id)
-
-    def close(self):
-        # 包生命周期由进程级原始目录管理。
-        pass
-
-
-def skills_for_caller(config, source, caller):
-    if caller.personal:
-        return source
-    identities = caller.skill_ids
-    if not identities:
-        return None
-    if source is None:
-        raise SkillError('群聊已授权 Skills，但未配置本地 Skills。')
-    return RestrictedSkillCatalog(source, identities)
-
-
-def validate_group_skills(config, source):
-    from ai_assistant.config import ConfigError
-    lists = [config.channels.feishu.default_group_skill_ids]
-    lists += [g.skill_ids for g in config.channels.feishu.groups.values() if g.skill_ids is not None]
-    for identities in lists:
-        for identity in identities:
-            if source is None or identity not in source.skills:
-                raise ConfigError('群聊授权的 Skill ID 不存在，请检查 default_group_skill_ids / skill_ids。')

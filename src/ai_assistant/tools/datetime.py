@@ -31,8 +31,6 @@ def convert_datetime(value: str, timezone: str = 'Asia/Shanghai') -> dict:
 @tool
 async def resolve_datetime(value: str, runtime: ToolRuntime[ToolContext], timezone: str | None = None) -> dict:
     """Convert an explicit ISO datetime (or all-day YYYY-MM-DD) to milliseconds. Clarify unclear dates first."""
-    if runtime.context.caller and runtime.context.caller.scope == 'shared' and timezone is None:
-        raise ToolException('群聊不继承主人默认时区；请先明确 IANA 时区。')
     result = convert_datetime(value, timezone or runtime.context.timezone)
     runtime.context.resolved_datetimes.add((result['timestamp'], result['is_all_day']))
     return result
