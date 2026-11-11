@@ -1,9 +1,7 @@
-"""消息投递的持久化限额和脱敏错误分类，不推测远端写入结果。"""
+"""通用投递重试与截止策略；渠道错误分类由 channel classifier 提供。"""
 import time
 
 import httpx
-
-from ai_assistant.integrations.feishu_files import FeishuRejected
 
 
 def metadata(settings):
@@ -14,10 +12,11 @@ def metadata(settings):
             'last_error': None}
 
 
-def classify(error):
-    if isinstance(error, FeishuRejected):
-        return ('temporary' if error.code == 99991400 else 'rejected' if error.code in {230001, 230006} else 'unknown',
-                {'category': 'feishu', 'code': error.code, 'status': error.http_status})
+def classify(error, classifier=None):
+    if classifier is not None:
+        result = classifier(error)
+        if result is not None:
+            return result
     if isinstance(error, httpx.HTTPStatusError):
         status = error.response.status_code
         return ('temporary' if status == 429 else 'rejected' if 400 <= status < 500 else 'unknown',

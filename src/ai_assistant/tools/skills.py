@@ -11,9 +11,9 @@ from ai_assistant.skills.catalog import SkillError
 
 
 def catalog(runtime):
-    if runtime.context.skills is None:
+    if runtime.context.services.get('skills') is None:
         raise ToolException('Skills are not configured.')
-    return runtime.context.skills
+    return runtime.context.services.get('skills')
 
 
 def selected(runtime, identity):

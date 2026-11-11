@@ -12,9 +12,9 @@ async def get_current_identity(runtime: ToolRuntime[ToolContext]) -> dict:
     context = runtime.context
     caller = context.caller
     if (caller is None or caller.channel != 'feishu_private' or caller.scope != 'private'
-            or not caller.owner or not context.owner_open_id):
+            or not caller.owner or not context.services['feishu'].owner_open_id):
         raise ToolException('当前入口没有主人私聊身份权限。')
-    return {'open_id': context.owner_open_id, 'timezone': context.timezone,
+    return {'open_id': context.services['feishu'].owner_open_id, 'timezone': context.timezone,
             'current_time': datetime.now(ZoneInfo(context.timezone)).isoformat()}
 
 

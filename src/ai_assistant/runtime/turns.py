@@ -104,9 +104,9 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
                            execution=None, diagnostics=[], project_rules_snapshot=project_rules)
         if skill_ids:
             from ai_assistant.skills.catalog import SkillError
-            if session.context.skills is None:
+            if session.context.services.get('skills') is None:
                 raise SkillError('Skills are not configured.')
-            chosen = [session.context.skills.prepare(identity) for identity in skill_ids]
+            chosen = [session.context.services.get('skills').prepare(identity) for identity in skill_ids]
             graph_input['active_skills'] = {s.id: s.digest for s in chosen}
             activated_skills.update(s.id for s in chosen)
         result = None
@@ -141,11 +141,11 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
                         metadata = event.get('metadata', {})
                         if metadata.get('langgraph_node') == 'model' and metadata.get('lc_source') != 'summarization':
                             await emit_aux({'event': 'on_model_start'})
-                    if event['event'] == 'on_tool_end'  and event.get('name') == 'load_skill' and session.context.skills:
+                    if event['event'] == 'on_tool_end'  and event.get('name') == 'load_skill' and session.context.services.get('skills'):
                         from langgraph.types import Command
                         output = event.get('data', {}).get('output')
                         if isinstance(output, Command) and isinstance(output.update, dict):
-                            activated_skills.update(s.id for s in session.context.skills.active(output.update.get('active_skills', {})))
+                            activated_skills.update(s.id for s in session.context.services.get('skills').active(output.update.get('active_skills', {})))
                     if event['event'] in {'on_tool_start', 'on_tool_end', 'on_tool_error'}:
                         await emit_aux(event)
                     if event['event'] == 'on_chain_end' and event['run_id'] == root_id:
@@ -190,7 +190,7 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
         session._failed = False
         session._maintenance = (input_id, turn_context, config, observer)
         return AgentTurn(result['messages'], observer.sources, observer.usage,
-            sorted(activated_skills | {s.id for s in session.context.skills.active(result.get('active_skills', {}))}) if session.context.skills else [],
+            sorted(activated_skills | {s.id for s in session.context.services.get('skills').active(result.get('active_skills', {}))}) if session.context.services.get('skills') else [],
             input_id, operations, unified)
     except BaseException as error:
         if isinstance(error, SessionStorageError):

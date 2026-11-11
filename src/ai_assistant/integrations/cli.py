@@ -56,7 +56,7 @@ async def execute(config, args):
     if args.action == 'operations':
         from ai_assistant.storage.integrations import operation_storage
         async with operation_storage(config.sessions) as store:
-            result = {'tools': [_safe_operation(row) for row in await store.list()], 'channel_replies': await store.replies(), 'management_commands': await store.commands()} if args.operation_action == 'list' else await store.inspect(args.operation_id)
+            result = {'tools': [_safe_operation(row) for row in await store.operations.list()], 'channel_replies': await store.diagnostics.replies(), 'management_commands': await store.diagnostics.commands()} if args.operation_action == 'list' else await store.diagnostics.inspect(args.operation_id)
         if isinstance(result, dict) and result.get('kind') == 'tool_operation':
             result = _safe_operation(result)
         if config.knowledge is not None:

@@ -94,10 +94,10 @@ def prepare_task(context, entry, arguments):
     expected = expected_data(name, arguments)
     if name == 'task_v2_task_create' and 'members' not in expected:
         caller = context.caller
-        if caller and caller.owner and caller.scope == 'private' and caller.channel == 'feishu_private' and context.default_task_assignee == 'owner':
-            if not context.owner_open_id:
+        if caller and caller.owner and caller.scope == 'private' and caller.channel == 'feishu_private' and context.services['feishu'].default_task_assignee == 'owner':
+            if not context.services['feishu'].owner_open_id:
                 raise ToolException('未配置可信主人身份，无法设置默认负责人。')
-            expected['members'] = [{'id': context.owner_open_id, 'type': 'user', 'role': 'assignee'}]
+            expected['members'] = [{'id': context.services['feishu'].owner_open_id, 'type': 'user', 'role': 'assignee'}]
             arguments.setdefault('params', {})['user_id_type'] = 'open_id'
     if name == 'task_v2_task_patch' and ('members' in arguments.get('data', {}).get('task', {}) or 'members' in arguments.get('data', {}).get('update_fields', [])):
         raise ToolException('负责人修改必须使用 task_v2_task_addMembers，不能放入 patch。')

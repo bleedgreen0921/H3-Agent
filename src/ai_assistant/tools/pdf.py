@@ -105,9 +105,9 @@ async def read_document_attachment(message_id: str, file_key: str, file_name: st
     """读取飞书 PDF、DOCX、Markdown 附件正文及位置，每次最多 16000 字符，用 next_cursor 续读。仅主人私聊；不入库，不授权写入。cursor 省略或留空表示从头读取，续读时传上一次的 next_cursor。"""
     caller = runtime.context.caller
     if (caller is None or not caller.owner or caller.scope != 'private'
-            or caller.channel != 'feishu_private' or runtime.context.pdf is None):
+            or caller.channel != 'feishu_private' or runtime.context.services.get('pdf') is None):
         raise ToolException('附件阅读仅对已启用的主人飞书私聊开放。')
-    return await runtime.context.pdf.read_document(message_id, file_key, file_name, cursor)
+    return await runtime.context.services.get('pdf').read_document(message_id, file_key, file_name, cursor)
 
 
 read_document_attachment = read_document_attachment.model_copy(update={"handle_tool_error": True})

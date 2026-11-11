@@ -67,13 +67,15 @@ class SkillsComponent(Component):
         return config.skills is not None
 
     def contribute(self, ctx):
-        if ctx.config.skills is None or ctx.context.skills is None:
+        catalog = ctx.services.get('skills') or ctx.context.services.get('skills')
+        if ctx.config.skills is None or catalog is None:
             return Contribution()
         from ai_assistant.agents.skills import SkillsMiddleware
         from ai_assistant.tools.skills import create_skill_tools
         return Contribution(tools=create_skill_tools(),
             prompt_sections=[skills_section()],
-            middleware=[SkillsMiddleware(ctx.max_input_tokens)])
+            middleware=[SkillsMiddleware(ctx.max_input_tokens)],
+            services={'skills': catalog})
 
 
 class MCPComponent(Component):
@@ -88,13 +90,13 @@ class MCPComponent(Component):
         if directory is None:
             directory = await ctx.stack.enter_async_context(
                 mcp_resources(ctx.config, ctx.context.workspace, caller=ctx.caller))
-        ctx.update_context(mcp=directory.for_caller(ctx.caller))
+        ctx.services['mcp'] = directory.for_caller(ctx.caller)
 
     def contribute(self, ctx):
         from ai_assistant.agents.mcp import MCPMiddleware
-        catalog = getattr(ctx.context, 'mcp', None)
+        catalog = ctx.services.get('mcp')
         return Contribution(tools=[entry.tool for entry in catalog.entries.values()] if catalog else [],
-                            middleware=[MCPMiddleware()])
+                            middleware=[MCPMiddleware()], services={'mcp': catalog} if catalog else {})
 
 
 class KnowledgeComponent(Component):
@@ -104,14 +106,16 @@ class KnowledgeComponent(Component):
         return config.knowledge is not None or retriever is not None
 
     async def open(self, ctx):
-        ctx.update_context(knowledge_config=ctx.config)
+        from ai_assistant.tools.context import KnowledgeService
+        current = ctx.context.services.get('knowledge')
+        ctx.services['knowledge'] = KnowledgeService(ctx.config, current.retriever if current else None)
 
     def contribute(self, ctx):
         from ai_assistant.knowledge.tools import knowledge_middleware, knowledge_tools
         return Contribution(tools=knowledge_tools(include_management=ctx.config.knowledge is not None),
             prompt_sections=[knowledge_section()],
             middleware=knowledge_middleware(run_limit=ctx.config.agent.knowledge_call_limit),
-            services={'knowledge': ctx.context.knowledge_config})
+            services={'knowledge': ctx.services.get('knowledge')})
 
 
 class MailComponent(Component):
@@ -134,7 +138,6 @@ class MailComponent(Component):
         mail = MailService(ctx.config.mail, ctx.config.agent.timezone)
         ctx.stack.push_async_callback(mail.aclose)
         ctx.services['mail'] = mail
-        ctx.update_context(mail=mail)
 
     def contribute(self, ctx):
         from ai_assistant.tools.mail import email_tools
@@ -159,14 +162,14 @@ class PDFComponent(Component):
                              ctx.config.tools.pdf.timeout)
         ctx.stack.callback(pdf.close)
         ctx.services['pdf'] = pdf
-        ctx.update_context(pdf=pdf)
 
     def contribute(self, ctx):
-        if ctx.context.pdf is None:
+        pdf = ctx.services.get('pdf')
+        if pdf is None:
             return Contribution()
         from ai_assistant.tools.pdf import read_document_attachment
         return Contribution(tools=[read_document_attachment],
-            prompt_sections=[attachment_section()], services={'pdf': ctx.context.pdf})
+            prompt_sections=[attachment_section()], services={'pdf': pdf})
 
 
 class FeishuIdentityComponent(Component):

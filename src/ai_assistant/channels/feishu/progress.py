@@ -345,3 +345,19 @@ async def mark_delivery_failed(api, card_id, input_id):
     except Exception as error:
         event('progress.failed', input_id=input_id, status='delivery_failed_card',
               category=type(error).__name__)
+
+
+class FeishuProgressSink:
+    """把飞书卡片包装成通用 ProgressSink；业务仍走 outbox。"""
+
+    def __init__(self, card):
+        self.card = card
+
+    def start(self):
+        self.card.start()
+
+    def event(self, item):
+        self.card.on_event(item)
+
+    async def finish(self, state, *, recall=False, phase=None):
+        await self.card.finish(state, recall=recall, phase=phase)

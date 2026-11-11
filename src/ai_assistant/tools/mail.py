@@ -161,11 +161,11 @@ class MailService:
         data = deepcopy(task_data)
         if not isinstance(data.get('summary'), str) or not data['summary'].strip():
             raise ToolException('任务需要明确的 summary。')
-        if not context.owner_open_id:
+        if not context.services['feishu'].owner_open_id:
             raise ToolException('缺少可信主人身份。')
         if any(key in data for key in ('extra', 'client_token', 'reminders', 'repeat_rule')):
             raise ToolException('邮件任务不接受自定义来源标记、提醒或重复规则。')
-        data['members'] = [{'id': context.owner_open_id, 'type': 'user', 'role': 'assignee'}]
+        data['members'] = [{'id': context.services['feishu'].owner_open_id, 'type': 'user', 'role': 'assignee'}]
         token = 'email-task:' + str(uuid4())
         data['extra'] = token
         self.bindings[token] = (ref, deepcopy(data))
@@ -185,9 +185,9 @@ class MailService:
 
 def service(runtime):
     context = runtime.context
-    if not allowed(context.caller) or context.mail is None:
+    if not allowed(context.caller) or context.services.get('mail') is None:
         raise ToolException('邮箱工具仅供可信主人飞书私聊使用。')
-    return context.mail
+    return context.services.get('mail')
 
 
 @tool

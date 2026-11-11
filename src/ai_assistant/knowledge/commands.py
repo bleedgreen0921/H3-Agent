@@ -1,8 +1,9 @@
-"""飞书私人知识库指令，不创建会话或调用模型。"""
+"""知识库命令的业务 handler；解析和渲染仍对外兼容。"""
 import asyncio
 from zoneinfo import ZoneInfo
 
 from ai_assistant.knowledge import KnowledgeError
+from ai_assistant.storage.commands import CommandRepository
 
 USAGE = '/rag documents [页码] | sources [页码] | status <任务ID> | sync [来源ID] | add <飞书文档链接> | remove <文档ID>'
 
@@ -64,14 +65,14 @@ async def handle(worker, row, caller, value, *, recover=False):
 
     action, target = value
     async with operation_storage(worker.config.sessions) as channel:
-        stored = await (await channel.conn.execute('SELECT result FROM assistant_chat_commands WHERE input_id=%s', (row['id'],))).fetchone()
+        commands = CommandRepository(channel.conn)
+        stored = await commands.get(row['id'])
         if stored and stored['result']:
             async with channel.conn.transaction():
                 await reply(channel.conn, row, stored['result'], worker.config.channels.feishu)
             return
-        await channel.conn.execute('''INSERT INTO assistant_chat_commands(input_id,binding,action,target)
-            VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING''',
-            (row['id'], row['binding'], '/rag ' + action, str(target) if target is not None else None))
+        await commands.begin(row['id'], row['binding'], '/rag ' + action,
+                            str(target) if target is not None else None)
         if caller.channel != 'feishu_private' or not caller.owner:
             message = '群聊不支持私人知识库管理。请使用主人私聊。'
         elif worker.config.knowledge is None:
@@ -135,7 +136,6 @@ async def handle(worker, row, caller, value, *, recover=False):
                 await store.close()
         # 渠道与知识库不共享事务。崩溃恢复只查询业务回执并补交回复。
         async with channel.conn.transaction():
-            await channel.conn.execute('''INSERT INTO assistant_chat_commands(input_id,binding,action,target,result)
-                VALUES(%s,%s,%s,%s,%s) ON CONFLICT(input_id) DO UPDATE SET result=EXCLUDED.result''',
-                (row['id'], row['binding'], '/rag ' + action, str(target) if target is not None else None, message))
+            await commands.upsert_result(row['id'], row['binding'], '/rag ' + action,
+                str(target) if target is not None else None, message)
             await reply(channel.conn, row, message, worker.config.channels.feishu)

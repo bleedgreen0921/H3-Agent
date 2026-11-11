@@ -113,7 +113,7 @@ def _main(argv: list[str] | None = None) -> int:
             from ai_assistant.interfaces.initialization import execute
             return asyncio.run(execute(config))
         if args.command == "feishu":
-            from ai_assistant.interfaces.feishu import serve
+            from ai_assistant.channels.feishu.receiver import serve
             try:
                 asyncio.run(serve(config))
                 return 0

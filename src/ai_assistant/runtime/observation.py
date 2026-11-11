@@ -53,7 +53,7 @@ class TurnObserver(AsyncCallbackHandler):
             return
         try:
             options = {}
-            if getattr(self.store, "linked", False):
+            if getattr(self.store, "capabilities", None) and self.store.capabilities.linked:
                 options = dict(input_id=self.input_id, execution_thread_id=self.execution_thread_id,
                                parent_run_id=self._model_parents.get(args[0]))
             await self.store.record(*args, **options)

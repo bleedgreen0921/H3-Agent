@@ -61,10 +61,13 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         saver = repository.saver if repository else InMemorySaver()
         context = await stack.enter_async_context(tool_context(config, retriever=retriever,
             skill_snapshot=getattr(resources, "skills", None) if caller.personal else None))
-        context = replace(context, usage_store=usage_store, services={},
+        from ai_assistant.tools.context import FeishuService
+        feishu = (FeishuService(config.integrations.feishu.owner_open_id,
+                                config.integrations.feishu.default_task_assignee)
+                  if caller.personal and config.integrations.feishu else FeishuService())
+        context = replace(context, usage_store=usage_store,
+                          services={**context.services, 'feishu': feishu},
                           timezone=config.agent.timezone if caller.personal else 'UTC',
-                          owner_open_id=config.integrations.feishu.owner_open_id if caller.personal and config.integrations.feishu else None,
-                          default_task_assignee=config.integrations.feishu.default_task_assignee if caller.personal and config.integrations.feishu else 'none',
                           caller=caller,
                           skills_directory_tokens=config.skills.directory_tokens if config.skills else 6000)
         from ai_assistant.storage.integrations import operation_storage
@@ -96,14 +99,15 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         from ai_assistant.capabilities.registry import CapabilityRegistry
         base = config.config_path.parent if config.config_path else Path.cwd()
         log_path = resolve_log_path(config.tools.selection.log_path, base)
-        skill_ids = tuple(sorted(getattr(context.skills, 'skills', {}) or {}))
+        skills = context.services.get('skills')
+        skill_ids = tuple(sorted(getattr(skills, 'skills', {}) or {}))
         key = (caller.binding, tuple(tool.name for tool in tools), skill_ids,
                repr(config.tools.selection), str(log_path))
         cache = getattr(resources, 'capability_cache', None) if resources is not None else None
         registry = cache.get(key) if cache is not None else None
         if registry is None:
             registry = CapabilityRegistry.from_sources(
-                tools, mcp=context.mcp, skills=context.skills,
+                tools, mcp=context.services.get('mcp'), skills=skills,
                 settings=config.tools.selection, log_path=log_path)
             if cache is not None:
                 cache[key] = registry

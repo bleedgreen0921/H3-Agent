@@ -24,7 +24,7 @@ def knowledge_call(function):
 
 
 def require_config(runtime):
-    c = runtime.context.knowledge_config
+    c = runtime.context.service('knowledge').config
     if c is None or (
         runtime.context.caller and not runtime.context.caller.personal
     ):
@@ -44,8 +44,8 @@ async def search_knowledge(
     context = runtime.context
     if context.caller and not context.caller.personal:
         raise ToolException("当前入口未启用私人知识库。")
-    config = context.knowledge_config
-    retriever = context.retriever
+    config = context.service('knowledge').config
+    retriever = context.service('knowledge').retriever
     if retriever is None:
         config = require_config(runtime)
         from ai_assistant.knowledge.sync import settings

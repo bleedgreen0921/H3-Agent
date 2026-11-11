@@ -1,5 +1,4 @@
 """Trusted tool dependencies and explicit asynchronous resource ownership."""
-
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -15,34 +14,48 @@ from ai_assistant.tools.web import DeepSeekWeb
 from ai_assistant.workspace.writes import WritableWorkspace
 
 
+class ToolContextError(RuntimeError):
+    """工具请求了未配置的运行时服务。"""
+
+
+@dataclass(frozen=True)
+class KnowledgeService:
+    config: AppConfig | None = None
+    retriever: BaseRetriever | None = None
+
+
+@dataclass(frozen=True)
+class FeishuService:
+    owner_open_id: str | None = None
+    default_task_assignee: str = 'none'
+
+
 @dataclass(frozen=True)
 class ToolContext:
     workspace: ReadOnlyWorkspace
     effect_facts: list = field(default_factory=list, kw_only=True, repr=False, compare=False)
     inflight_tools: set = field(default_factory=set, kw_only=True, repr=False, compare=False)
     executed_tool_calls: set = field(default_factory=set, kw_only=True, repr=False, compare=False)
-    mail: object | None = field(default=None, kw_only=True)
-    pdf: object | None = field(default=None, kw_only=True)
     web: DeepSeekWeb | None = None
     writes: WritableWorkspace | None = None
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
-    retriever: BaseRetriever | None = None
-    skills: object | None = None
-    mcp: object | None = None
     caller: object | None = None
     operations: object | None = None
     project_rules: str = ''
     input_id: str | None = None
     session_id: str | None = None
-    knowledge_config: object | None = None
     skills_directory_tokens: int = 6000
     timezone: str = 'Asia/Shanghai'
-    owner_open_id: str | None = None
-    default_task_assignee: str = 'none'
     resolved_datetimes: set[tuple[str, bool]] = field(default_factory=set, compare=False)
     usage_store: object | None = None
     capabilities: object | None = None
     services: dict = field(default_factory=dict, kw_only=True, compare=False)
+
+    def service(self, name):
+        try:
+            return self.services[name]
+        except KeyError:
+            raise ToolContextError(f'Tool service not configured: {name}') from None
 
 
 @asynccontextmanager
@@ -69,7 +82,11 @@ async def tool_context(config: AppConfig, *, retriever: BaseRetriever | None = N
             client = await stack.enter_async_context(httpx.AsyncClient(follow_redirects=False, trust_env=False))
             web = DeepSeekWeb(client, profile.api_key.get_secret_value(), settings.timeout,
                               search_chars=settings.search_chars, fetch_chars=settings.fetch_chars)
+        services = {'knowledge': KnowledgeService(config, retriever)}
+        if skills is not None:
+            services['skills'] = skills
         yield ToolContext(workspace=workspace, web=web,
                           writes=WritableWorkspace(workspace) if config.tools.files.enabled else None,
-                          operation_lock=lock, retriever=retriever, skills=skills,
-                          skills_directory_tokens=config.skills.directory_tokens if config.skills else 6000)
+                          operation_lock=lock,
+                          skills_directory_tokens=config.skills.directory_tokens if config.skills else 6000,
+                          services=services)

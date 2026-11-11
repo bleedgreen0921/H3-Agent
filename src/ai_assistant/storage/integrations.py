@@ -1,6 +1,4 @@
 """Durable external effects, separate from checkpoint transactions."""
-from ai_assistant.observability import observed, event
-
 import hashlib
 import json
 from contextlib import asynccontextmanager
@@ -42,6 +40,15 @@ CREATE TABLE IF NOT EXISTS assistant_outbox (
 class OperationStore:
     def __init__(self, conn):
         self.conn = conn
+        from ai_assistant.storage.commands import CommandRepository
+        from ai_assistant.storage.diagnostics import DiagnosticsRepository
+        from ai_assistant.storage.operations import OperationRepository
+        from ai_assistant.storage.queues import InboxRepository, OutboxRepository
+        self.operations = OperationRepository(conn)
+        self.inbox = InboxRepository(conn)
+        self.outbox = OutboxRepository(conn)
+        self.command_records = CommandRepository(conn)
+        self.diagnostics = DiagnosticsRepository(conn)
 
     async def initialize(self):
         async with self.conn.transaction():
@@ -51,78 +58,6 @@ class OperationStore:
                 await self.conn.execute('SELECT next_attempt_at,part FROM assistant_outbox LIMIT 0')
             await self.conn.execute(DDL)
 
-    @observed("operation.claim",
-        lambda self, input_id, principal, tool, arguments, source_key=None: {"input_id": input_id, "tool": tool})
-    async def begin(self, input_id, principal, tool, arguments, source_key=None):
-        digest = hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False,
-                                          separators=(',', ':'), allow_nan=False).encode()).hexdigest()
-        ident = str(uuid4())
-        query = '''INSERT INTO assistant_operations
-            (id,input_id,principal,tool,args_digest,source_key,status) VALUES(%s,%s,%s,%s,%s,%s,'pending')
-            ON CONFLICT DO NOTHING RETURNING *'''
-        parameters = (ident, input_id, principal, tool, digest, source_key)
-        row = await (await self.conn.execute(query, parameters)).fetchone()
-        if row:
-            event("operation.claimed", operation_id=row["id"], input_id=input_id, tool=tool, status=row["status"])
-            return True, row
-        if source_key:
-            existing = await self.by_source(source_key)
-            if existing:
-                return False, existing
-        row = await (await self.conn.execute('''SELECT * FROM assistant_operations
-            WHERE input_id=%s AND principal=%s AND tool=%s AND args_digest=%s''',
-            (input_id, principal, tool, digest))).fetchone()
-        return False, row
-
-    async def by_source(self, source_key):
-        return await (await self.conn.execute(
-            'SELECT * FROM assistant_operations WHERE source_key=%s', (source_key,))).fetchone()
-
-    @observed("operation.finish",
-        lambda self, ident, status, result=None: {"operation_id": ident, "status": status})
-    async def finish(self, ident, status, result=None):
-        from psycopg.types.json import Jsonb
-        # pending 可转任意终态；已终态仅允许同状态补充回执（jsonb 顶层合并，原键保留）。
-        # 跨终态改判（含迟到 unknown/failed 降级 succeeded）条件不满足、0 行更新、静默忽略。
-        payload = Jsonb(result) if result is not None else None
-        await self.conn.execute('''UPDATE assistant_operations SET status=%s,
-            result=COALESCE(result || %s, %s, result), updated_at=now()
-            WHERE id=%s AND (status='pending' OR status=%s)''',
-            (status, payload, payload, ident, status))
-
-    async def list(self, input_id=None):
-        if input_id:
-            cursor = await self.conn.execute('SELECT * FROM assistant_operations WHERE input_id=%s ORDER BY created_at', (input_id,))
-        else:
-            cursor = await self.conn.execute('SELECT * FROM assistant_operations ORDER BY created_at DESC LIMIT 100')
-        return await cursor.fetchall()
-
-    async def replies(self):
-        return await (await self.conn.execute('''SELECT id,input_id,status,remote_id,part,created_at,
-            body->'delivery' AS delivery,
-            (body->'delivery'->>'version'='1') IS NOT TRUE AS unsupported_format,'channel_reply' AS kind
-            FROM assistant_outbox ORDER BY created_at DESC LIMIT 100''')).fetchall()
-
-    async def commands(self, ident=None):
-        return await (await self.conn.execute("""SELECT input_id,binding,action,target,
-            CASE WHEN result IS NULL THEN 'incomplete' ELSE 'completed' END AS status,
-            created_at,result AS receipt,'management_command' AS kind FROM assistant_chat_commands
-            WHERE (%s::text IS NULL OR input_id=%s) ORDER BY created_at DESC LIMIT 100""",
-            (ident, ident))).fetchall()
-
-    async def inspect(self, ident):
-        row = await (await self.conn.execute("""SELECT id,input_id,tool,principal,status,
-            created_at,updated_at,result->>'version' AS receipt_version,
-            COALESCE(result->>'verification','unverified') AS verification,
-            (COALESCE(result->>'verification','unverified')!='passed') AS needs_verification,
-            'tool_operation' AS kind FROM assistant_operations WHERE id=%s""", (ident,))).fetchone()
-        if row is not None:
-            return row
-        row = await (await self.conn.execute("""SELECT id,input_id,status,remote_id,part,created_at,
-            body->'delivery' AS delivery,
-            (body->'delivery'->>'version'='1') IS NOT TRUE AS unsupported_format,
-            'channel_reply' AS kind FROM assistant_outbox WHERE id=%s""", (ident,))).fetchone()
-        return row if row is not None else await self.commands(ident)
 
 
 @asynccontextmanager
@@ -148,6 +83,10 @@ class MemoryOperationStore:
 
     def __init__(self):
         self.rows = {}
+
+    @property
+    def operations(self):
+        return self
 
     async def begin(self, input_id, principal, tool, arguments, source_key=None):
         digest = hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False,

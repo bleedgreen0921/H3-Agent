@@ -10,7 +10,7 @@ class SkillsMiddleware(AgentMiddleware):
         self.directory_budget = usable_budget(max_input_tokens) // 10 if max_input_tokens else None
 
     def prepare(self, request):
-        catalog = request.runtime.context.skills
+        catalog = request.runtime.context.services.get('skills')
         if catalog is None:
             return request
         context = request.runtime.context

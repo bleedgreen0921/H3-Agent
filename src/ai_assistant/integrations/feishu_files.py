@@ -54,7 +54,7 @@ class FeishuAPI:
         return data.get('data', data)
 
     async def send_message(self, chat_id, message, operation_id):
-        from ai_assistant.interfaces.feishu_message import request_body, validate_message
+        from ai_assistant.channels.feishu.message import request_body, validate_message
         validate_message(message)
         return await self.request('POST', '/im/v1/messages', params={'receive_id_type': 'chat_id'},
                                   json=request_body(chat_id, message, operation_id))

@@ -1,5 +1,6 @@
 """服务已报告的调用用量；独立连接避免随业务 checkpoint 回退。"""
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 DDL = '''CREATE TABLE IF NOT EXISTS assistant_model_usage (
     call_id uuid PRIMARY KEY,
@@ -12,12 +13,21 @@ DDL = '''CREATE TABLE IF NOT EXISTS assistant_model_usage (
 )'''
 
 
+@dataclass(frozen=True)
+class UsageCapabilities:
+    linked: bool = False
+
+
 class UsageStore:
-    def __init__(self, conn):
+    def __init__(self, conn, capabilities=None):
         self.conn = conn
         self.disabled = False
-        # 连接前已校验关联列；新记录必须带 input_id / execution_thread_id / parent_run_id。
-        self.linked = True
+        # 连接前已校验关联列；新记录必须带关联字段。
+        self.capabilities = capabilities or UsageCapabilities(linked=True)
+
+    @property
+    def supports_links(self):
+        return self.capabilities.linked
 
     async def record(self, call_id, session_id, profile, role, started_at, status, usage, *, input_id=None, execution_thread_id=None, parent_run_id=None):
         if self.disabled or not usage:

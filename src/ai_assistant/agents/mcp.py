@@ -11,8 +11,8 @@ from ai_assistant.capabilities.policy import CapabilityPolicy
 
 class MCPMiddleware(AgentMiddleware):
     def prepare(self, request):
-        entries = list(request.runtime.context.mcp.entries.values())
-        unavailable = request.runtime.context.mcp.unavailable
+        entries = list(request.runtime.context.services['mcp'].entries.values())
+        unavailable = request.runtime.context.services['mcp'].unavailable
         services = ', '.join(sorted({f'{entry.server} ({entry.settings.identity})' for entry in entries}
             | {f"{name} ({status['settings'].identity})" for name, status in unavailable.items()}))
         original = request.system_message
@@ -37,7 +37,7 @@ class MCPMiddleware(AgentMiddleware):
 
     async def execute_tool(self, request, handler):
         context = request.runtime.context
-        entry = context.mcp.entries.get(request.tool_call['name'])
+        entry = context.services['mcp'].entries.get(request.tool_call['name'])
         if entry is None:
             return await handler(request)
         adapter = service_adapter(entry)
@@ -70,7 +70,7 @@ class MCPMiddleware(AgentMiddleware):
                     arguments.setdefault(path[0], {})[path[1]] = operation['id']
             request = request.override(tool_call={**request.tool_call, 'args': arguments})
             try:
-                async with asyncio.timeout(context.mcp.timeout):
+                async with asyncio.timeout(context.services['mcp'].timeout):
                     result = await handler(request)
             except BaseException:
                 if operation:

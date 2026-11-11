@@ -15,8 +15,9 @@ from ai_assistant.storage.integrations import operation_storage
 from ai_assistant.tools.context import tool_context
 
 from ai_assistant.observability import event, span, ObservabilityConfig
-from ai_assistant.interfaces.feishu_progress import ProgressCard, close_stale_card
+from ai_assistant.channels.feishu.progress import ProgressCard, close_stale_card
 from ai_assistant.interfaces.commands import CommandContext, CommandRegistry
+from ai_assistant.channels.feishu.commands import default_registry
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +66,19 @@ def caller_for(config, row):
 class BotWorker:
     def __init__(self, config, store, resources, api=None):
         self.config, self.store, self.resources, self.api = config, store, resources, api
-        self.commands = getattr(resources, 'commands', None) or CommandRegistry()
+        self.commands = getattr(resources, 'commands', None) or default_registry()
+        if store is not None and getattr(store, 'conn', None) is not None:
+            from ai_assistant.storage.queues import InboxRepository, OutboxRepository
+            self.inbox = getattr(store, 'inbox', None) or InboxRepository(store.conn)
+            self.outbox = getattr(store, 'outbox', None) or OutboxRepository(store.conn)
+        else:
+            self.inbox = self.outbox = None
         self.active = None
         self.active_row = None
 
     async def enqueue_reply(self, row, text, *, conn=None, purpose='answer', snapshot=None,
                             progress_card_id=None):
-        from ai_assistant.interfaces.outbox import enqueue_text
+        from ai_assistant.channels.feishu.outbox import enqueue_text
 
         async def enqueue(connection):
             async with connection.transaction():
@@ -86,9 +93,7 @@ class BotWorker:
     async def _remember_progress_card(self, input_id, card_id):
         """卡片 ID 随输入持久化，服务重启后才能关闭陈旧工作卡。"""
         async with operation_storage(self.config.sessions) as store:
-            await store.conn.execute(
-                "UPDATE assistant_inbox SET body=jsonb_set(body,'{progress_card_id}',to_jsonb(%s::text)) "
-                "WHERE id=%s AND body IS NOT NULL", (card_id, input_id))
+            await store.inbox.set_progress_card(input_id, card_id)
 
     async def _finish_progress(self, progress, state, *, recall, phase=None):
         """辅助卡片的终态清理；取消期间也等待网络调用超时结束。"""
@@ -111,15 +116,14 @@ class BotWorker:
         from ai_assistant.runtime.presentation import project
         from ai_assistant.storage.sessions import session_storage
 
-        saved = await (await self.store.conn.execute(
-            'SELECT * FROM assistant_outbox WHERE input_id=%s ORDER BY part', (row['id'],))).fetchall()
+        saved = await self.outbox.parts(row['id'])
         # 旧记录仅供诊断，升级不能自动补发。
         if any((item.get('body') or {}).get('delivery', {}).get('version') != 1 for item in saved):
             logger.warning('不支持的投递格式：input_id=%s；未恢复或发送。', row['id'])
             return
         # 当前已登记批次复用，不重切或重发；未知格式已在上方拒绝。
         if saved:
-            await self.store.conn.execute("UPDATE assistant_inbox SET status='completed' WHERE id=%s", (row['id'],))
+            await self.inbox.mark_completed(row['id'])
             return
         async with session_storage(self.config.sessions) as repo:
             session = await (await repo.execute(
@@ -175,49 +179,36 @@ class BotWorker:
         if row.get("received_at"):
             event("request.dequeued", queue_wait_seconds=max(0, (datetime.now(timezone.utc) - row["received_at"]).total_seconds()))
         caller = caller_for(self.config, row)
-        from ai_assistant.interfaces.chat_commands import parse_command, handle
-        from ai_assistant.skills.catalog import SkillError
         text = row['body']['text'].strip()
-        parsed = parse_command(text)
-        command = self.commands.get(parsed[0]) if parsed and parsed[0] != 'error' else None
-        if command is not None and not command.legacy:
-            result = await command.handler(CommandContext(
-                worker=self, row=row, caller=caller, text=text,
-                parsed=parsed[1], recover=recover))
-            if result.reply:
-                await self.enqueue_reply(row, result.reply)
+        command, value = self.commands.parse(text)
+        if command is None and value and value[0] == 'error':
+            await self.enqueue_reply(row, value[1])
             return None
-        # 延迟工作卡只服务真实等待；恢复流程、即时指令和关闭状态不建卡。
+        result = None
+        # 延迟工作卡只服务真实等待；即时指令和关闭状态不建卡。
         progress = None
         channel = getattr(getattr(self.config, 'channels', None), 'feishu', None)
-        if (not recover and text not in {'/new', '/cancel'} and channel is not None
-                and self.api is not None and channel.progress_card_delay_seconds > 0):
+        show_progress = command is None or command.progress
+        if (not recover and show_progress and channel is not None and self.api is not None
+                and channel.progress_card_delay_seconds > 0):
             progress = ProgressCard(self.api, channel,
                 chat_id=row['body']['chat_id'], input_id=row['id'],
                 on_created=self._remember_progress_card)
             progress.start()
-        try:
-            if parsed and parsed[0] not in {'/skill'}:
-                await handle(self, row, caller, parsed, recover=recover)
+        if command is not None:
+            result = await command.handler(CommandContext(
+                worker=self, row=row, caller=caller, text=text,
+                value=value, recover=recover))
+            if result.reply:
+                await self.enqueue_reply(row, result.reply)
+            if not result.start_turn:
                 await self._finish_progress(progress, 'complete', recall=True)
-                return
+                return None
+            text = result.turn_text or text
+            skill_ids = result.skill_ids or None
+        else:
             skill_ids = None
-            if parsed and parsed[0] == '/skill':
-                identity, text = parsed[1]
-                if not recover:
-                    catalog = getattr(self.resources, 'skills', None)
-                    if catalog is None:
-                        await self.enqueue_reply(row, '未配置 Skills。')
-                        await self._finish_progress(progress, 'complete', recall=True)
-                        return
-                    try:
-                        # 仅在当前调用者的授权目录内解析名称，随后统一使用完整 ID。
-                        identity = catalog.resolve(identity).id
-                    except SkillError:
-                        await self.enqueue_reply(row, 'Skill 不存在、名称不唯一或未授权，请使用 /skills 中带 skill: 前缀的完整 ID。')
-                        await self._finish_progress(progress, 'complete', recall=True)
-                        return
-                skill_ids = [identity]
+        try:
             if recover:
                 await self.recover_reply(row)
                 return
@@ -272,7 +263,7 @@ class BotWorker:
 
     async def recover(self):
         """仅恢复已保存回复；启动发送循环前由 serve 顺序调用。"""
-        rows = await (await self.store.conn.execute("SELECT i.* FROM assistant_inbox i WHERE i.status='running' AND (i.body->>'delivery_version'='1' OR EXISTS(SELECT 1 FROM assistant_outbox o WHERE o.input_id=i.id AND o.body->'delivery'->>'version'='1')) ORDER BY i.received_at,i.id")).fetchall()
+        rows = await self.inbox.recoverable()
         for row in rows:
             # 旧群记录保留，但不恢复执行或补发回复。
             if (row.get('body') or {}).get('group') is not False:
@@ -296,7 +287,8 @@ class BotWorker:
                     try:
                         self.active.result()
                     except asyncio.CancelledError:
-                        if self.active_row['body']['text'].strip().startswith('/rag '):
+                        spec, _ = self.commands.parse(self.active_row['body']['text'])
+                        if spec is not None and spec.recover_rag:
                             # 取消可能发生在提交之后；只读业务回执，保留已经提交的 ID。
                             await self.recover_rag(self.active_row)
                         else:
@@ -304,21 +296,22 @@ class BotWorker:
                     except Exception as exc:
                         logger.error('Feishu turn failed: input_id=%s error_type=%s',
                                      self.active_row['id'], type(exc).__name__)
-                        if self.active_row['body']['text'].strip().startswith('/rag '):
+                        spec, _ = self.commands.parse(self.active_row['body']['text'])
+                        if spec is not None and spec.recover_rag:
                             await self.recover_rag(self.active_row)
                         else:
                             # checkpoint 提交也可能已成功但确认失败，先只读检查，不能覆盖原答案。
                             await self.recover_reply(self.active_row, fallback=failure_message(exc))
                     self.active = self.active_row = None
-                rows = await (await self.store.conn.execute("SELECT * FROM assistant_inbox WHERE status='received' ORDER BY received_at,id LIMIT 100")).fetchall()
+                rows = await self.inbox.received()
                 for row in rows:
                     if (row.get('body') or {}).get('group') is not False:
                         continue
-                    command = row['body']['text'].strip()
-                    if command == '/usage':
-                        await self.show_usage(row)
-                        continue
-                    if command in {'/cancel', '/new'}:
+                    text = row['body']['text'].strip()
+                    spec, value = self.commands.parse(text)
+                    turn_command = bool(spec and (spec.turn or (
+                        spec.turn_check is not None and spec.turn_check(value))))
+                    if spec is not None and spec.preempt:
                         try:
                             caller_for(self.config, row)
                             await self.stop_for_command(row)
@@ -326,21 +319,18 @@ class BotWorker:
                         except Exception as exc:
                             await self.enqueue_reply(row, failure_message(exc))
                         continue
-                    from ai_assistant.interfaces.chat_commands import parse_command
-                    parsed = parse_command(command)
-                    rag_add = bool(parsed and parsed[0] == '/rag' and parsed[1][0] == 'add')
-                    if parsed and parsed[0] not in {'/new', '/skill'} and not rag_add:
+                    if not turn_command:
                         try:
-                            await self.store.conn.execute("UPDATE assistant_inbox SET status='running',body=jsonb_set(body,'{delivery_version}','1'::jsonb) WHERE id=%s", (row['id'],))
+                            await self.inbox.claim(row['id'])
                             await self.execute(row)
                         except Exception as exc:
-                            if parsed[0] == '/rag':
+                            if spec is not None and spec.recover_rag:
                                 await self.recover_rag(row)
                             else:
                                 await self.enqueue_reply(row, failure_message(exc))
                         continue
                     if self.active is None:
-                        await self.store.conn.execute("UPDATE assistant_inbox SET status='running',body=jsonb_set(body,'{delivery_version}','1'::jsonb) WHERE id=%s", (row['id'],))
+                        await self.inbox.claim(row['id'])
                         self.active_row = row
                         self.active = asyncio.create_task(self.execute(row))
                 await asyncio.sleep(0.25)
@@ -349,148 +339,3 @@ class BotWorker:
                 self.active.cancel()
                 from ai_assistant.cancellation import _drain_worker
                 await _drain_worker(self.active)
-
-
-@asynccontextmanager
-async def optional_knowledge_worker(config):
-    """同进程启动一次；知识故障不参与聊天服务退出判定。"""
-    async with AsyncExitStack() as stack:
-        try:
-            from ai_assistant.knowledge.sync import background_worker
-            task = await stack.enter_async_context(background_worker(config))
-        except Exception as error:
-            # 会话/清理错误仍必须传播；知识数据库启动错误单独隔离。
-            from ai_assistant.storage.sessions import SessionError
-            from langgraph.errors import GraphBubbleUp
-            if (isinstance(error, (SessionError, GraphBubbleUp))
-                    or asyncio.current_task().cancelling()):
-                raise
-            logger.error('知识 Worker 启动失败；聊天继续，队列尚未确认处理，不自动重启。category=%s',
-                         type(error).__name__)
-            task = None
-
-        def stopped(completed):
-            error = None if completed.cancelled() else completed.exception()
-            logger.error('知识 Worker 已退出；聊天继续，队列尚未确认处理，不自动重启。state=%s category=%s',
-                         'cancelled' if completed.cancelled() else 'failed' if error else 'ended',
-                         type(error).__name__ if error else 'none')
-
-        if task is not None:
-            task.add_done_callback(stopped)
-        try:
-            yield task
-        finally:
-            if task is not None:
-                # 正常关闭由 background_worker 等待任务清理并关闭连接，不记作意外退出。
-                task.remove_done_callback(stopped)
-
-
-async def serve(config):
-    from ai_assistant.observability import ObservationService, configure_logging, configuration_secrets
-    configure_logging()
-    async with ObservationService(getattr(config, "observability", ObservabilityConfig()), secrets=configuration_secrets(config)):
-        await _serve(config)
-
-
-async def _serve(config):
-    if not config.channels.feishu.enabled or config.integrations.feishu is None or config.sessions is None:
-        raise ConfigError('Enable [channels.feishu] and configure Feishu and sessions.')
-    from ai_assistant.integrations.mcp import mcp_resources
-    from ai_assistant.integrations.feishu_files import FeishuAPI
-    base = config.config_path.parent if config.config_path else Path.cwd()
-    project = (base / config.integrations.feishu.node_project).resolve()
-    receiver = project / 'receiver.mjs'
-    if not receiver.is_file() or not (project / 'node_modules/pg/package.json').is_file():
-        raise ConfigError('Deploy the pinned Feishu Node project with npm ci.')
-    async with AsyncExitStack() as stack:
-        store = await stack.enter_async_context(operation_storage(config.sessions))
-        leader = await (await store.conn.execute('SELECT pg_try_advisory_lock(714160004) AS locked')).fetchone()
-        if not leader['locked']:
-            raise ConfigError('Another Feishu executor is already running.')
-        delivery_store = await stack.enter_async_context(operation_storage(config.sessions))
-        # Fail before starting reception if migration has not been explicitly run.
-        await store.conn.execute('SELECT last_input_id FROM assistant_sessions LIMIT 0')
-        await store.conn.execute('SELECT binding,title FROM assistant_sessions LIMIT 0')
-        await store.conn.execute('SELECT input_id FROM assistant_chat_commands LIMIT 0')
-        await store.conn.execute('SELECT id FROM assistant_inbox LIMIT 0')
-        await store.conn.execute('SELECT part,next_attempt_at FROM assistant_outbox LIMIT 0')
-        if config.knowledge is not None:
-            await stack.enter_async_context(optional_knowledge_worker(config))
-        context = await stack.enter_async_context(tool_context(config))
-        directory = await stack.enter_async_context(mcp_resources(config, context.workspace))
-        resources = ProcessResources(directory, context.skills, {}, CommandRegistry())
-        client = await stack.enter_async_context(httpx.AsyncClient(timeout=30, trust_env=False))
-        api = FeishuAPI(config.integrations.feishu, client)
-        from ai_assistant.interfaces.feishu_delivery import FeishuOutboxSender
-        bot = BotWorker(config, store, resources)
-        bot.api = api
-        sender = FeishuOutboxSender(config.channels.feishu, delivery_store, api)
-        # 恢复只登记回复；完成之后才允许接收和发送新消息。
-        await sender.recover()
-        await bot.recover()
-        binary = executable('node')
-        process = await asyncio.create_subprocess_exec(binary, str(receiver), cwd=str(project),
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-            env=executable_env(binary))
-        stack.push_async_callback(_stop_receiver, process)
-        payload = dict(final_delivery_timeout_seconds=config.channels.feishu.final_delivery_timeout_seconds, app_id=config.integrations.feishu.app_id,
-            app_secret=config.integrations.feishu.app_secret.get_secret_value(),
-            owner_open_id=config.integrations.feishu.owner_open_id,
-            database_url=config.sessions.database_url.get_secret_value())
-        process.stdin.write((json.dumps(payload) + '\n').encode())
-        await process.stdin.drain()
-        await _run_workers(bot, sender, process)
-
-
-async def _stop_receiver(process):
-    """接收器退出必须等待，随后才能释放服务资源和单实例锁。"""
-    if process.returncode is None:
-        with suppress(ProcessLookupError):
-            process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), 10)
-        except TimeoutError:
-            with suppress(ProcessLookupError):
-                process.kill()
-            await process.wait()
-
-
-async def _run_workers(bot, sender, process):
-    """统一监督主任务，等待取消清理后才允许资源栈关闭。"""
-    from ai_assistant.cancellation import _drain_worker
-
-    worker = asyncio.create_task(bot.run())
-    delivery = asyncio.create_task(sender.run())
-    receiver_wait = asyncio.create_task(process.wait())
-    tasks = [worker, delivery, receiver_wait]
-    if getattr(process, 'stderr', None) is not None:
-        tasks.append(asyncio.create_task(_forward_receiver_logs(process.stderr)))
-    try:
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        # 先传播任务原始异常；正常意外结束也必须关闭整个服务。
-        for task in tasks:
-            if task in done:
-                await task
-        raise ConfigError('飞书接收器、执行器或投递器意外停止，请检查服务日志与操作回执。')
-    finally:
-        if process.returncode is None:
-            with suppress(ProcessLookupError):
-                process.terminate()
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            await _drain_worker(task)
-
-
-async def _forward_receiver_logs(stream):
-    """只转发接收器约定的安全事件，丢弃 SDK 原始异常和非结构化输出。"""
-    while line := await stream.readline():
-        try:
-            record = json.loads(line)
-            if record.get('event') not in {'inbox.persisted', 'inbox.failed'}:
-                continue
-            event(record['event'], input_id=record.get('input_id'),
-                  status=record.get('status'), category=record.get('category'),
-                  elapsed_seconds=record.get('elapsed_seconds'))
-        except (ValueError, AttributeError, TypeError):
-            continue
