@@ -88,13 +88,13 @@ def query_terms(query):
     return terms
 
 
-def infer_descriptor(name, description, *, write_hint=False):
+def infer_descriptor(name, description, *, write_hint=False, use_description=True):
     """从工具/技能的名称与描述推导通用元数据。"""
     # 名称是稳定的 capability 标识；描述里的“不写入/执行其他任务”等句子会污染元数据。
     actions = _matches(name, ACTION_TERMS)
     objects = _matches(name, OBJECT_TERMS)
     domains = _matches(name, DOMAIN_TERMS)
-    if not (actions or objects or domains):
+    if use_description and not (actions or objects or domains):
         text = f'{name} {description}'
         actions = _matches(text, ACTION_TERMS)
         objects = _matches(text, OBJECT_TERMS)

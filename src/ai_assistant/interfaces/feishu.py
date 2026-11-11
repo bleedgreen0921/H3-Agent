@@ -16,6 +16,7 @@ from ai_assistant.tools.context import tool_context
 
 from ai_assistant.observability import event, span, ObservabilityConfig
 from ai_assistant.interfaces.feishu_progress import ProgressCard, close_stale_card
+from ai_assistant.interfaces.commands import CommandContext, CommandRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class ProcessResources:
     catalog: object
     skills: object = None
     capability_cache: dict | None = None
+    commands: object = None
 
 
 
@@ -63,6 +65,7 @@ def caller_for(config, row):
 class BotWorker:
     def __init__(self, config, store, resources, api=None):
         self.config, self.store, self.resources, self.api = config, store, resources, api
+        self.commands = getattr(resources, 'commands', None) or CommandRegistry()
         self.active = None
         self.active_row = None
 
@@ -176,6 +179,14 @@ class BotWorker:
         from ai_assistant.skills.catalog import SkillError
         text = row['body']['text'].strip()
         parsed = parse_command(text)
+        command = self.commands.get(parsed[0]) if parsed and parsed[0] != 'error' else None
+        if command is not None and not command.legacy:
+            result = await command.handler(CommandContext(
+                worker=self, row=row, caller=caller, text=text,
+                parsed=parsed[1], recover=recover))
+            if result.reply:
+                await self.enqueue_reply(row, result.reply)
+            return None
         # 延迟工作卡只服务真实等待；恢复流程、即时指令和关闭状态不建卡。
         progress = None
         channel = getattr(getattr(self.config, 'channels', None), 'feishu', None)
@@ -407,7 +418,7 @@ async def _serve(config):
             await stack.enter_async_context(optional_knowledge_worker(config))
         context = await stack.enter_async_context(tool_context(config))
         directory = await stack.enter_async_context(mcp_resources(config, context.workspace))
-        resources = ProcessResources(directory, context.skills, {})
+        resources = ProcessResources(directory, context.skills, {}, CommandRegistry())
         client = await stack.enter_async_context(httpx.AsyncClient(timeout=30, trust_env=False))
         api = FeishuAPI(config.integrations.feishu, client)
         from ai_assistant.interfaces.feishu_delivery import FeishuOutboxSender

@@ -42,6 +42,7 @@ class ToolContext:
     resolved_datetimes: set[tuple[str, bool]] = field(default_factory=set, compare=False)
     usage_store: object | None = None
     capabilities: object | None = None
+    services: dict = field(default_factory=dict, kw_only=True, compare=False)
 
 
 @asynccontextmanager

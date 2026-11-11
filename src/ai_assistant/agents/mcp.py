@@ -6,6 +6,7 @@ from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_core.tools import ToolException
 from ai_assistant.integrations.policy import authorize, operation_principal
 from ai_assistant.integrations.adapters import service_adapter
+from ai_assistant.capabilities.policy import CapabilityPolicy
 
 
 class MCPMiddleware(AgentMiddleware):
@@ -51,7 +52,8 @@ class MCPMiddleware(AgentMiddleware):
             path = adapter.idempotency_path(entry) if adapter else None
             if path and isinstance(arguments.get(path[0]), dict):
                 arguments[path[0]].pop(path[1], None)
-            writing = entry.original_name in entry.settings.write_tools
+            writing = (CapabilityPolicy.from_context(context).effect(entry.id) == 'write'
+                       or entry.original_name in entry.settings.write_tools)
             operation = None
             if writing:
                 if context.operations is None or context.input_id is None:

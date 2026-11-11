@@ -7,25 +7,18 @@ from langgraph.errors import GraphBubbleUp
 
 
 from ai_assistant.runtime.execution import ToolCleanupError, tool_scope, raise_if_fatal
+from ai_assistant.capabilities.policy import CapabilityPolicy
 
 
 FAILURE_REPLY = '未完成：工具执行失败，本轮已停止，不再重试或执行后续步骤。已确认的结果和回执保留；未确认的效果仍需核实，不能视为已回滚。'
 
 
-READ_TOOLS = frozenset({'read_text', 'read_file', 'search_text', 'search_files',
-    'read_document_attachment', 'list_directory', 'web_search', 'web_fetch', 'search_knowledge', 'knowledge_status',
-    'search_skills', 'load_skill', 'unload_skill', 'read_skill_resource',
-    'get_current_identity', 'resolve_datetime', 'search_email', 'read_email', 'prepare_email_task'})
+def readonly_call(request, policy=None):
+    policy = policy or CapabilityPolicy.from_context(request.runtime.context)
+    return policy.effect(request.tool_call['name']) == 'read'
 
 
-def readonly_call(request):
-    name = request.tool_call['name']
-    catalog = getattr(request.runtime.context, 'mcp', None)
-    entry = catalog.entries.get(name) if catalog else None
-    return entry.original_name not in entry.settings.write_tools if entry else name in READ_TOOLS
-
-
-def execution_fact(result, request, *, unexpected=False):
+def execution_fact(result, request, *, unexpected=False, policy=None):
     """程序分类保存在 artifact；模型文本不能授予重试权限。"""
     from langgraph.types import Command
     from dataclasses import replace
@@ -35,7 +28,7 @@ def execution_fact(result, request, *, unexpected=False):
     if not isinstance(result, ToolMessage):
         return result
     artifact = result.artifact if isinstance(result.artifact, dict) else {'original_artifact': result.artifact}
-    reading = readonly_call(request)
+    reading = readonly_call(request, policy)
     error = result.status == 'error' or artifact.get('execution_fact', {}).get('control') == 'stop'
     recoverable = error and reading and not unexpected
     fact = {'version': 1, 'nature': 'read' if reading else 'effect',
@@ -50,6 +43,10 @@ def execution_fact(result, request, *, unexpected=False):
 
 
 class ToolFailureMiddleware(AgentMiddleware):
+    def __init__(self, *, policy=None, notices=()):
+        self.policy = policy
+        self.notices = tuple(notices)
+
     async def abefore_agent(self, state, runtime):
         runtime.context.executed_tool_calls.clear()
         return {'execution': None, 'diagnostics': []}
@@ -71,7 +68,7 @@ class ToolFailureMiddleware(AgentMiddleware):
         try:
             result = await asyncio.shield(task)
             request.runtime.context.executed_tool_calls.add(request.tool_call['id'])
-            return execution_fact(result, request)
+            return execution_fact(result, request, policy=self.policy)
         except asyncio.CancelledError:
             from ai_assistant.cancellation import _drain_worker
             if not task.done() and not task.cancelling():
@@ -93,7 +90,7 @@ class ToolFailureMiddleware(AgentMiddleware):
             content = '读取失败，请检查路径、参数、权限或网络后选择其他读取方式。' if expected else '工具执行异常；实际效果未确认。'
             return execution_fact(ToolMessage(content=content, status='error',
                                artifact={'full_tool_content': content},
-                               tool_call_id=request.tool_call['id'], name=request.tool_call['name']), request, unexpected=not expected)
+                               tool_call_id=request.tool_call['id'], name=request.tool_call['name']), request, unexpected=not expected, policy=self.policy)
         finally:
             calls.discard(task)
 
@@ -107,8 +104,13 @@ class ToolFailureMiddleware(AgentMiddleware):
         if batch and errors:
             names = '、'.join(dict.fromkeys(message.name or '工具' for message in errors))
             reply = FAILURE_REPLY + ('\n失败事项：' + names if names else '\n远端业务核对未通过。')
-            from ai_assistant.integrations.feishu_adapter import unfinished_document_notice
-            reply += await unfinished_document_notice(runtime.context)
+            for notice in self.notices:
+                try:
+                    addition = await notice(runtime.context)
+                    if addition:
+                        reply += addition
+                except Exception:
+                    pass
             unknown = any((m.artifact or {}).get('execution_fact', {}).get('error_category') in {'unknown', 'unclassified'} for m in errors)
             return {'messages': [AIMessage(reply)], 'execution': {'status': 'unknown' if unknown else 'failed',
                     'phase': 'tool', 'reason': 'tool_error' if errors else 'business_check_failed'}, 'jump_to': 'end'}

@@ -88,6 +88,11 @@ class CapabilityRegistry:
         from langchain_core.messages import SystemMessage
         return count_tokens_approximately([SystemMessage(content=text)])
 
+    def build_policy(self):
+        from ai_assistant.capabilities.policy import CapabilityPolicy
+        return CapabilityPolicy({name: item.side_effect for name, item in self.descriptors.items()
+                                 if item.kind == 'tool'})
+
     def plan(self, query, *, directory_budget=6000, active_skill_ids=()):
         from ai_assistant.capabilities.router import build_plan
         return build_plan(self, query, directory_budget=directory_budget,

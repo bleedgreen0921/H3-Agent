@@ -61,69 +61,37 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         saver = repository.saver if repository else InMemorySaver()
         context = await stack.enter_async_context(tool_context(config, retriever=retriever,
             skill_snapshot=getattr(resources, "skills", None) if caller.personal else None))
-        context = replace(context, usage_store=usage_store, timezone=config.agent.timezone if caller.personal else 'UTC',
+        context = replace(context, usage_store=usage_store, services={},
+                          timezone=config.agent.timezone if caller.personal else 'UTC',
                           owner_open_id=config.integrations.feishu.owner_open_id if caller.personal and config.integrations.feishu else None,
                           default_task_assignee=config.integrations.feishu.default_task_assignee if caller.personal and config.integrations.feishu else 'none',
                           caller=caller,
                           skills_directory_tokens=config.skills.directory_tokens if config.skills else 6000)
-        if config.knowledge is not None:
-            context = replace(context, knowledge_config=config)
-        from ai_assistant.tools.mail import MailService, allowed as mail_allowed, email_tools
-        mail_enabled = config.mail.enabled and mail_allowed(caller)
         from ai_assistant.storage.integrations import operation_storage
         operations = (await stack.enter_async_context(operation_storage(config.sessions))
-                      if config.sessions and (mail_enabled or
-                          (config.mcp is not None and config.mcp.servers)) else None)
+                      if config.sessions else None)
         context = replace(context, operations=operations)
-        if config.mcp is not None and config.mcp.servers:
-            from ai_assistant.integrations.mcp import mcp_resources
-            directory = getattr(resources, "catalog", resources) if resources is not None else await stack.enter_async_context(
-                mcp_resources(config, context.workspace, caller=caller))
-            context = replace(context, mcp=directory.for_caller(caller), caller=caller, operations=operations)
-        if mail_enabled:
-            if operations is None:
-                raise ConfigError('启用邮箱需要持久回执 [sessions]，请配置并显式 init。')
-            try:
-                await operations.by_source('mail:schema-check')
-            except Exception:
-                raise ConfigError('邮箱来源回执结构不可用，请检查存储并显式 init 后重启。') from None
-            mail = MailService(config.mail, config.agent.timezone)
-            stack.push_async_callback(mail.aclose)
-            context = replace(context, mail=mail)
-        pdf_enabled = (config.tools.pdf.enabled and caller.owner and caller.scope == 'private'
-                       and caller.channel == 'feishu_private')
-        if pdf_enabled:
-            from ai_assistant.tools.pdf import PDFAttachments
-            from ai_assistant.integrations.feishu_files import FeishuAPI
-            import httpx
-            client = await stack.enter_async_context(httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=60))
-            pdf = PDFAttachments(FeishuAPI(config.integrations.feishu, client), config.tools.pdf.timeout)
-            stack.callback(pdf.close)
-            context = replace(context, pdf=pdf)
         model = await stack.enter_async_context(model_session(config, selected,
             config.models[selected].parameters.get('timeout', 180), factory=create_model))
-        tools = create_builtin_tools(include_web=config.tools.web is not None,
-            include_write=config.tools.files.enabled)
-        if mail_enabled:
-            tools.extend(email_tools())
-        if pdf_enabled:
-            from ai_assistant.tools.pdf import read_document_attachment
-            tools.append(read_document_attachment)
-        if config.knowledge is not None or retriever is not None:
-            from ai_assistant.knowledge.tools import knowledge_tools
-            tools.extend(knowledge_tools(include_management=config.knowledge is not None))
-        if context.skills is not None:
-            from ai_assistant.tools.skills import create_skill_tools
-            tools.extend(create_skill_tools())
-        from ai_assistant.tools.datetime import resolve_datetime
-        tools.append(resolve_datetime.model_copy(update={'handle_tool_error': True}))
-        if config.integrations.feishu is not None:
-            from ai_assistant.integrations.feishu_identity import identity_tools
-            tools.extend(identity_tools(caller))
-        if context.mcp is not None:
-            tools.extend(e.tool for e in context.mcp.entries.values())
-        from ai_assistant.capabilities.search import search_tools
-        tools.append(search_tools)
+
+        from ai_assistant.runtime.components import ComponentContext, build_components
+        component_context = ComponentContext(
+            config=config, caller=caller, stack=stack, resources=resources,
+            operations=operations, context=context,
+            max_input_tokens=config.models[selected].max_input_tokens)
+        tools, prompt_sections, feature_middleware, failure_notices, services = [], [], [], [], {}
+        for component in build_components(config, caller, retriever=retriever):
+            await component.open(component_context)
+            contribution = component.contribute(component_context)
+            tools.extend(contribution.tools)
+            prompt_sections.extend(contribution.prompt_sections)
+            feature_middleware.extend(contribution.middleware)
+            failure_notices.extend(contribution.failure_notices)
+            services.update(contribution.services)
+        context = component_context.context
+        if services:
+            context = replace(context, services={**context.services, **services})
+
         from ai_assistant.capabilities.model import CapabilityTurnState, resolve_log_path
         from ai_assistant.capabilities.registry import CapabilityRegistry
         base = config.config_path.parent if config.config_path else Path.cwd()
@@ -144,8 +112,10 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             context_settings=config.context,
             max_input_tokens=config.models[selected].max_input_tokens,
             model_parameters=config.models[selected].parameters,
-            skills_enabled=context.skills is not None, mcp_enabled=bool(context.mcp and (context.mcp.entries or context.mcp.unavailable)),
-            capability_registry=registry)
+            skills_enabled=False, mcp_enabled=False,
+            prompt_sections=prompt_sections, feature_middleware=feature_middleware,
+            failure_notices=failure_notices, capability_registry=registry,
+            capability_policy=registry.build_policy())
         session = AssistantSession(agent, context, config.agent, model_name=selected,
                                    repository=repository)
         await session.open(session_id)

@@ -6,8 +6,9 @@ from ai_assistant.agents.context import ContextBudgetError, count_tokens
 
 
 class ToolResultMiddleware(AgentMiddleware):
-    def __init__(self, budget=12000):
+    def __init__(self, budget=12000, policy=None):
         self.budget = budget
+        self.policy = policy
 
     async def awrap_tool_call(self, request, handler):
         result = await handler(request)
@@ -24,11 +25,17 @@ class ToolResultMiddleware(AgentMiddleware):
             return replace(result, update={**result.update, 'messages': messages})
         if not isinstance(result, ToolMessage):
             return result
+        from ai_assistant.capabilities.policy import CapabilityPolicy
         context = request.runtime.context
+        policy = CapabilityPolicy.from_context(context)
+        if policy.effect(request.tool_call['name']) == 'unknown' and self.policy is not None:
+            policy = self.policy
         catalog = getattr(context, 'mcp', None)
         entry = catalog.entries.get(request.tool_call['name']) if catalog else None
+        writing = policy.effect(request.tool_call['name']) == 'write' or (
+            entry and entry.original_name in entry.settings.write_tools)
         # 写回执完整保留；最终预算检查会明确拒绝无法容纳的必需回执。
-        if entry and entry.original_name in entry.settings.write_tools:
+        if writing:
             return result.model_copy(update={'artifact': {
                 **(result.artifact if isinstance(result.artifact, dict) else {'original_artifact': result.artifact}),
                 'full_tool_content': (result.artifact.get('full_tool_content', result.content)

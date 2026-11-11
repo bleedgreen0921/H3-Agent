@@ -30,22 +30,11 @@ class TurnResult:
 def turn_result(state, operations=(), *, interrupted=None, executed_tool_calls=None):
     items = list(state.get('effect_facts') or [])
     confirmed = any(item.get('kind') == 'local_file' and item.get('status') == 'saved' for item in items)
+    from ai_assistant.runtime.effects import operation_receipt
     for operation in operations:
-        stored = operation.get('result') or {}
-        problem = stored.get('business_outcome')
-        # 历史终端回执只读兼容：进程退出成功不等于业务效果已确认。
-        terminal = operation.get('tool') == 'run_command'
-        accepted = operation['status'] == 'succeeded' and not terminal
-        confirmed |= accepted
-        verification = stored.get('verification', 'unverified')
-        if problem:
-            verification = problem.get('verification', 'mismatch')
-        items.append({'kind': 'terminal' if terminal else 'remote', 'operation_id': operation['id'],
-            'status': 'failed' if problem or verification == 'mismatch' else operation['status'], 'accepted': accepted,
-            'verification': verification,
-            'summary': ('进程已退出，业务效果未核验' if terminal else
-                        '接口已接受；' + ('字段核验通过' if verification == 'passed' else '字段核验不符' if verification == 'mismatch' else '未核验'))
-                        if operation['status'] == 'succeeded' else '操作效果需核实'})
+        receipt = operation_receipt(operation)
+        confirmed |= receipt.accepted
+        items.append(receipt.to_item())
     from langchain_core.messages import HumanMessage, ToolMessage
     messages = []
     for message in reversed(state.get('messages', [])):
