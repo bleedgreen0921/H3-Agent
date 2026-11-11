@@ -15,6 +15,7 @@ from ai_assistant.storage.integrations import operation_storage
 from ai_assistant.tools.context import tool_context
 
 from ai_assistant.observability import event, span, ObservabilityConfig
+from ai_assistant.interfaces.feishu_progress import ProgressCard, close_stale_card
 
 logger = logging.getLogger(__name__)
 
@@ -59,23 +60,47 @@ def caller_for(config, row):
 
 
 class BotWorker:
-    def __init__(self, config, store, resources):
-        self.config, self.store, self.resources = config, store, resources
+    def __init__(self, config, store, resources, api=None):
+        self.config, self.store, self.resources, self.api = config, store, resources, api
         self.active = None
         self.active_row = None
 
-    async def enqueue_reply(self, row, text, *, conn=None, purpose='answer', snapshot=None):
+    async def enqueue_reply(self, row, text, *, conn=None, purpose='answer', snapshot=None,
+                            progress_card_id=None):
         from ai_assistant.interfaces.outbox import enqueue_text
 
         async def enqueue(connection):
             async with connection.transaction():
                 await enqueue_text(connection, self.config.channels.feishu, row, text,
-                    purpose=purpose, snapshot=snapshot)
+                    purpose=purpose, snapshot=snapshot, progress_card_id=progress_card_id)
         if conn is not None:
             await enqueue(conn)
         else:
             async with operation_storage(self.config.sessions) as reply_store:
                 await enqueue(reply_store.conn)
+
+    async def _remember_progress_card(self, input_id, card_id):
+        """卡片 ID 随输入持久化，服务重启后才能关闭陈旧工作卡。"""
+        async with operation_storage(self.config.sessions) as store:
+            await store.conn.execute(
+                "UPDATE assistant_inbox SET body=jsonb_set(body,'{progress_card_id}',to_jsonb(%s::text)) "
+                "WHERE id=%s AND body IS NOT NULL", (card_id, input_id))
+
+    async def _finish_progress(self, progress, state, *, recall, phase=None):
+        """辅助卡片的终态清理；取消期间也等待网络调用超时结束。"""
+        if progress is None:
+            return
+        task = asyncio.create_task(progress.finish(state, recall=recall, phase=phase))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            with suppress(Exception):
+                await task
+            raise
+        except Exception as error:
+            # 卡片是辅助展示，任何清理错误都不能改写业务结果。
+            logger.warning('Progress card cleanup failed: input_id=%s category=%s',
+                           getattr(progress, 'input_id', '-'), type(error).__name__)
 
     async def recover_reply(self, row, *, fallback=None):
         """投递恢复只读 saver 和索引，不构建 Agent 或模型。"""
@@ -150,38 +175,61 @@ class BotWorker:
         from ai_assistant.skills.catalog import SkillError
         text = row['body']['text'].strip()
         parsed = parse_command(text)
-        if parsed and parsed[0] not in {'/skill'}:
-            await handle(self, row, caller, parsed, recover=recover)
-            return
-        skill_ids = None
-        if parsed and parsed[0] == '/skill':
-            identity, text = parsed[1]
-            if not recover:
-                catalog = getattr(self.resources, 'skills', None)
-                if catalog is None:
-                    await self.enqueue_reply(row, '未配置 Skills。')
-                    return
-                try:
-                    # 仅在当前调用者的授权目录内解析名称，随后统一使用完整 ID。
-                    identity = catalog.resolve(identity).id
-                except SkillError:
-                    await self.enqueue_reply(row, 'Skill 不存在、名称不唯一或未授权，请使用 /skills 中带 skill: 前缀的完整 ID。')
-                    return
-            skill_ids = [identity]
-        if recover:
-            await self.recover_reply(row)
-            return
-        session_id = await self.binding_session(row)
-        session = await stack.enter_async_context(assistant_session(
-            self.config, session_id=session_id, caller=caller, resources=self.resources))
-        await self.save_binding(row, session.session_id, session.repository.conn)
-        event("request.prepared", session_id=session.session_id, preparation_seconds=monotonic() - preparation_started)
-        result = await session.run_turn(text, skill_ids=skill_ids, input_id=row['id'],
-            user_source=text)
-        from ai_assistant.runtime.presentation import project, saved_body
-        display = project(result.result, saved_body(result.result, result.messages))
-        await self.enqueue_reply(row, display.text, snapshot=display.snapshot())
-        return session
+        # 延迟工作卡只服务真实等待；恢复流程、即时指令和关闭状态不建卡。
+        progress = None
+        channel = getattr(getattr(self.config, 'channels', None), 'feishu', None)
+        if (not recover and text not in {'/new', '/cancel'} and channel is not None
+                and self.api is not None and channel.progress_card_delay_seconds > 0):
+            progress = ProgressCard(self.api, channel,
+                chat_id=row['body']['chat_id'], input_id=row['id'],
+                on_created=self._remember_progress_card)
+            progress.start()
+        try:
+            if parsed and parsed[0] not in {'/skill'}:
+                await handle(self, row, caller, parsed, recover=recover)
+                await self._finish_progress(progress, 'complete', recall=True)
+                return
+            skill_ids = None
+            if parsed and parsed[0] == '/skill':
+                identity, text = parsed[1]
+                if not recover:
+                    catalog = getattr(self.resources, 'skills', None)
+                    if catalog is None:
+                        await self.enqueue_reply(row, '未配置 Skills。')
+                        await self._finish_progress(progress, 'complete', recall=True)
+                        return
+                    try:
+                        # 仅在当前调用者的授权目录内解析名称，随后统一使用完整 ID。
+                        identity = catalog.resolve(identity).id
+                    except SkillError:
+                        await self.enqueue_reply(row, 'Skill 不存在、名称不唯一或未授权，请使用 /skills 中带 skill: 前缀的完整 ID。')
+                        await self._finish_progress(progress, 'complete', recall=True)
+                        return
+                skill_ids = [identity]
+            if recover:
+                await self.recover_reply(row)
+                return
+            session_id = await self.binding_session(row)
+            session = await stack.enter_async_context(assistant_session(
+                self.config, session_id=session_id, caller=caller, resources=self.resources))
+            await self.save_binding(row, session.session_id, session.repository.conn)
+            event("request.prepared", session_id=session.session_id, preparation_seconds=monotonic() - preparation_started)
+            turn_kwargs = dict(skill_ids=skill_ids, input_id=row['id'], user_source=text)
+            if progress is not None:
+                turn_kwargs['on_event'] = progress.on_event
+            result = await session.run_turn(text, **turn_kwargs)
+            from ai_assistant.runtime.presentation import project, saved_body
+            display = project(result.result, saved_body(result.result, result.messages))
+            await self.enqueue_reply(row, display.text, snapshot=display.snapshot(),
+                progress_card_id=progress.card_id if progress is not None else None)
+            # 成功时保留卡片到最终文本送达，再由发送器撤回。
+            await self._finish_progress(progress, 'complete', recall=False)
+            return session
+        except BaseException as error:
+            state = 'cancelled' if isinstance(error, asyncio.CancelledError) else 'failed'
+            with suppress(Exception):
+                await self._finish_progress(progress, state, recall=True)
+            raise
 
     async def stop_for_command(self, row):
         """用户取消意图先落盘，再等待执行任务和工具清理，最后处理命令回执。"""
@@ -217,6 +265,8 @@ class BotWorker:
             # 旧群记录保留，但不恢复执行或补发回复。
             if (row.get('body') or {}).get('group') is not False:
                 continue
+            # 服务重启后不再有进程更新工作卡，先标记待核实再进入只读恢复。
+            await close_stale_card(self.api, (row.get('body') or {}).get('progress_card_id'), row['id'])
             await self.execute(row, recover=True)
 
     async def recover_rag(self, row):
@@ -361,6 +411,7 @@ async def _serve(config):
         api = FeishuAPI(config.integrations.feishu, client)
         from ai_assistant.interfaces.feishu_delivery import FeishuOutboxSender
         bot = BotWorker(config, store, resources)
+        bot.api = api
         sender = FeishuOutboxSender(config.channels.feishu, delivery_store, api)
         # 恢复只登记回复；完成之后才允许接收和发送新消息。
         await sender.recover()

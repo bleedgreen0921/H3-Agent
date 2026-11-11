@@ -74,6 +74,8 @@ class FeishuOutboxSender:
         row = claimed
         body = row['body']
         delivery = body['delivery']
+        # 成功投递全部分段后撤回本轮工作卡；卡片是辅助展示，不影响投递状态。
+        card_id = body.get('progress_card_id')
         started = time.monotonic()
         # 取消异常直接传播，保留 sending，由下次启动转为 unknown。
         try:
@@ -106,6 +108,9 @@ class FeishuOutboxSender:
                 event('delivery.failed', elapsed_seconds=time.monotonic()-started, status=status, category=category)
                 if not retry:
                     await self.store.conn.execute("UPDATE assistant_outbox SET status='blocked' WHERE input_id=%s AND part>%s AND status='pending'", (row['input_id'], row['part']))
+            if not retry and card_id:
+                from ai_assistant.interfaces.feishu_progress import mark_delivery_failed
+                await mark_delivery_failed(self.api, card_id, row['input_id'])
             return
         event('delivery.remote_confirmed', remote_id=data.get('message_id'), elapsed_seconds=time.monotonic()-started)
         delivery['last_outcome'] = 'confirmed'
@@ -120,6 +125,9 @@ class FeishuOutboxSender:
             from datetime import datetime, timezone
             event("reply.delivered", status="delivered", reply_delivery_seconds=max(0,
                 (datetime.now(timezone.utc) - completed["received_at"]).total_seconds()))
+            if card_id and settings.progress_card_recall:
+                from ai_assistant.interfaces.feishu_progress import recall_card
+                await recall_card(self.api, card_id, row['input_id'])
 
     async def run(self):
         """独占投递连接；未处理异常交给服务监督器关闭服务。"""

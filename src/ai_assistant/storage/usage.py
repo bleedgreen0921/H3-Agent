@@ -16,6 +16,8 @@ class UsageStore:
     def __init__(self, conn):
         self.conn = conn
         self.disabled = False
+        # 连接前已校验关联列；新记录必须带 input_id / execution_thread_id / parent_run_id。
+        self.linked = True
 
     async def record(self, call_id, session_id, profile, role, started_at, status, usage, *, input_id=None, execution_thread_id=None, parent_run_id=None):
         if self.disabled or not usage:

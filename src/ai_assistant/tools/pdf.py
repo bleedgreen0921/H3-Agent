@@ -40,6 +40,9 @@ class PDFAttachments:
     async def _read(self, message_id, file_key, cursor, suffix):
         if not message_id or not file_key:
             raise ToolException('请提供附件所属 message_id 和 file_key。')
+        # 部分模型会把“从头读取”表达为空字符串；空游标必须等同未提供。
+        if isinstance(cursor, str):
+            cursor = cursor.strip() or None
         key = (message_id, file_key, suffix)
         async with self.lock:
             position = (0, 0)
@@ -99,7 +102,7 @@ class PDFAttachments:
 @tool
 async def read_document_attachment(message_id: str, file_key: str, file_name: str,
                                    runtime: ToolRuntime[ToolContext], cursor: str | None = None) -> dict:
-    """读取飞书 PDF、DOCX、Markdown 附件正文及位置，每次最多 16000 字符，用 next_cursor 续读。仅主人私聊；不入库，不授权写入。"""
+    """读取飞书 PDF、DOCX、Markdown 附件正文及位置，每次最多 16000 字符，用 next_cursor 续读。仅主人私聊；不入库，不授权写入。cursor 省略或留空表示从头读取，续读时传上一次的 next_cursor。"""
     caller = runtime.context.caller
     if (caller is None or not caller.owner or caller.scope != 'private'
             or caller.channel != 'feishu_private' or runtime.context.pdf is None):

@@ -29,7 +29,7 @@ async def execute(config, args):
             result = dict(skill.info(), metadata=skill.metadata)
             if args.action == "check":
                 # 检查本地包能否准备，不执行其中的脚本或安装依赖。
-                result["check"] = catalog.prepare(skill.id).info()
+                result["check"] = dict(catalog.prepare(skill.id).info(), format='valid')
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if catalog.diagnostics else 0
     finally:

@@ -51,6 +51,20 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
     session._maintenance = None
     event_enabled = True
 
+    async def emit_aux(item):
+        """转发可选的进度事件；回调故障只停用本轮辅助能力，不影响业务结果。"""
+        nonlocal event_enabled
+        if on_event is None or not event_enabled:
+            return
+        try:
+            returned = on_event(item)
+            if inspect.isawaitable(returned):
+                await returned
+        except Exception as callback_error:
+            event_enabled = False
+            logger.warning('Turn auxiliary failure: input_id=%s phase=on_event category=%s',
+                           input_id, type(callback_error).__name__)
+
     session._running = True
     session._active_task = asyncio.current_task()
     try:
@@ -103,7 +117,7 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
                 ):
                     if root_id is None:
                         root_id = event['run_id']
-                    # 流式回调已删除；仅记录首个正文块的耗时指标。
+                    # 模型原生流式仍用于首字耗时与工作卡预览，不参与答案组装。
                     if event['event'] == 'on_chat_model_stream':
                         metadata = event.get('metadata', {})
                         chunk = event.get('data', {}).get('chunk')
@@ -112,19 +126,24 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
                                 and any(block.get('text') for block in chunk.content_blocks if block.get('type') == 'text')):
                             timings['first_body_seconds'] = monotonic() - started
                             observation_event('model.first_body', model_first_body_seconds=monotonic() - agent_started)
+                        if (metadata.get('langgraph_node') == 'model' and metadata.get('lc_source') != 'summarization'
+                                and isinstance(chunk, AIMessage)):
+                            delta = ''.join(block.get('text', '') for block in chunk.content_blocks
+                                            if isinstance(block, dict) and block.get('type') == 'text')
+                            if delta:
+                                await emit_aux({'event': 'on_text', 'text': delta,
+                                                'run_id': event.get('run_id')})
+                    if event['event'] == 'on_chat_model_start':
+                        metadata = event.get('metadata', {})
+                        if metadata.get('langgraph_node') == 'model' and metadata.get('lc_source') != 'summarization':
+                            await emit_aux({'event': 'on_model_start'})
                     if event['event'] == 'on_tool_end'  and event.get('name') == 'load_skill' and session.context.skills:
                         from langgraph.types import Command
                         output = event.get('data', {}).get('output')
                         if isinstance(output, Command) and isinstance(output.update, dict):
                             activated_skills.update(s.id for s in session.context.skills.active(output.update.get('active_skills', {})))
-                    if event['event'] in {'on_tool_start', 'on_tool_end', 'on_tool_error'} and on_event and event_enabled:
-                        try:
-                            returned = on_event(event)
-                            if inspect.isawaitable(returned):
-                                await returned
-                        except Exception as callback_error:
-                            event_enabled = False
-                            logger.warning('Turn auxiliary failure: input_id=%s phase=on_event category=%s', input_id, type(callback_error).__name__)
+                    if event['event'] in {'on_tool_start', 'on_tool_end', 'on_tool_error'}:
+                        await emit_aux(event)
                     if event['event'] == 'on_chain_end' and event['run_id'] == root_id:
                         result = event['data']['output']
         observation_event('agent.finished', execution_thread_id=session._thread, agent_seconds=monotonic() - agent_started)
