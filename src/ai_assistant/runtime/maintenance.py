@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 async def maintain_session_memory(session):
     """入口成功处理最终回复后，在同一任务、会话锁内整理；不改写回答。"""
     maintenance_started = monotonic()
-    pending = getattr(self, '_maintenance', None)
+    pending = getattr(session, '_maintenance', None)
     session._maintenance = None
     if pending is None or session._storage_lost or session._closed:
         observation_event('maintenance.skipped', status='skipped')
@@ -30,10 +30,12 @@ async def maintain_session_memory(session):
             every = getattr(session.agent, 'memory_every_turns', 0)
             summarizer = getattr(session.agent, 'session_memory', None)
             completed = state.values.get('completed_turns', 0)
+            from ai_assistant.agents.session_state import SessionState
+            covered = SessionState.from_values(state.values).memory.covered_turns
             if (state.values.get('turn_result', {}).get('input_id') != input_id
                     or state.values['turn_result']['status'] != 'complete'
                     or not every or not summarizer
-                    or completed - state.values.get('memory_covered_turns', 0) < every
+                    or completed - covered < every
                     or observer.usage.summary_model_calls >= session.settings.summary_call_limit):
                 observation_event('maintenance.skipped', status='skipped')
                 return
