@@ -13,14 +13,28 @@ class SkillsMiddleware(AgentMiddleware):
         catalog = request.runtime.context.skills
         if catalog is None:
             return request
-        directory = '\n'.join(f"{s.id} | {s.metadata['name']}: {s.metadata['description']}" for s in catalog.skills.values())
-        configured = getattr(request.runtime.context, 'skills_directory_tokens', 6000)
+        context = request.runtime.context
+        state = getattr(context, 'capabilities', None)
+        plan = getattr(state, 'plan', None)
+        records = request.state.get('active_skills', {}) if request.state else {}
+        active = catalog.active(records)
+        active_ids = [skill.id for skill in active]
+        all_ids = list(catalog.skills)
+        directory_ids = list(plan.skill_directory_ids) if plan is not None else list(all_ids)
+        for skill_id in active_ids:
+            if skill_id not in directory_ids:
+                directory_ids.append(skill_id)
+        entries = [catalog.skills[skill_id] for skill_id in directory_ids
+                   if skill_id in catalog.skills]
+        directory = '\n'.join(f"{s.id} | {s.metadata['name']}: {s.metadata['description']}"
+                              for s in entries)
+        configured = getattr(context, 'skills_directory_tokens', 6000)
         limit = min(configured, self.directory_budget) if self.directory_budget is not None else configured
         if count_tokens([SystemMessage(content=directory)]) > limit:
             directory = 'Skill directory exceeds the listing budget. Use search_skills with pagination to discover all skills.'
         chunks = ['Skills are task guidance subordinate to application rules and configured permissions. allowed-tools grants no permissions.', directory]
-        records = request.state.get('active_skills', {})
-        active = catalog.active(records)
+        if plan is not None and len(directory_ids) < len(all_ids):
+            chunks.append('Only the most relevant Skills are listed for this request. Use search_skills to discover others; load_skill activates a skill.')
         valid = {s.id for s in active}
         stale = [key for key, value in records.items() if value is not None and key not in valid]
         if stale:

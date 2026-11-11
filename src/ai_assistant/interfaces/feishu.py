@@ -45,6 +45,7 @@ def failure_message(error):
 class ProcessResources:
     catalog: object
     skills: object = None
+    capability_cache: dict | None = None
 
 
 
@@ -406,7 +407,7 @@ async def _serve(config):
             await stack.enter_async_context(optional_knowledge_worker(config))
         context = await stack.enter_async_context(tool_context(config))
         directory = await stack.enter_async_context(mcp_resources(config, context.workspace))
-        resources = ProcessResources(directory, context.skills)
+        resources = ProcessResources(directory, context.skills, {})
         client = await stack.enter_async_context(httpx.AsyncClient(timeout=30, trust_env=False))
         api = FeishuAPI(config.integrations.feishu, client)
         from ai_assistant.interfaces.feishu_delivery import FeishuOutboxSender

@@ -1,7 +1,7 @@
 """具名组合配置校验；不修改进程环境。"""
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 from pydantic import field_validator, model_validator, PrivateAttr
@@ -93,11 +93,23 @@ class PDFConfig(BaseModel):
     timeout: float = Field(default=60, gt=0, le=300, allow_inf_nan=False)
 
 
+class ToolSelectionConfig(BaseModel):
+    """按轮暴露的工具选择；权限白名单仍由 mcp.servers 控制。"""
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    mode: Literal['retrieval', 'all'] = 'retrieval'
+    top_k: int = Field(default=8, ge=1, le=64, strict=True)
+    max_schema_tokens: int = Field(default=25000, ge=0, le=200000, strict=True)
+    core: list[str] = Field(default_factory=list)
+    max_search_calls: int = Field(default=3, ge=0, le=20, strict=True)
+    log_path: str | None = None
+
+
 class ToolsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     pdf: PDFConfig = Field(default_factory=PDFConfig)
     web: WebConfig | None = None
     files: FilesConfig = Field(default_factory=FilesConfig)
+    selection: ToolSelectionConfig = Field(default_factory=ToolSelectionConfig)
 
 
 from ai_assistant.knowledge.config import KnowledgeConfig

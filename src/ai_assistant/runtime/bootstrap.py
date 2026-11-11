@@ -1,6 +1,7 @@
 """按配置和调用者权限组装资源，并统一管理会话退出时的清理。"""
 import asyncio
 import logging
+from pathlib import Path
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import replace
 
@@ -121,11 +122,30 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             tools.extend(identity_tools(caller))
         if context.mcp is not None:
             tools.extend(e.tool for e in context.mcp.entries.values())
+        from ai_assistant.capabilities.search import search_tools
+        tools.append(search_tools)
+        from ai_assistant.capabilities.model import CapabilityTurnState, resolve_log_path
+        from ai_assistant.capabilities.registry import CapabilityRegistry
+        base = config.config_path.parent if config.config_path else Path.cwd()
+        log_path = resolve_log_path(config.tools.selection.log_path, base)
+        skill_ids = tuple(sorted(getattr(context.skills, 'skills', {}) or {}))
+        key = (caller.binding, tuple(tool.name for tool in tools), skill_ids,
+               repr(config.tools.selection), str(log_path))
+        cache = getattr(resources, 'capability_cache', None) if resources is not None else None
+        registry = cache.get(key) if cache is not None else None
+        if registry is None:
+            registry = CapabilityRegistry.from_sources(
+                tools, mcp=context.mcp, skills=context.skills,
+                settings=config.tools.selection, log_path=log_path)
+            if cache is not None:
+                cache[key] = registry
+        context = replace(context, capabilities=CapabilityTurnState(registry=registry))
         agent = create_assistant_agent(model, tools, checkpointer=saver, settings=config.agent, persona=persona,
             context_settings=config.context,
             max_input_tokens=config.models[selected].max_input_tokens,
             model_parameters=config.models[selected].parameters,
-            skills_enabled=context.skills is not None, mcp_enabled=bool(context.mcp and (context.mcp.entries or context.mcp.unavailable)))
+            skills_enabled=context.skills is not None, mcp_enabled=bool(context.mcp and (context.mcp.entries or context.mcp.unavailable)),
+            capability_registry=registry)
         session = AssistantSession(agent, context, config.agent, model_name=selected,
                                    repository=repository)
         await session.open(session_id)

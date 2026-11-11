@@ -33,6 +33,7 @@ class ToolContext:
     operations: object | None = None
     project_rules: str = ''
     input_id: str | None = None
+    session_id: str | None = None
     knowledge_config: object | None = None
     skills_directory_tokens: int = 6000
     timezone: str = 'Asia/Shanghai'
@@ -40,6 +41,7 @@ class ToolContext:
     default_task_assignee: str = 'none'
     resolved_datetimes: set[tuple[str, bool]] = field(default_factory=set, compare=False)
     usage_store: object | None = None
+    capabilities: object | None = None
 
 
 @asynccontextmanager

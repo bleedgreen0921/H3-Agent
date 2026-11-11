@@ -32,7 +32,8 @@ _ALLOWED = frozenset({"input_id", "session_id", "thread_id", "execution_thread_i
     "elapsed_seconds", "queue_wait_seconds", "preparation_seconds", "agent_seconds",
     "result_commit_seconds", "reply_delivery_seconds", "maintenance_seconds",
     "run_id", "parent_run_id", "profile", "role", "tool", "remote_id", "execution_status",
-    "model_first_body_seconds", "input_tokens", "output_tokens", "total_tokens"})
+    "model_first_body_seconds", "input_tokens", "output_tokens", "total_tokens",
+    "tool_count", "selected_count", "schema_tokens", "reason"})
 
 
 @contextmanager

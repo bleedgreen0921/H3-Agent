@@ -31,7 +31,15 @@ async def search_skills(runtime: ToolRuntime[ToolContext], query: str = '',
                         offset: Annotated[int, Field(ge=0)] = 0,
                         limit: Annotated[int, Field(ge=1, le=100)] = 20) -> dict:
     """Search names and descriptions in the fixed local skill snapshot; pagination is explicit."""
-    return catalog(runtime).search(query, offset, limit)
+    result = catalog(runtime).search(query, offset, limit)
+    state = getattr(runtime.context, 'capabilities', None)
+    plan = getattr(state, 'plan', None)
+    if plan is not None:
+        for item in result['skills']:
+            if item['id'] not in plan.skill_directory_ids:
+                plan.skill_directory_ids.append(item['id'])
+        plan.skill_directory_tokens = state.registry.skill_directory_tokens(plan.skill_directory_ids)
+    return result
 
 
 @tool

@@ -72,7 +72,7 @@ def load_project_rules(context):
 
 def create_assistant_agent(model, tools, *, checkpointer, settings,
                            context_settings=None, max_input_tokens=None, model_parameters=None,
-                           skills_enabled=False, mcp_enabled=False, persona=''):
+                           skills_enabled=False, mcp_enabled=False, persona='', capability_registry=None):
     """组装原生 LangChain Agent，并配置请求准备、调用限制及上下文管理。
 
     本函数只负责构建 Agent；模型调用和工具调度交给框架，轮次管理由调用方负责。
@@ -89,6 +89,7 @@ def create_assistant_agent(model, tools, *, checkpointer, settings,
         skills_enabled: 是否添加本地 Skills 中间件。
         mcp_enabled: 是否添加 MCP 工具请求适配中间件。
         persona: 已读取的个人风格文本，只影响表达，不授予额外工具权限。
+        capability_registry: 可选的能力注册表；提供时按轮只绑定计划中的工具与 Skill 目录。
 
     返回：
         create_agent 构建的 Agent，并附加 session_memory 和 memory_every_turns，
@@ -149,6 +150,10 @@ def create_assistant_agent(model, tools, *, checkpointer, settings,
     # 顺序影响最终模型请求：先设置规则，再挂接响应完整性检查、注入可信时间，
     # 随后按需添加 Skills 和 MCP。CompletionMiddleware 校验响应，不提供 prepare。
     preparers = [RulesMiddleware(), CompletionMiddleware(), ContextPreparationMiddleware()]
+    if capability_registry is not None:
+        from ai_assistant.capabilities.middleware import CapabilityPlannerMiddleware
+        # 先规划一次，Skills 与工具绑定共享同一份 ExposurePlan。
+        preparers.insert(0, CapabilityPlannerMiddleware(capability_registry))
     if skills_enabled:
         from ai_assistant.agents.skills import SkillsMiddleware
         preparers.append(SkillsMiddleware(max_input_tokens))
@@ -157,6 +162,10 @@ def create_assistant_agent(model, tools, *, checkpointer, settings,
         preparers.append(MCPMiddleware())
     if memory is not None:
         preparers.append(memory)
+    if capability_registry is not None:
+        from ai_assistant.capabilities.middleware import ToolBindingMiddleware
+        # 放在最后：先让规则、Skills、MCP 指导完成系统提示，再收窄本轮工具集。
+        preparers.append(ToolBindingMiddleware())
     from ai_assistant.agents.outcomes import TurnState
 
     def prepare(request):

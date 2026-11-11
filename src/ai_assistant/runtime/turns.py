@@ -41,8 +41,12 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
                 raise SessionError('同一输入 ID 的内容不同，拒绝覆盖已接收输入。')
             raise SessionError('该输入已接收，未重复执行；请查看会话状态。')
     project_rules = load_project_rules(session.context)
-    turn_context = replace(session.context, project_rules=project_rules, input_id=input_id,
-                           resolved_datetimes=set(), effect_facts=[], inflight_tools=set(), executed_tool_calls=set())
+    from ai_assistant.capabilities.model import CapabilityTurnState
+    previous = getattr(session.context, 'capabilities', None)
+    registry = getattr(previous, 'registry', None)
+    turn_context = replace(session.context, project_rules=project_rules, input_id=input_id, session_id=session.session_id,
+                           resolved_datetimes=set(), effect_facts=[], inflight_tools=set(), executed_tool_calls=set(),
+                           capabilities=CapabilityTurnState(registry=registry))
     started = monotonic()
     timings = {}
     observer = None
