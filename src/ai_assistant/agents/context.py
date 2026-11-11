@@ -53,7 +53,7 @@ def validate_tool_pairs(messages):
 
 
 def is_summary(message):
-    # 兼容已有 checkpoint 中由原生摘要中间件生成的消息。
+    # 原生摘要中间件生成的消息标记。
     return message.additional_kwargs.get('lc_source') == 'summarization'
 
 

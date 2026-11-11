@@ -13,12 +13,8 @@ async def reply(conn, row, text, settings):
 
 
 async def bind(conn, binding, session_id):
-    cursor = await conn.execute('''UPDATE assistant_sessions SET binding=%s
-        WHERE id=%s AND (binding IS NULL OR binding=%s)''', (binding, session_id, binding))
-    if cursor.rowcount != 1:
-        raise SessionError('会话不属于当前聊天。')
-    await conn.execute('''INSERT INTO assistant_channel_sessions(binding,session_id) VALUES(%s,%s)
-        ON CONFLICT(binding) DO UPDATE SET session_id=EXCLUDED.session_id''', (binding, session_id))
+    from ai_assistant.storage.sessions import SessionRepository
+    await SessionRepository(conn, None).bind(binding, session_id)
 
 
 async def prepare_session_end(repo, row, *, active_input_id=None):
@@ -27,9 +23,7 @@ async def prepare_session_end(repo, row, *, active_input_id=None):
     stored = await commands.get(row['id'])
     if stored:
         return stored
-    current = await (await repo.execute(
-        'SELECT s.id,s.thread_id FROM assistant_sessions s JOIN assistant_channel_sessions c '
-        'ON c.session_id=s.id WHERE c.binding=%s', (row['binding'],))).fetchone()
+    current = await repo.binding_session(row['binding'])
     target = {'active_input_id': active_input_id}
     if current:
         target.update(session_id=str(current['id']))

@@ -114,15 +114,9 @@ async def execute(config, args):
                 snapshot=version['snapshot'], metadata=version['metadata'], force=True, restore=False))
         elif args.action == 'check':
             if args.database:
-                from sqlalchemy import text
-                async with store.engine.connect() as conn:
-                    for table in ('rag_documents', 'rag_versions', 'rag_jobs', 'rag_builds', 'rag_chunks', 'upsertion_record', 'rag_sources', 'rag_sync_runs', 'rag_management_operations'):
-                        if not (await conn.execute(text('SELECT to_regclass(:name)'), dict(name=table))).scalar():
-                            raise KnowledgeError('缺少 schema，请显式运行 init。')
-                    columns = set((await conn.execute(text("""SELECT attname FROM pg_attribute
-                        WHERE attrelid=to_regclass('rag_builds') AND attnum>0 AND NOT attisdropped"""))).scalars())
-                    if not {'attempt_number', 'error_code', 'error_message', 'diagnostic_path'} <= columns:
-                        raise KnowledgeError('知识库结构不受支持；init 仅创建当前结构，不升级旧结构。')
+                await store.check_tables(('rag_documents', 'rag_versions', 'rag_jobs', 'rag_builds',
+                    'rag_chunks', 'upsertion_record', 'rag_sources', 'rag_sync_runs',
+                    'rag_management_operations'))
                 print('数据库及 schema 检查通过。')
 
     finally:

@@ -41,6 +41,21 @@ class PgvectorStore(SourceStore):
         self.config = config
         self.engine = create_async_engine(config.database_url.get_secret_value(), hide_parameters=True)
 
+    async def chunk_rows(self, build_id):
+        async with self.engine.connect() as conn:
+            return (await conn.execute(text(
+                "SELECT langchain_id,content FROM rag_chunks "
+                "WHERE langchain_metadata->>'index_version'=:b"),
+                dict(b=build_id))).all()
+
+    async def update_chunk_tsv(self, values):
+        if not values:
+            return
+        async with self.engine.begin() as conn:
+            await conn.execute(text(
+                "UPDATE rag_chunks SET content_tsv=to_tsvector('pg_catalog.simple',:words) "
+                "WHERE langchain_id=:id"), values)
+
     async def close(self):
         await self.engine.dispose()
 
@@ -50,6 +65,19 @@ class PgvectorStore(SourceStore):
             for name in ('rag_documents','rag_source_documents','rag_sync_runs','rag_management_operations'):
                 if not (await conn.execute(text('SELECT to_regclass(:name)'),dict(name=name))).scalar():
                     raise KnowledgeError('知识库结构不受支持；init 仅创建当前结构，不升级旧结构。')
+
+    async def check_tables(self, tables):
+        async with self.engine.connect() as conn:
+            for table in tables:
+                if not (await conn.execute(text('SELECT to_regclass(:name)'), dict(name=table))).scalar():
+                    from ai_assistant.knowledge import KnowledgeError
+                    raise KnowledgeError('缺少 schema，请显式运行 init。')
+            columns = set((await conn.execute(text(
+                "SELECT attname FROM pg_attribute WHERE attrelid=to_regclass('rag_builds') "
+                "AND attnum>0 AND NOT attisdropped"))).scalars())
+            if not {'attempt_number', 'error_code', 'error_message', 'diagnostic_path'} <= columns:
+                from ai_assistant.knowledge import KnowledgeError
+                raise KnowledgeError('知识库结构不受支持；init 仅创建当前结构，不升级旧结构。')
 
     async def init(self):
         # This is the only schema-mutating entry point.

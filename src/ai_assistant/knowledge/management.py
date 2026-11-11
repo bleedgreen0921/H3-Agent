@@ -1,6 +1,5 @@
 """私人知识库管理业务：只读查询与原子操作回执，供终端和渠道复用。"""
 from uuid import uuid4
-from sqlalchemy import text
 
 from ai_assistant.knowledge import KnowledgeError
 from ai_assistant.storage.knowledge import packed, transaction
@@ -35,11 +34,7 @@ async def sources(config, store):
 async def status(store, ident):
     row = await store.sync_status(ident)
     if row is not None:
-        async with store.engine.connect() as conn:
-            counts = (await conn.execute(text("""SELECT j.state,count(*) AS n FROM rag_jobs j
-                WHERE j.id IN (SELECT DISTINCT x->>'job_id' FROM rag_sync_runs r,
-                LATERAL jsonb_array_elements(r.jobs) x WHERE r.id=:id)
-                GROUP BY j.state"""), dict(id=ident))).mappings().all()
+        counts = await store.sync_status_counts(ident)
         progress = {x['state']: x['n'] for x in counts}
         from datetime import datetime, timezone
         elapsed = ((row.get('finished_at') or datetime.now(timezone.utc))-row['created_at']).total_seconds()
@@ -52,12 +47,7 @@ async def status(store, ident):
 
 
 async def receipt(store, principal, input_id, *, conn=None, action=None, target=None):
-    if conn is None:
-        async with store.engine.connect() as connection:
-            return await receipt(store, principal, input_id, conn=connection, action=action, target=target)
-    row = (await conn.execute(text('''SELECT action,target,result FROM rag_management_operations
-        WHERE kb=:kb AND principal=:p AND input_id=:i'''),
-        dict(kb=store.config.knowledge_base_id, p=principal, i=input_id))).mappings().first()
+    row = await store.management_receipt(principal, input_id, conn=conn)
     if row is not None and action is not None and (row['action'] != action or row['target'] != target):
         raise KnowledgeError('同一输入已有不同的登记目标，拒绝覆盖或重放。')
     return row['result'] if row else None
@@ -67,7 +57,7 @@ async def apply(store, principal, input_id, action, target=None, *, submission=N
     """解析在外，登记/恢复/同步/移除和回执在同一事务内；重复输入只读回执。"""
     async with store.engine.begin() as conn:
         key = packed([store.config.knowledge_base_id, principal, input_id])
-        await conn.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:key,0))'), dict(key=key))
+        await store.management_lock(conn, key)
         previous = await receipt(store, principal, input_id, conn=conn, action=action, target=target)
         if previous is not None:
             return previous
@@ -80,10 +70,7 @@ async def apply(store, principal, input_id, action, target=None, *, submission=N
             result = dict(document_id=target, removed=await store.delete(target, conn=conn))
         else:
             raise KnowledgeError('不支持的管理操作。')
-        await conn.execute(text('''INSERT INTO rag_management_operations(kb,principal,input_id,action,target,result)
-            VALUES(:kb,:p,:i,:a,:t,CAST(:r AS jsonb))'''),
-            dict(kb=store.config.knowledge_base_id, p=principal, i=input_id,
-                 a=action, t=target, r=packed(result)))
+        await store.record_management(conn, principal, input_id, action, target, result)
         return result
 
 

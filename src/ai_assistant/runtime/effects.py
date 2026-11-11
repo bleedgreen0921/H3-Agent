@@ -1,4 +1,4 @@
-"""统一效果回执；TurnResult 继续输出兼容的 item dict。"""
+"""统一效果回执；TurnResult 以 item dict 形式输出。"""
 from dataclasses import dataclass, field
 
 

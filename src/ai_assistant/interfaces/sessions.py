@@ -23,11 +23,7 @@ async def execute(config, args):
         if args.action == 'list':
             if args.page < 1:
                 raise ConfigError('页码必须大于 0。')
-            rows = await (await repo.execute('''SELECT s.id,s.title,s.binding,s.updated_at,s.status,
-                EXISTS(SELECT 1 FROM assistant_channel_sessions c WHERE c.binding=s.binding AND c.session_id=s.id) AS current
-                FROM assistant_sessions s WHERE (%s::text IS NULL OR s.binding=%s)
-                ORDER BY s.updated_at DESC,s.id LIMIT 10 OFFSET %s''',
-                (args.binding, args.binding, (args.page - 1) * 10))).fetchall()
+            rows = await repo.list_admin(args.binding, (args.page - 1) * 10, 10)
             for row in rows:
                 print(f"{'● ' if row['current'] else ''}{row['title'] or '新会话'} | {row['id']} | {row['binding'] or '本机'} | {row['status']} | {row['updated_at']}")
         else:

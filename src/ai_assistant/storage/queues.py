@@ -32,14 +32,8 @@ class InboxRepository:
 
     async def set_progress_card(self, input_id, card_id):
         await self.conn.execute(
-            "UPDATE assistant_inbox SET body=jsonb_set(body,'{progress_card_id}',to_jsonb(%s::text)) "
+            "UPDATE assistant_inbox SET body=jsonb_set(body,'{presentation_ref}',to_jsonb(%s::text)) "
             "WHERE id=%s AND body IS NOT NULL", (card_id, input_id))
-
-    async def is_group(self, input_id):
-        row = await (await self.conn.execute(
-            "SELECT EXISTS(SELECT 1 FROM assistant_inbox WHERE id=%s AND body->>'group'='true') AS is_group",
-            (input_id,))).fetchone()
-        return bool(row and row.get('is_group'))
 
     async def block_running(self, input_id, binding):
         await self.conn.execute(

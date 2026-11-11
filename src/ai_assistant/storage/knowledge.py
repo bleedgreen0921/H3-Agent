@@ -102,6 +102,73 @@ class SourceStore:
                 ).mappings()
             ]
 
+    async def document_uri(self, ident):
+        async with self.engine.connect() as conn:
+            return (await conn.execute(text(
+                "SELECT source_uri FROM rag_documents WHERE kb=:kb AND id=:id AND NOT deleted"),
+                dict(kb=self.config.knowledge_base_id, id=ident))).scalar()
+
+    async def document_for_uri(self, uri):
+        async with self.engine.connect() as conn:
+            return (await conn.execute(text(
+                "SELECT d.deleted,v.metadata FROM rag_documents d "
+                "LEFT JOIN rag_versions v ON v.id=d.desired_version "
+                "WHERE d.kb=:kb AND d.source_uri=:uri"),
+                dict(kb=self.config.knowledge_base_id, uri=uri))).mappings().one_or_none()
+
+    async def document_id_for_uri(self, uri):
+        async with self.engine.connect() as conn:
+            return (await conn.execute(text(
+                "SELECT id FROM rag_documents WHERE kb=:kb AND source_uri=:uri"),
+                dict(kb=self.config.knowledge_base_id, uri=uri))).scalar()
+
+    async def mark_source_error(self, source, error):
+        async with self.engine.begin() as conn:
+            await conn.execute(text(
+                "UPDATE rag_sources SET checked_at=now(),error=:error WHERE kb=:kb AND id=:id"),
+                dict(kb=self.config.knowledge_base_id, id=source, error=error))
+
+    async def sync_status_counts(self, ident):
+        async with self.engine.connect() as conn:
+            return [dict(row) for row in (await conn.execute(text(
+                "SELECT j.state,count(*) AS n FROM rag_jobs j "
+                "WHERE j.id IN (SELECT DISTINCT x->>'job_id' FROM rag_sync_runs r, "
+                "LATERAL jsonb_array_elements(r.jobs) x WHERE r.id=:id) "
+                "GROUP BY j.state"), dict(id=ident))).mappings()]
+
+    async def mark_source_ok(self, source):
+        async with self.engine.begin() as conn:
+            await conn.execute(text(
+                "UPDATE rag_sources SET checked_at=now(),error=NULL WHERE kb=:kb AND id=:id"),
+                dict(kb=self.config.knowledge_base_id, id=source))
+
+    async def management_lock(self, conn, key):
+        await conn.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:key,0))'), dict(key=key))
+
+    async def record_management(self, conn, principal, input_id, action, target, result):
+        await conn.execute(text(
+            "INSERT INTO rag_management_operations(kb,principal,input_id,action,target,result) "
+            "VALUES(:kb,:p,:i,:a,:t,CAST(:r AS jsonb))"),
+            dict(kb=self.config.knowledge_base_id, p=principal, i=input_id,
+                 a=action, t=target, r=packed(result)))
+
+    async def management_receipt(self, principal, input_id, conn=None):
+        if conn is None:
+            async with self.engine.connect() as connection:
+                return await self.management_receipt(principal, input_id, conn=connection)
+        return (await conn.execute(text(
+            "SELECT action,target,result FROM rag_management_operations "
+            "WHERE kb=:kb AND principal=:p AND input_id=:i"),
+            dict(kb=self.config.knowledge_base_id, p=principal, i=input_id))).mappings().first()
+
+    async def management_receipts(self, ident=None):
+        async with self.engine.connect() as conn:
+            return [dict(row) for row in (await conn.execute(text(
+                "SELECT input_id,action,target,result FROM rag_management_operations "
+                "WHERE kb=:kb AND (CAST(:id AS text) IS NULL OR input_id=:id) "
+                "ORDER BY created_at DESC LIMIT 100"),
+                dict(kb=self.config.knowledge_base_id, id=ident))).mappings()]
+
     async def members(self, source=None, *, include_disabled=False):
         async with self.engine.connect() as conn:
             return [

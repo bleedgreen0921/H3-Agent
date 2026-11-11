@@ -78,8 +78,8 @@ def load_project_rules(context):
 
 def create_assistant_agent(model, tools, *, checkpointer, settings,
                            context_settings=None, max_input_tokens=None, model_parameters=None,
-                           skills_enabled=False, mcp_enabled=False, persona='', capability_registry=None,
-                           prompt_sections=(), feature_middleware=(), failure_notices=(), capability_policy=None):
+                           persona='', capability_registry=None, prompt_sections=(),
+                           component_middleware=(), failure_notices=(), capability_policy=None):
     """组装原生 LangChain Agent，并配置请求准备、调用限制及上下文管理。
 
     本函数只负责构建 Agent；模型调用和工具调度交给框架，轮次管理由调用方负责。
@@ -93,12 +93,10 @@ def create_assistant_agent(model, tools, *, checkpointer, settings,
         context_settings: 上下文管理配置；为 None 时不启用摘要管理。
         max_input_tokens: 对话和摘要共用的模型输入预算；启用 MCP 或上下文管理时必须显式提供。
         model_parameters: 当前模型的显式参数，仅用于读取摘要输出上限，不修改模型配置。
-        skills_enabled: 是否添加本地 Skills 中间件。
-        mcp_enabled: 是否添加 MCP 工具请求适配中间件。
+        component_middleware: 由组件贡献的 middleware；Skills/MCP/Knowledge 只由此注入。
         persona: 已读取的个人风格文本，只影响表达，不授予额外工具权限。
         capability_registry: 可选的能力注册表；提供时按轮只绑定计划中的工具与 Skill 目录。
         prompt_sections: 由组件贡献的领域提示片段。
-        feature_middleware: 由组件贡献的领域中间件。
         failure_notices: 由组件贡献的失败提示 hook。
         capability_policy: 工具读写分类；未提供时从 tools 推导。
 
@@ -110,10 +108,6 @@ def create_assistant_agent(model, tools, *, checkpointer, settings,
         ConfigError: 启用 MCP 却未指定主模型输入预算。
         ValueError: 启用上下文管理却缺少当前模型的输入预算。
     """
-    # MCP 工具 schema 会占用模型上下文，必须先明确可用预算再组装 Agent。
-    if mcp_enabled and max_input_tokens is None:
-        from ai_assistant.config import ConfigError
-        raise ConfigError('启用 MCP 工具的模型必须显式配置 max_input_tokens。')
     memory = None
     output_limit = None
     if context_settings is not None:
@@ -170,15 +164,9 @@ def create_assistant_agent(model, tools, *, checkpointer, settings,
         from ai_assistant.capabilities.middleware import CapabilityPlannerMiddleware
         # 先规划一次，Skills 与工具绑定共享同一份 ExposurePlan。
         preparers.insert(0, CapabilityPlannerMiddleware(capability_registry))
-    # 兼容直接调用：组件路径通过 feature_middleware 注入，不再读取功能布尔开关。
-    for item in feature_middleware:
+    # 组件贡献的 middleware 是 Skills/MCP/Knowledge 的唯一来源。
+    for item in component_middleware:
         preparers.append(item)
-    if skills_enabled and not any(type(item).__name__ == 'SkillsMiddleware' for item in preparers):
-        from ai_assistant.agents.skills import SkillsMiddleware
-        preparers.append(SkillsMiddleware(max_input_tokens))
-    if mcp_enabled and not any(type(item).__name__ == 'MCPMiddleware' for item in preparers):
-        from ai_assistant.agents.mcp import MCPMiddleware
-        preparers.append(MCPMiddleware())
     if memory is not None:
         preparers.append(memory)
     if capability_registry is not None:
@@ -207,11 +195,6 @@ def create_assistant_agent(model, tools, *, checkpointer, settings,
         ModelCallLimitMiddleware(run_limit=settings.model_call_limit, exit_behavior='error'),
         ToolCallLimitMiddleware(run_limit=settings.tool_call_limit, exit_behavior='error'),
     ]
-    # 只有注册了知识库检索工具，才增加对应的专用限制与处理逻辑。
-    if not feature_middleware and any(tool.name == 'search_knowledge' for tool in tools):
-        # 兼容直接组装 Agent 的调用；组件路径由 KnowledgeComponent 提供。
-        from ai_assistant.knowledge.tools import knowledge_middleware
-        middleware.extend(knowledge_middleware(run_limit=settings.knowledge_call_limit))
     if context_settings is not None:
         from ai_assistant.agents.context import context_middleware
         middleware.extend(context_middleware(model, max_input_tokens=max_input_tokens,

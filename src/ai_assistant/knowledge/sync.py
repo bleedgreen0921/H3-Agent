@@ -4,7 +4,6 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import text
 from ai_assistant.knowledge import KnowledgeError
 from ai_assistant.knowledge.config import resolve_knowledge_paths
 from ai_assistant.knowledge.ingestion import snapshot
@@ -89,15 +88,7 @@ async def synchronize(config, store, run):
     sources = await store.source_list()
     target_uri = None
     if filters.get("document_id"):
-        async with store.engine.connect() as conn:
-            target_uri = (
-                await conn.execute(
-                    text(
-                        "SELECT source_uri FROM rag_documents WHERE kb=:kb AND id=:id AND NOT deleted"
-                    ),
-                    dict(kb=store.config.knowledge_base_id, id=filters["document_id"]),
-                )
-            ).scalar()
+        target_uri = await store.document_uri(filters["document_id"])
         if target_uri is None:
             await store.settle_scan(
                 run, [], [{"source": "document", "reason": "document_not_found"}]
@@ -156,10 +147,8 @@ async def synchronize(config, store, run):
 
             if isinstance(exc, LeaseLost):
                 raise
-            async with store.engine.begin() as conn:
-                await conn.execute(text("UPDATE rag_sources SET checked_at=now(),error=:error WHERE kb=:kb AND id=:id"),
-                    dict(kb=store.config.knowledge_base_id, id=name,
-                         error=exc.code if isinstance(exc, SourceFailure) else type(exc).__name__))
+            await store.mark_source_error(
+                name, exc.code if isinstance(exc, SourceFailure) else type(exc).__name__)
             errors.append(
                 {
                     "source": name,
@@ -171,31 +160,11 @@ async def synchronize(config, store, run):
             await store.record_scan_errors(run, errors)
             continue
         for uri, descriptor in descriptors:
-            async with store.engine.connect() as conn:
-                previous_document = (
-                    (
-                        await conn.execute(
-                            text(
-                                "SELECT d.deleted,v.metadata FROM rag_documents d LEFT JOIN rag_versions v ON v.id=d.desired_version WHERE d.kb=:kb AND d.source_uri=:uri"
-                            ),
-                            dict(kb=store.config.knowledge_base_id, uri=uri),
-                        )
-                    )
-                    .mappings()
-                    .one_or_none()
-                )
+            previous_document = await store.document_for_uri(uri)
             if previous_document and previous_document["deleted"]:
                 continue
             if filters.get("document_id"):
-                async with store.engine.connect() as conn:
-                    match = (
-                        await conn.execute(
-                            text(
-                                "SELECT id FROM rag_documents WHERE kb=:kb AND source_uri=:uri"
-                            ),
-                            dict(kb=store.config.knowledge_base_id, uri=uri),
-                        )
-                    ).scalar()
+                match = await store.document_id_for_uri(uri)
                 if match != filters["document_id"]:
                     continue
             try:
@@ -298,13 +267,7 @@ async def synchronize(config, store, run):
                     }
                 )
             await store.record_scan_errors(run, errors)
-        async with store.engine.begin() as conn:
-            await conn.execute(
-                text(
-                    "UPDATE rag_sources SET checked_at=now(),error=NULL WHERE kb=:kb AND id=:id"
-                ),
-                dict(kb=store.config.knowledge_base_id, id=name),
-            )
+        await store.mark_source_ok(name)
     await store.settle_scan(run, jobs, errors)
 
 

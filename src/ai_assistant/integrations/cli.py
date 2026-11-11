@@ -62,15 +62,10 @@ async def execute(config, args):
         if config.knowledge is not None:
             from ai_assistant.knowledge.sync import settings
             from ai_assistant.storage.rag import RagStore
-            from sqlalchemy import text
             knowledge = RagStore(settings(config))
             try:
                 ident = args.operation_id if args.operation_action == 'inspect' else None
-                async with knowledge.engine.connect() as conn:
-                    receipts = [dict(r) for r in (await conn.execute(text('''SELECT input_id,action,target,result
-                        FROM rag_management_operations WHERE kb=:kb AND (CAST(:id AS text) IS NULL OR input_id=:id)
-                        ORDER BY created_at DESC LIMIT 100'''),
-                        dict(kb=knowledge.config.knowledge_base_id, id=ident))).mappings()]
+                receipts = await knowledge.management_receipts(ident)
                 by_input = {r['input_id']: r for r in receipts}
                 commands = result.get('management_commands', []) if isinstance(result, dict) and args.operation_action == 'list' else (result if isinstance(result, list) else [])
                 for command in commands:

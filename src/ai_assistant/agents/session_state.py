@@ -116,17 +116,8 @@ class SessionState(BaseModel):
             try:
                 return cls.model_validate(raw)
             except Exception:
-                # 新格式损坏时保留旧字段迁移路径，避免整轮失败。
-                pass
-        text = str(values.get('session_memory') or '').strip()
-        items = []
-        if text:
-            items.append(MemoryItem(kind='fact', key='legacy_summary', text=text,
-                                    source='legacy'))
-        return cls(memory=MemoryState(
-            items=items,
-            covered_message_id=values.get('memory_cursor'),
-            covered_turns=values.get('memory_covered_turns', 0) or 0))
+                return cls()
+        return cls()
 
     def to_values(self):
         return {'version': self.version, 'memory': self.memory.model_dump(mode='json'),

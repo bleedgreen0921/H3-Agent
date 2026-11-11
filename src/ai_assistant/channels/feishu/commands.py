@@ -22,8 +22,7 @@ async def _session_end(ctx, name):
         sid = target.get('session_id')
         if sid:
             await repo.acquire(sid)
-            owned = await (await repo.execute(
-                'SELECT binding FROM assistant_sessions WHERE id=%s', (sid,))).fetchone()
+            owned = await repo.session_binding(sid)
             if not owned or owned['binding'] != ctx.row['binding']:
                 raise SessionError('取消目标会话不存在或不属于当前聊天。')
         async with repo.conn.transaction():
@@ -68,11 +67,7 @@ async def _list(ctx):
             async with conn.transaction():
                 await reply(conn, ctx.row, stored['result'], ctx.worker.config.channels.feishu)
             return CommandResult()
-        rows = await (await conn.execute('''SELECT s.id,s.title,s.updated_at,s.status,
-            (c.session_id=s.id) AS current FROM assistant_sessions s
-            LEFT JOIN assistant_channel_sessions c ON c.binding=s.binding
-            WHERE s.binding=%s ORDER BY s.updated_at DESC,s.id LIMIT 11 OFFSET %s''',
-            (ctx.row['binding'], (page - 1) * 10))).fetchall()
+        rows = await repo.list_binding(ctx.row['binding'], (page - 1) * 10, 11)
         if not rows:
             text = '当前聊天暂无会话。' if page == 1 else '该页没有会话。'
         else:
@@ -101,25 +96,20 @@ async def _delete(ctx):
             async with conn.transaction():
                 await reply(conn, ctx.row, stored['result'], ctx.worker.config.channels.feishu)
             return CommandResult()
-        found = await (await conn.execute(
-            'SELECT status FROM assistant_sessions WHERE id=%s AND binding=%s',
-            (target, ctx.row['binding']))).fetchone()
+        found = await repo.status_for_binding(target, ctx.row['binding'])
         if not found:
             text = '会话已删除。' if stored else '未找到可删除的会话。'
         else:
             try:
                 await repo.acquire(target)
-                current = await (await conn.execute(
-                    'SELECT status FROM assistant_sessions WHERE id=%s AND binding=%s',
-                    (target, ctx.row['binding']))).fetchone()
+                current = await repo.status_for_binding(target, ctx.row['binding'])
                 if not current or current['status'] == 'running':
                     raise SessionError('会话正在执行，请先 /cancel 并等待清理结束。')
                 await commands.begin(ctx.row['id'], ctx.row['binding'], '/delete', target)
                 await repo.delete(target, binding=ctx.row['binding'])
                 text = '会话已删除（应用侧聊天、摘要及 checkpoint）。飞书消息、知识库、文件和必要业务回执保留。'
             except SessionError:
-                check = await (await conn.execute(
-                    'SELECT status FROM assistant_sessions WHERE id=%s', (target,))).fetchone()
+                check = await repo.status(target)
                 if check and check['status'] == 'deleting':
                     raise
                 text = '会话正在使用，请先 /cancel 并等待清理结束。'

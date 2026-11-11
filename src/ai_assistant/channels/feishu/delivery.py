@@ -41,13 +41,9 @@ class FeishuOutboxSender:
         from ai_assistant.interfaces.delivery import classify, exhausted
         body = row['body'] or {}
         # 新回复显式标记私聊；旧记录从原输入确认，群记录只保留不投递。
-        if body.get('group') is True:
-            event('delivery.skipped', status='group_unsupported')
-            return
         if body.get('group') is not False:
-            if await self.inbox.is_group(row['input_id']):
-                event('delivery.skipped', status='group_unsupported')
-                return
+            event('delivery.skipped', status='unsupported')
+            return
         delivery = body.get('delivery')
         # 旧记录仅供诊断，升级不能自动补发。
         if not delivery or delivery.get('version') != 1:
@@ -71,7 +67,7 @@ class FeishuOutboxSender:
         body = row['body']
         delivery = body['delivery']
         # 成功投递全部分段后撤回本轮工作卡；卡片是辅助展示，不影响投递状态。
-        card_id = body.get('presentation_ref') or body.get('progress_card_id')
+        card_id = body.get('presentation_ref')
         started = time.monotonic()
         # 取消异常直接传播，保留 sending，由下次启动转为 unknown。
         try:

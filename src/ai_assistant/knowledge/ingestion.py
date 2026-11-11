@@ -5,7 +5,6 @@ import mimetypes
 import os
 from pathlib import Path
 import stat
-from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, OperationalError
 from ai_assistant.knowledge import IngestionError, KnowledgeError
 from ai_assistant.knowledge.loading import parse_snapshot, require_content
@@ -119,16 +118,12 @@ async def build(store, job):
             await aindex(chunks, manager, vectors, batch_size=c.embedding.batch_size,
                          cleanup='full', source_id_key='document_id', key_encoder='sha256')
             # All embedding requests and vector writes finish before keyword preparation/publication.
-            async with store.engine.connect() as conn:
-                rows = (await conn.execute(text('''SELECT langchain_id,content FROM rag_chunks
-                    WHERE langchain_metadata->>'index_version'=:b'''), dict(b=job['build_id']))).all()
+            rows = await store.chunk_rows(job['build_id'])
             if not any(row.content.strip() for row in rows):
                 raise IngestionError('empty_index', '当前构建未写入有效片段，已停止发布。',
                                      f'build_id={job["build_id"]}; stored_rows={len(rows)}')
             values = await asyncio.to_thread(lambda: [dict(id=r.langchain_id, words=terms(r.content)) for r in rows])
-            async with store.engine.begin() as conn:
-                if values:
-                    await conn.execute(text("UPDATE rag_chunks SET content_tsv=to_tsvector('pg_catalog.simple',:words) WHERE langchain_id=:id"), values)
+            await store.update_chunk_tsv(values)
             await store.publish(job)
         finally:
             await engine.close()

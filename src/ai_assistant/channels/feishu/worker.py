@@ -77,13 +77,13 @@ class BotWorker:
         self.active_row = None
 
     async def enqueue_reply(self, row, text, *, conn=None, purpose='answer', snapshot=None,
-                            progress_card_id=None):
+                            presentation_ref=None):
         from ai_assistant.channels.feishu.outbox import enqueue_text
 
         async def enqueue(connection):
             async with connection.transaction():
                 await enqueue_text(connection, self.config.channels.feishu, row, text,
-                    purpose=purpose, snapshot=snapshot, progress_card_id=progress_card_id)
+                    purpose=purpose, snapshot=snapshot, presentation_ref=presentation_ref)
         if conn is not None:
             await enqueue(conn)
         else:
@@ -126,9 +126,7 @@ class BotWorker:
             await self.inbox.mark_completed(row['id'])
             return
         async with session_storage(self.config.sessions) as repo:
-            session = await (await repo.execute(
-                'SELECT s.* FROM assistant_sessions s JOIN assistant_channel_sessions c ON c.session_id=s.id WHERE c.binding=%s',
-                (row['binding'],))).fetchone()
+            session = await repo.binding_session(row['binding'])
             if not session:
                 display = project({'status': 'unknown', 'input_id': row['id']}, fallback or '未找到当前会话记录，未恢复或重新执行。')
             else:
@@ -141,8 +139,8 @@ class BotWorker:
         await self.enqueue_reply(row, display.text, snapshot=display.snapshot())
 
     async def binding_session(self, row):
-        result = await (await self.store.conn.execute('SELECT session_id FROM assistant_channel_sessions WHERE binding=%s',
-            (row['binding'],))).fetchone()
+        from ai_assistant.storage.sessions import SessionRepository
+        result = await SessionRepository(self.store.conn, None).binding_session_id(row['binding'])
         return str(result['session_id']) if result else None
 
     async def show_usage(self, row):
@@ -224,7 +222,7 @@ class BotWorker:
             from ai_assistant.runtime.presentation import project, saved_body
             display = project(result.result, saved_body(result.result, result.messages))
             await self.enqueue_reply(row, display.text, snapshot=display.snapshot(),
-                progress_card_id=progress.card_id if progress is not None else None)
+                presentation_ref=progress.card_id if progress is not None else None)
             # 成功时保留卡片到最终文本送达，再由发送器撤回。
             await self._finish_progress(progress, 'complete', recall=False)
             return session
@@ -269,7 +267,7 @@ class BotWorker:
             if (row.get('body') or {}).get('group') is not False:
                 continue
             # 服务重启后不再有进程更新工作卡，先标记待核实再进入只读恢复。
-            await close_stale_card(self.api, (row.get('body') or {}).get('progress_card_id'), row['id'])
+            await close_stale_card(self.api, (row.get('body') or {}).get('presentation_ref'), row['id'])
             await self.execute(row, recover=True)
 
     async def recover_rag(self, row):

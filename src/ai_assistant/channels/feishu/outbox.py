@@ -9,7 +9,7 @@ from ai_assistant.observability import observed
 
 
 @observed("reply.enqueue", lambda conn, settings, row, text, **kw: {"input_id": row["id"]})
-async def enqueue_text(conn, settings, row, text, *, purpose='answer', snapshot=None, progress_card_id=None):
+async def enqueue_text(conn, settings, row, text, *, purpose='answer', snapshot=None, presentation_ref=None):
     # 接收端之外的第二道边界：历史群请求也不能登记新的回复。
     if (row.get('body') or {}).get('group') is not False:
         from ai_assistant.config import ConfigError
@@ -19,12 +19,10 @@ async def enqueue_text(conn, settings, row, text, *, purpose='answer', snapshot=
         identity = row['id'] + ':reply:' + str(part)
         payload = {'chat_id': row['body']['chat_id'], 'group': False,
                    'message': markdown_message(value), 'presentation': snapshot}
-        if progress_card_id:
-            payload['presentation_ref'] = progress_card_id
-            # 旧发送器仍读取该字段。
-            payload['progress_card_id'] = progress_card_id
+        if presentation_ref:
+            payload['presentation_ref'] = presentation_ref
         parts.append(OutboundPart(
             id=str(uuid5(NAMESPACE_URL, identity)), input_id=row['id'], part=part,
             payload=payload, delivery={**metadata(settings), 'purpose': purpose},
-            presentation_ref=progress_card_id))
+            presentation_ref=presentation_ref))
     await enqueue_parts(conn, row['id'], parts)

@@ -13,7 +13,4 @@ class TurnState(AgentState):
     project_rules_snapshot: str
     completed_turns: int
     session_state: dict
-    session_memory: str
-    memory_covered_turns: int
-    memory_cursor: str | None
     last_counted_input_id: str

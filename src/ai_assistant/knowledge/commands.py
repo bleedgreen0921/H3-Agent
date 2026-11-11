@@ -1,4 +1,4 @@
-"""知识库命令的业务 handler；解析和渲染仍对外兼容。"""
+"""知识库命令的业务 handler、解析和渲染。"""
 import asyncio
 from zoneinfo import ZoneInfo
 

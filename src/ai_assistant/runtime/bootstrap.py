@@ -82,13 +82,13 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             config=config, caller=caller, stack=stack, resources=resources,
             operations=operations, context=context,
             max_input_tokens=config.models[selected].max_input_tokens)
-        tools, prompt_sections, feature_middleware, failure_notices, services = [], [], [], [], {}
+        tools, prompt_sections, component_middleware, failure_notices, services = [], [], [], [], {}
         for component in build_components(config, caller, retriever=retriever):
             await component.open(component_context)
             contribution = component.contribute(component_context)
             tools.extend(contribution.tools)
             prompt_sections.extend(contribution.prompt_sections)
-            feature_middleware.extend(contribution.middleware)
+            component_middleware.extend(contribution.middleware)
             failure_notices.extend(contribution.failure_notices)
             services.update(contribution.services)
         context = component_context.context
@@ -116,8 +116,7 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             context_settings=config.context,
             max_input_tokens=config.models[selected].max_input_tokens,
             model_parameters=config.models[selected].parameters,
-            skills_enabled=False, mcp_enabled=False,
-            prompt_sections=prompt_sections, feature_middleware=feature_middleware,
+            prompt_sections=prompt_sections, component_middleware=component_middleware,
             failure_notices=failure_notices, capability_registry=registry,
             capability_policy=registry.build_policy())
         session = AssistantSession(agent, context, config.agent, model_name=selected,
