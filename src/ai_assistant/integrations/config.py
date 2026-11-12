@@ -59,10 +59,9 @@ class FeishuChannel(Settings):
     delivery_max_attempts: int = Field(default=3, ge=1, le=100)
     final_delivery_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     delivery_attempt_timeout_seconds: float = Field(default=8, gt=0, allow_inf_nan=False)
-    # 长任务工作卡：延迟出现、答案预览与送达后撤回；0 秒关闭。
+    # 长任务工作卡：延迟出现、答案预览与终态保留；0 秒关闭。
     progress_card_delay_seconds: float = Field(default=1.5, ge=0, le=60, allow_inf_nan=False)
     progress_card_preview_chars: int = Field(default=4000, ge=0, le=20000, strict=True)
-    progress_card_recall: bool = True
     enabled: bool = False
 
 

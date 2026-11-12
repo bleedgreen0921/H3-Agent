@@ -598,21 +598,6 @@
       "method": "GET"
     },
     {
-      "name": "bitable.v1.appTableRecord.list",
-      "native_name": "bitable_v1_appTableRecord_list",
-      "domain": "bitable",
-      "write": false,
-      "identities": [
-        "bot",
-        "user"
-      ],
-      "scopes": [
-        "bitable:app"
-      ],
-      "path": "/open-apis/bitable/v1/apps/:app_token/tables/:table_id/records",
-      "method": "GET"
-    },
-    {
       "name": "bitable.v1.appTableRecord.search",
       "native_name": "bitable_v1_appTableRecord_search",
       "domain": "bitable",

@@ -69,10 +69,12 @@ class OutboxRepository:
         await self.conn.execute('SELECT id FROM assistant_inbox WHERE id=%s FOR UPDATE', (input_id,))
 
     async def enqueue_parts(self, input_id, parts):
+        from psycopg.types.json import Jsonb
         for part, outbox_id, body in parts:
+            # psycopg 不会自动把 dict 适配为 jsonb，必须显式包装，否则登记回复时抛 ProgrammingError。
             await self.conn.execute('''INSERT INTO assistant_outbox(id,input_id,body,part)
                 VALUES(%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING''',
-                (outbox_id, input_id, body, part))
+                (outbox_id, input_id, Jsonb(body), part))
 
     async def pending_for_delivery(self):
         return await (await self.conn.execute(

@@ -134,8 +134,7 @@ async def _skills(ctx):
 
 async def _rag(ctx):
     from ai_assistant.knowledge.commands import handle as handle_rag
-    if ctx.value[0] == 'add':
-        return CommandResult(start_turn=True, turn_text=ctx.text)
+    # `/rag add` 属于管理指令：在 Active 任务中执行以便取消，但不能因此打开模型会话。
     await handle_rag(ctx.worker, ctx.row, ctx.caller, ctx.value, recover=ctx.recover)
     return CommandResult()
 
@@ -175,7 +174,7 @@ def _page(text):
     return page
 
 
-def _delete(text):
+def _delete_parse(text):
     if len(text.split()) != 1 or str(UUID(text)) != text.lower():
         raise ValueError
     return str(UUID(text))
@@ -200,7 +199,7 @@ def default_registry():
         CommandSpec('/cancel', '/cancel', _no_args, _cancel, preempt=True, progress=False),
         CommandSpec('/usage', '/usage', _no_args, _usage, progress=False),
         CommandSpec('/list', '/list [页码]', _page, _list),
-        CommandSpec('/delete', '/delete <会话ID>', _delete, _delete),
+        CommandSpec('/delete', '/delete <会话ID>', _delete_parse, _delete),
         CommandSpec('/skills', '/skills', _no_args, _skills),
         CommandSpec('/skill', '/skill <ID> <请求>', _skill_parse, _skill, turn=True),
         CommandSpec('/rag', '/rag ...', _rag_parse, _rag, recover_rag=True,

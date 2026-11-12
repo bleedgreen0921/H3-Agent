@@ -95,11 +95,14 @@ class BotWorker:
         async with operation_storage(self.config.sessions) as store:
             await store.inbox.set_progress_card(input_id, card_id)
 
-    async def _finish_progress(self, progress, state, *, recall, phase=None):
-        """辅助卡片的终态清理；取消期间也等待网络调用超时结束。"""
+    async def _finish_progress(self, progress, state, *, phase=None):
+        """辅助卡片的终态清理；取消期间也等待网络调用超时结束。
+
+        终态就地更新为终态卡片并保留，不撤回。
+        """
         if progress is None:
             return
-        task = asyncio.create_task(progress.finish(state, recall=recall, phase=phase))
+        task = asyncio.create_task(progress.finish(state, phase=phase))
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
@@ -200,7 +203,7 @@ class BotWorker:
             if result.reply:
                 await self.enqueue_reply(row, result.reply)
             if not result.start_turn:
-                await self._finish_progress(progress, 'complete', recall=True)
+                await self._finish_progress(progress, 'complete')
                 return None
             text = result.turn_text or text
             skill_ids = result.skill_ids or None
@@ -223,13 +226,13 @@ class BotWorker:
             display = project(result.result, saved_body(result.result, result.messages))
             await self.enqueue_reply(row, display.text, snapshot=display.snapshot(),
                 presentation_ref=progress.card_id if progress is not None else None)
-            # 成功时保留卡片到最终文本送达，再由发送器撤回。
-            await self._finish_progress(progress, 'complete', recall=False)
+            # 成功时保留卡片到最终文本送达，送达后由发送器更新为已完成终态。
+            await self._finish_progress(progress, 'complete')
             return session
         except BaseException as error:
             state = 'cancelled' if isinstance(error, asyncio.CancelledError) else 'failed'
             with suppress(Exception):
-                await self._finish_progress(progress, state, recall=True)
+                await self._finish_progress(progress, state)
             raise
 
     async def stop_for_command(self, row):

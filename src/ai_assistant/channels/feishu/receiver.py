@@ -16,7 +16,7 @@ from ai_assistant.storage.integrations import operation_storage
 from ai_assistant.tools.context import tool_context
 from ai_assistant.channels.feishu.worker import BotWorker, ProcessResources
 from ai_assistant.channels.feishu.delivery import FeishuOutboxSender
-from ai_assistant.interfaces.commands import CommandRegistry
+from ai_assistant.channels.feishu.commands import default_registry
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ async def _serve(config):
             await stack.enter_async_context(optional_knowledge_worker(config))
         context = await stack.enter_async_context(tool_context(config))
         directory = await stack.enter_async_context(mcp_resources(config, context.workspace))
-        resources = ProcessResources(directory, context.skills, {}, CommandRegistry())
+        resources = ProcessResources(directory, context.services.get('skills'), {}, default_registry())
         client = await stack.enter_async_context(httpx.AsyncClient(timeout=30, trust_env=False))
         api = FeishuAPI(config.integrations.feishu, client)
         from ai_assistant.channels.feishu.delivery import FeishuOutboxSender

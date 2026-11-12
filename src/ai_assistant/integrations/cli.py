@@ -70,6 +70,10 @@ async def execute(config, args):
                 commands = result.get('management_commands', []) if isinstance(result, dict) and args.operation_action == 'list' else (result if isinstance(result, list) else [])
                 for command in commands:
                     command['business_receipt'] = by_input.get(command['input_id'])
+                # inspect 命中的是单条管理命令时也附带知识库业务回执，避免只看到渠道层状态。
+                if (args.operation_action == 'inspect' and isinstance(result, dict)
+                        and result.get('kind') == 'management_command'):
+                    result['business_receipt'] = by_input.get(result['input_id'])
                 if args.operation_action == 'inspect' and not result and receipts:
                     result = [dict(r, kind='management_command', status='committed') for r in receipts]
             finally:

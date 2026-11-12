@@ -66,7 +66,7 @@ class FeishuOutboxSender:
         row = claimed
         body = row['body']
         delivery = body['delivery']
-        # 成功投递全部分段后撤回本轮工作卡；卡片是辅助展示，不影响投递状态。
+        # 成功投递全部分段后把本轮工作卡更新为完成终态；卡片是辅助展示，不影响投递状态。
         card_id = body.get('presentation_ref')
         started = time.monotonic()
         # 取消异常直接传播，保留 sending，由下次启动转为 unknown。
@@ -114,9 +114,9 @@ class FeishuOutboxSender:
             from datetime import datetime, timezone
             event("reply.delivered", status="delivered", reply_delivery_seconds=max(0,
                 (datetime.now(timezone.utc) - completed["received_at"]).total_seconds()))
-            if card_id and settings.progress_card_recall:
-                from ai_assistant.channels.feishu.progress import recall_card
-                await recall_card(self.api, card_id, row['input_id'])
+            if card_id:
+                from ai_assistant.channels.feishu.progress import mark_complete_card
+                await mark_complete_card(self.api, card_id, row['input_id'])
 
     async def run(self):
         """独占投递连接；未处理异常交给服务监督器关闭服务。"""

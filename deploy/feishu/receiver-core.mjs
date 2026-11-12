@@ -38,7 +38,8 @@ export async function persistInbox(db,input,config){
   await db.query('BEGIN');
   await db.query('SELECT pg_advisory_xact_lock(714160003)');
   if((await db.query('SELECT 1 FROM assistant_inbox WHERE id=$1',[input.id])).rowCount){await db.query('COMMIT');return 'duplicate';}
-  const count=Number((await db.query("SELECT count(*) FROM assistant_inbox WHERE status IN ('received','running') AND body->>'group'='false'")).rows[0].count);
+  // 仅主人私聊入口；旧记录缺少 group 字段时按非群消息计入，避免漏算队列。
+  const count=Number((await db.query("SELECT count(*) FROM assistant_inbox WHERE status IN ('received','running') AND COALESCE(body->>'group','false')!='true'")).rows[0].count);
   const busy=count>=100&&!['/cancel','/new'].includes(input.body.text);
   await db.query('INSERT INTO assistant_inbox(id,binding,body,status) VALUES($1,$2,$3,$4)',
    [input.id,input.binding,input.body,busy?'completed':'received']);

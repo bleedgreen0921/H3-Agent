@@ -1,7 +1,8 @@
 """长任务工作卡：尽最大努力原地展示进度，不承载业务结果。
 
-最终答案仍走持久化的文本 outbox；卡片的创建、更新或撤回失败只记录安全事件，
+最终答案仍走持久化的文本 outbox；卡片的创建、更新失败只记录安全事件，
 不改变本轮结果、失败回执、取消和恢复语义。卡片是“过程展示”，不是业务回执。
+终态一律就地更新为终态卡片并保留，不撤回，避免飞书“对方撤回一条消息”提示。
 """
 import asyncio
 import inspect
@@ -158,8 +159,11 @@ class ProgressCard:
             # 进度辅助不能影响业务轮次。
             pass
 
-    async def finish(self, state, *, recall=False, phase=None):
-        """提交终态；网络调用有超时，调用方可安全地在取消清理中等待。"""
+    async def finish(self, state, *, phase=None):
+        """提交终态；网络调用有超时，调用方可安全地在取消清理中等待。
+
+        终态就地更新为终态卡片并保留，不撤回，避免飞书“对方撤回一条消息”提示。
+        """
         if self._closed:
             return
         self._closed = True
@@ -175,8 +179,6 @@ class ProgressCard:
                 await asyncio.wait_for(self._task, CALL_TIMEOUT + self.settings.progress_card_delay_seconds)
         if self.card_id is not None:
             await self._patch_safely(force=True)
-        if self.card_id is not None and recall and self.settings.progress_card_recall:
-            await self._recall()
 
     async def _run(self):
         try:
@@ -279,38 +281,29 @@ class ProgressCard:
             event('progress.failed', input_id=self.input_id, status='update_failed',
                   category=type(error).__name__)
 
-    async def _recall(self):
-        card_id, self.card_id = self.card_id, None
-        if card_id is None:
-            return
-        try:
-            async with asyncio.timeout(CALL_TIMEOUT):
-                await self.api.request('DELETE', '/im/v1/messages/' + quote(card_id, safe=''))
-            event('progress.recalled', input_id=self.input_id, status='recalled')
-        except Exception as error:
-            event('progress.failed', input_id=self.input_id, status='recall_failed',
-                  category=type(error).__name__)
-
 
 def _simple_card(title, template, summary, text):
     return _card_json(title, template, summary, '', text)
 
 
-async def recall_card(api, card_id, input_id):
-    """最终文本全部分段送达后撤回工作卡；失败只记事件。"""
+async def mark_complete_card(api, card_id, input_id):
+    """最终文本全部送达后，把工作卡更新为已完成终态并保留；不撤回。"""
     if api is None or not card_id:
         return
     try:
         async with asyncio.timeout(CALL_TIMEOUT):
-            await api.request('DELETE', '/im/v1/messages/' + quote(card_id, safe=''))
-        event('progress.recalled', input_id=input_id, status='recalled')
+            await api.request('PATCH', '/im/v1/messages/' + quote(card_id, safe=''),
+                              json={'content': json.dumps(_simple_card(
+                                  '已完成', 'green', '已完成',
+                                  '完整答案已送达。'), ensure_ascii=False)})
+        event('progress.completed', input_id=input_id, status='retained')
     except Exception as error:
-        event('progress.failed', input_id=input_id, status='recall_failed',
+        event('progress.failed', input_id=input_id, status='complete_card_failed',
               category=type(error).__name__)
 
 
 async def close_stale_card(api, card_id, input_id):
-    """重启恢复时把陈旧工作卡标记为待核实并撤回；失败不影响恢复。"""
+    """重启恢复时把陈旧工作卡标记为待核实终态并保留；失败不影响恢复。"""
     if api is None or not card_id:
         return
     try:
@@ -319,15 +312,9 @@ async def close_stale_card(api, card_id, input_id):
                               json={'content': json.dumps(_simple_card(
                                   '结果待核实', 'orange', '结果待核实',
                                   TERMINAL_PHASES['unknown']), ensure_ascii=False)})
+        event('progress.stale_closed', input_id=input_id, status='retained')
     except Exception as error:
         event('progress.failed', input_id=input_id, status='stale_mark_failed',
-              category=type(error).__name__)
-    try:
-        async with asyncio.timeout(CALL_TIMEOUT):
-            await api.request('DELETE', '/im/v1/messages/' + quote(card_id, safe=''))
-        event('progress.stale_closed', input_id=input_id, status='closed')
-    except Exception as error:
-        event('progress.failed', input_id=input_id, status='stale_close_failed',
               category=type(error).__name__)
 
 
@@ -359,5 +346,5 @@ class FeishuProgressSink:
     def event(self, item):
         self.card.on_event(item)
 
-    async def finish(self, state, *, recall=False, phase=None):
-        await self.card.finish(state, recall=recall, phase=phase)
+    async def finish(self, state, *, phase=None):
+        await self.card.finish(state, phase=phase)

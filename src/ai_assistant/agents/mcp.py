@@ -4,6 +4,7 @@ from copy import deepcopy
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_core.tools import ToolException
+from ai_assistant.integrations.mcp import validate_arguments
 from ai_assistant.integrations.policy import authorize, operation_principal
 from ai_assistant.integrations.adapters import service_adapter
 from ai_assistant.capabilities.policy import CapabilityPolicy
@@ -44,6 +45,13 @@ class MCPMiddleware(AgentMiddleware):
         try:
             authorize(context.caller, entry.settings, entry.original_name)
             arguments = deepcopy(request.tool_call['args'])
+            schema = getattr(getattr(entry, 'tool', None), 'args_schema', None)
+            if schema is not None and not isinstance(schema, dict):
+                schema = schema.model_json_schema()
+            try:
+                validate_arguments(schema, arguments)
+            except ValueError as error:
+                raise ToolException(f'{entry.original_name} 参数不符合 schema：{error}') from None
             expected, early = await adapter.prepare(entry, arguments, context, request.state, request.runtime.config) if adapter else ({}, None)
             expected = deepcopy(expected)
             expected.pop('client_token', None)

@@ -71,8 +71,10 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
                           caller=caller,
                           skills_directory_tokens=config.skills.directory_tokens if config.skills else 6000)
         from ai_assistant.storage.integrations import operation_storage
-        operations = (await stack.enter_async_context(operation_storage(config.sessions))
-                      if config.sessions else None)
+        operation_store = (await stack.enter_async_context(operation_storage(config.sessions))
+                           if config.sessions else None)
+        # ToolContext 与组件只依赖操作回执仓储；inbox/outbox 仍由渠道使用完整 store。
+        operations = operation_store.operations if operation_store is not None else None
         context = replace(context, operations=operations)
         model = await stack.enter_async_context(model_session(config, selected,
             config.models[selected].parameters.get('timeout', 180), factory=create_model))

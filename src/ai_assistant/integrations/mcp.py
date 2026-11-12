@@ -81,6 +81,30 @@ def stable_id(server, identity, name):
     return f'mcp_{prefix}_{digest}'
 
 
+def validate_arguments(schema, arguments, path=''):
+    """按 MCP JSON schema 校验参数层级，拒绝会被服务端静默忽略的未知字段。"""
+    if not isinstance(schema, dict) or schema.get('type') != 'object':
+        return
+    properties = schema.get('properties')
+    if not isinstance(properties, dict):
+        return
+    if not isinstance(arguments, dict):
+        raise ValueError(f'{path or "参数"}必须是对象')
+    if schema.get('additionalProperties') is not True:
+        unknown = sorted(set(arguments) - set(properties))
+        if unknown:
+            allowed = '、'.join(sorted(properties)) or '无'
+            where = path or '顶层'
+            raise ValueError(f'{where}包含未知参数：{"、".join(unknown)}；允许的参数：{allowed}')
+    missing = [key for key in schema.get('required', ()) if key not in arguments]
+    if missing:
+        raise ValueError(f'{path or "顶层"}缺少必填参数：{"、".join(missing)}')
+    for key, value in arguments.items():
+        child = properties.get(key)
+        if isinstance(child, dict) and child.get('type') == 'object':
+            validate_arguments(child, value, f'{path}.{key}' if path else key)
+
+
 @asynccontextmanager
 async def mcp_resources(config, workspace, *, caller=None):
     if config.mcp is None or not config.mcp.servers:

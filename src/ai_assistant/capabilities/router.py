@@ -83,8 +83,14 @@ def build_plan(registry, query, *, directory_budget=6000, active_skill_ids=()):
             continue
         if intent.objects and item.objects and not (item.objects & intent.objects):
             continue
+        covered = bool(item.objects & covered_objects or item.domains & covered_domains)
+        # 只要工具还覆盖当前意图中尚未被核心能力覆盖的对象或领域，就不能仅因
+        # 另一个领域已被覆盖而排除它。例如 search 同时属于 web 和 bitable：
+        # core 的 web_search 覆盖 web，但 bitable 仍需这个 search 工具。
+        uncovered_intent = bool((item.objects & intent.objects) - covered_objects
+                                or (item.domains & intent.domains) - covered_domains)
         if (intent.side_effect != 'write' and item.side_effect == 'read'
-                and (item.objects & covered_objects or item.domains & covered_domains)
+                and covered and not uncovered_intent
                 and (read_summary or not item.actions or item.actions & covered_actions)):
             continue
         score = registry.score(item, terms, intent)
