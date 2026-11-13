@@ -13,6 +13,8 @@ class CapabilityDescriptor:
     original_name: str
     description: str
     provider: str
+    server: str | None = None
+    identity: str | None = None
     domains: frozenset[str] = frozenset()
     actions: frozenset[str] = frozenset()
     objects: frozenset[str] = frozenset()
@@ -39,6 +41,12 @@ class ExposurePlan:
     intent: QueryIntent | None = None
     tool_schema_tokens: int = 0
     skill_directory_tokens: int = 0
+    # 规划任务可锁定资源身份与效果，扩展时继续遵守同一约束。
+    server: str | None = None
+    identity: str | None = None
+    effect: str | None = None
+    max_schema_tokens: int = 0
+    forbid_create: bool = False
 
 
 @dataclass
@@ -48,6 +56,8 @@ class CapabilityTurnState:
     plan: ExposurePlan | None = None
     search_calls: int = 0
     preflight_failures: int = 0
+    # 规划中的只读任务不能通过 search_tools 扩展到写能力。
+    read_only: bool = False
 
     @property
     def initialized(self):
@@ -61,7 +71,7 @@ class CapabilityPolicy:
         'read_document_attachment', 'read_text', 'list_directory', 'search_text',
         'web_search', 'web_fetch', 'search_knowledge', 'search_tools',
         'search_skills', 'load_skill', 'read_skill_resource', 'unload_skill',
-        'resolve_datetime',
+        'resolve_datetime', 'read_tool_result',
     )
     max_schema_tokens: int = 25000
     top_k: int = 8

@@ -6,6 +6,7 @@ from ai_assistant.integrations.tool_policy import (
     ACCOUNT_PATHS,
     ACCOUNT_TEXT_PATTERNS,
     BUSINESS_KEYS,
+    DEFAULT_REDACTION_POLICY,
     RedactionPolicy,
     RedactionRule,
     project_output_text,
@@ -17,7 +18,24 @@ from ai_assistant.integrations.tool_policy import (
 FEISHU_OUTPUT_POLICY = RedactionPolicy(
     keys=ACCOUNT_KEYS,
     paths=ACCOUNT_PATHS,
-    omit_paths=(("origin",),),
+    omit_paths=(("origin",), ("creator",), ("node_creator",),
+                ("log_id",), ("troubleshooter",), ("method_id",),
+                ("error", "log_id"), ("error", "troubleshooter"),
+                ("error", "helps"), ("error", "method_id")),
+    patterns=ACCOUNT_TEXT_PATTERNS,
+    preserve_keys=BUSINESS_KEYS,
+)
+
+# 文档上下文：保留业务 token、标题、时间和链接；隐藏创建人、账号字段和
+# provider 排查信息。docx/wiki/drive 原先没有策略，导致 open_id 进入模型
+# 上下文和 checkpoint，这里统一收口。
+FEISHU_DOC_CONTEXT_POLICY = RedactionPolicy(
+    keys=ACCOUNT_KEYS,
+    paths=ACCOUNT_PATHS,
+    omit_paths=(("origin",), ("creator",), ("node_creator",),
+                ("log_id",), ("troubleshooter",), ("method_id",),
+                ("error", "log_id"), ("error", "troubleshooter"),
+                ("error", "helps"), ("error", "method_id")),
     patterns=ACCOUNT_TEXT_PATTERNS,
     preserve_keys=BUSINESS_KEYS,
 )
@@ -51,19 +69,21 @@ FEISHU_CALENDAR_CONTEXT_POLICY = RedactionPolicy(
 
 
 def context_policy(entry):
-    """按飞书工具族选择上下文策略；未知工具保持原样。"""
+    """按飞书工具族选择上下文策略；未知工具使用默认兜底。"""
     name = getattr(entry, "original_name", "")
+    if name.startswith(("docx_", "wiki_", "drive_")):
+        return FEISHU_DOC_CONTEXT_POLICY
     if name.startswith("task_v2_"):
         return FEISHU_TASK_CONTEXT_POLICY
     if name.startswith("contact_v3_"):
         return FEISHU_REFERENCE_CONTEXT_POLICY
     if name.startswith("calendar_v4_"):
         return FEISHU_CALENDAR_CONTEXT_POLICY
-    return None
+    return DEFAULT_REDACTION_POLICY
 
 
 def project(entry, result, context=None, *, mode="context"):
-    """投影工具结果；context 模式只处理需要安全的工具族。"""
+    """投影工具结果；所有 MCP 结果都有默认兜底，文档族使用专门策略。"""
     policy = FEISHU_OUTPUT_POLICY if mode == "output" else context_policy(entry)
     if policy is None:
         return result
@@ -76,7 +96,7 @@ def project_output(text):
 
 
 __all__ = [
-    "FEISHU_CALENDAR_CONTEXT_POLICY", "FEISHU_OUTPUT_POLICY",
-    "FEISHU_REFERENCE_CONTEXT_POLICY", "FEISHU_TASK_CONTEXT_POLICY",
-    "context_policy", "project", "project_output",
+    "FEISHU_CALENDAR_CONTEXT_POLICY", "FEISHU_DOC_CONTEXT_POLICY",
+    "FEISHU_OUTPUT_POLICY", "FEISHU_REFERENCE_CONTEXT_POLICY",
+    "FEISHU_TASK_CONTEXT_POLICY", "context_policy", "project", "project_output",
 ]

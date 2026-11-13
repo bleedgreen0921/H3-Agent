@@ -44,6 +44,7 @@ class CapabilityRegistry:
             entry = entries.get(name)
             original = getattr(entry, 'original_name', None) or name
             server = getattr(entry, 'server', None)
+            identity = getattr(getattr(entry, 'settings', None), 'identity', None) if entry else None
             write_tools = getattr(getattr(entry, 'settings', None), 'write_tools', ()) if entry else ()
             write_hint = entry is not None and original in write_tools
             actions, objects, domains, side_effect = infer_descriptor(
@@ -53,6 +54,7 @@ class CapabilityRegistry:
             descriptors[name] = CapabilityDescriptor(
                 id=name, kind='tool', name=name, original_name=original,
                 description=getattr(tool, 'description', ''), provider=provider,
+                server=server, identity=identity,
                 domains=domains, actions=actions, objects=objects,
                 side_effect=side_effect, schema_tokens=schema_tokens,
                 core=name in configured_core, write=side_effect == 'write', tool=tool)
@@ -94,10 +96,193 @@ class CapabilityRegistry:
         return CapabilityPolicy({name: item.side_effect for name, item in self.descriptors.items()
                                  if item.kind == 'tool'})
 
-    def plan(self, query, *, directory_budget=6000, active_skill_ids=()):
+    def plan(self, query, *, directory_budget=6000, active_skill_ids=(),
+             server=None, identity=None, effect=None):
         from ai_assistant.capabilities.router import build_plan
-        return build_plan(self, query, directory_budget=directory_budget,
-                          active_skill_ids=active_skill_ids)
+        plan = build_plan(self, query, directory_budget=directory_budget,
+                          active_skill_ids=active_skill_ids, effect=effect)
+        # 资源任务只暴露同一 MCP 服务/身份；内置工具不参与身份过滤。
+        selected = []
+        for name in plan.tool_ids:
+            descriptor = self.descriptors.get(name)
+            if descriptor is None:
+                continue
+            if descriptor.kind == 'tool' and descriptor.server:
+                if server is not None and descriptor.server != server:
+                    continue
+                if identity is not None and descriptor.identity != identity:
+                    continue
+            if effect == 'read' and descriptor.write:
+                continue
+            selected.append(name)
+        plan.server, plan.identity, plan.effect = server, identity, plan.effect
+        configured = int(getattr(self.settings, 'max_schema_tokens', None) or 0)
+        plan.max_schema_tokens = configured
+        # 即使 router 发生 fallback，也不能让工具 schema 突破硬预算。
+        if configured:
+            bounded, used = [], 0
+            for name in selected:
+                cost = self.descriptors[name].schema_tokens if name in self.descriptors else 0
+                if used + cost > configured:
+                    continue
+                bounded.append(name)
+                used += cost
+            selected = bounded
+            if len(selected) != len(plan.tool_ids):
+                plan.reason = 'budget_trimmed'
+        plan.tool_ids = selected
+        plan.tool_schema_tokens = self.schema_tokens(selected)
+        return plan
+
+    @staticmethod
+    def _is_doc_descriptor(descriptor):
+        return bool(descriptor.server and (
+            descriptor.domains & {'docs', 'files'}
+            or descriptor.objects & {'document', 'file'}
+            or any(word in descriptor.original_name.casefold()
+                   for word in ('docx', 'wiki', 'drive'))
+        ))
+
+    @staticmethod
+    def _creates_document(descriptor):
+        original = descriptor.original_name.casefold()
+        return any(term in original for term in
+                   ('document_create', 'doc_create', 'spacenode_create'))
+
+    def seed_resource_tools(self, plan, *, server=None, identity=None,
+                            effect=None, forbid_create=False, append=False):
+        """资源任务的必备工具由资源解析确定，不依赖查询检索是否命中。"""
+        candidates = []
+        for descriptor in self.descriptors.values():
+            if descriptor.kind != 'tool' or not self._is_doc_descriptor(descriptor):
+                continue
+            if server is not None and descriptor.server != server:
+                continue
+            if identity is not None and descriptor.identity != identity:
+                continue
+            if forbid_create and self._creates_document(descriptor):
+                continue
+            if effect == 'read' and descriptor.write:
+                continue
+            candidates.append(descriptor)
+        # 追加任务优先使用高层语义工具；没有时回退到原生 block 工具。
+        def priority(item):
+            original = item.original_name.casefold()
+            if effect == 'write' and item.write:
+                if any(term in original for term in
+                       ('append_markdown', 'append_blocks')):
+                    return 0
+                if any(term in original for term in
+                       ('blockchildren_create', 'blockchild', 'block_create', 'append')):
+                    return 1
+                return 2
+            return 3
+        candidates.sort(key=lambda item: (priority(item), item.schema_tokens, item.id))
+        maximum = int(plan.max_schema_tokens or
+                      getattr(self.settings, 'max_schema_tokens', 0) or 0)
+        readers = [item for item in candidates if not item.write]
+        if effect == 'write':
+            semantic = [item for item in candidates if priority(item) == 0]
+            native_append = [item for item in candidates if priority(item) == 1]
+            other = [item for item in candidates if priority(item) == 2]
+            if append and semantic:
+                action = semantic
+            elif append and native_append:
+                action = native_append
+            else:
+                action = other or semantic or native_append
+            required = action + readers
+        else:
+            action = []
+            required = readers
+        action_ids = {item.id for item in action}
+        if effect == 'write' and not action_ids:
+            raise ValueError('目标文档没有可用的写入工具。')
+        # 动作工具是必达能力；readers 可以在预算内补充，但不能把必达工具
+        # 以外的 schema 挤进模型上下文。动作工具本身超预算时明确失败。
+        selected, used = [], 0
+        for item in required:
+            cost = item.schema_tokens
+            if maximum and used + cost > maximum:
+                if item.id in action_ids:
+                    raise ValueError(
+                        '目标文档写入工具超出本轮 schema 预算，请缩小范围或启用语义写入工具。')
+                continue
+            if item.id not in selected:
+                selected.append(item.id)
+                used += cost
+        semantic_append = bool(action) and any(
+            'append_markdown' in item.original_name.casefold() for item in action)
+        # 语义追加已覆盖块构造，不再把原生 block 工具作为可选项塞回上下文。
+        existing = [item.id for item in candidates if item.id not in selected]
+        existing += [name for name in plan.tool_ids if name not in selected]
+        for name in existing:
+            descriptor = self.descriptors.get(name)
+            if descriptor is None:
+                continue
+            if semantic_append and any(
+                    term in descriptor.original_name.casefold()
+                    for term in ('blockchildren_create', 'blockchild', 'block_create')):
+                continue
+            if effect == 'write' and descriptor.write and descriptor.id not in action_ids:
+                # 写任务只保留已解析的动作工具；patch/move 等不属于当前意图的
+                # 写能力不进入上下文，避免模型在追加任务里改文档或移动节点。
+                continue
+            if forbid_create and self._creates_document(descriptor):
+                continue
+            if effect == 'read' and descriptor.write:
+                continue
+            cost = descriptor.schema_tokens
+            if maximum and used + cost > maximum:
+                continue
+            selected.append(name)
+            used += cost
+        plan.tool_ids = list(dict.fromkeys(selected))
+        plan.tool_schema_tokens = self.schema_tokens(plan.tool_ids)
+        plan.reason = 'resource_seeded'
+        return plan
+
+    def extend_plan(self, plan, query, *, limit=8, effect=None):
+        """按同一身份/效果/预算扩展 ExposurePlan；不突破 schema 上限。"""
+        from ai_assistant.capabilities.intent import query_terms
+        terms = query_terms(query)
+        effective = effect or plan.effect
+        maximum = int(plan.max_schema_tokens or getattr(self.settings, 'max_schema_tokens', 0) or 0)
+        known = set(plan.tool_ids)
+        candidates = []
+        for name, descriptor in self.descriptors.items():
+            if (descriptor.kind != 'tool' or descriptor.core
+                    or name == 'search_tools' or name in known):
+                continue
+            if effective == 'read' and descriptor.write:
+                continue
+            if plan.forbid_create:
+                original = descriptor.original_name.casefold()
+                if any(term in original for term in
+                       ('document_create', 'doc_create', 'spacenode_create')):
+                    continue
+            if descriptor.server:
+                if plan.server is not None and descriptor.server != plan.server:
+                    continue
+                if plan.identity is not None and descriptor.identity != plan.identity:
+                    continue
+            score = self.score(descriptor, terms)
+            if score > 0:
+                candidates.append((score, descriptor))
+        candidates.sort(key=lambda item: (-item[0], item[1].id))
+        added, skipped = [], 0
+        used = plan.tool_schema_tokens
+        for _, descriptor in candidates:
+            if len(added) >= max(1, min(limit, 30)):
+                break
+            if maximum and used + descriptor.schema_tokens > maximum:
+                skipped += 1
+                continue
+            plan.tool_ids.append(descriptor.id)
+            added.append(descriptor)
+            used += descriptor.schema_tokens
+        plan.tool_schema_tokens = used
+        return added, skipped, bool(skipped and not added)
 
     def all_tool_ids(self):
         return [name for name, item in self.descriptors.items() if item.kind == 'tool']

@@ -6,8 +6,13 @@ from ai_assistant.integrations.feishu_adapter.calendar import (
     prepare as calendar_prepare,
     verify as calendar_verify,
 )
-from ai_assistant.integrations.feishu_adapter.docs import guidance as docs_guidance
-from ai_assistant.integrations.feishu_adapter.docs import unfinished_document_notice
+from ai_assistant.integrations.feishu_adapter.docs import (
+    display_name as doc_display_name,
+    guidance as docs_guidance,
+    preflight as docs_preflight,
+    references as docs_references,
+    unfinished_document_notice,
+)
 from ai_assistant.integrations.feishu_adapter.mail_bridge import email_source_key
 from ai_assistant.integrations.feishu_adapter.projection import project, project_output
 from ai_assistant.integrations.feishu_adapter.tasks import (
@@ -22,6 +27,14 @@ def guidance(entries, context):
     return docs_guidance(entries) + task_guidance(entries) + calendar_guidance(entries)
 
 
+def display_name(entry):
+    return doc_display_name(getattr(entry, 'original_name', ''))
+
+
+def references(entry, result):
+    return docs_references(entry, result)
+
+
 def is_calendar(entry):
     return getattr(entry, 'original_name', '').startswith('calendar_v4_')
 
@@ -30,6 +43,7 @@ def preflight(entry, arguments, context):
     if is_calendar(entry):
         calendar_preflight(entry, arguments, context)
     else:
+        docs_preflight(entry, arguments, context)
         task_preflight(entry, arguments, context)
 
 
@@ -54,4 +68,4 @@ async def after_read(entry, arguments, result, context):
 
 __all__ = ['IDEMPOTENCY', 'idempotency_path', 'guidance', 'task_write', 'preflight', 'prepare',
            'interpret', 'verify', 'after_read', 'email_source_key', 'project', 'project_output',
-           'unfinished_document_notice']
+           'display_name', 'references', 'unfinished_document_notice']

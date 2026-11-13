@@ -26,5 +26,21 @@ def interpret(entry, result):
     if isinstance(remote, dict) and remote.get('code', 0) != 0:
         status = 'failed'
     if isinstance(result, ToolMessage) and (status != 'succeeded' or state in {'partially_accepted', 'replacement_saved_old_retained'}):
-        result = result.model_copy(update={'status': 'error'})
+        writing = entry.original_name in getattr(entry.settings, 'write_tools', ())
+        code = remote.get('code') if isinstance(remote, dict) else None
+        category = ('permission' if code in {1770032, 99991679}
+                    else 'remote_rejected' if status == 'failed' else 'unknown')
+        result = result.model_copy(update={
+            'status': 'error',
+            'artifact': {
+                **(result.artifact if isinstance(result.artifact, dict) else {}),
+                'execution_fact': {
+                    'version': 1,
+                    'nature': 'effect' if writing else 'read',
+                    'control': 'stop' if writing else 'continue',
+                    'error_category': category,
+                    'error_code': code,
+                },
+            },
+        })
     return result, status

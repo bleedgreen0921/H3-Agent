@@ -116,7 +116,8 @@ class FeishuOutboxSender:
                 (datetime.now(timezone.utc) - completed["received_at"]).total_seconds()))
             if card_id:
                 from ai_assistant.channels.feishu.progress import mark_complete_card
-                await mark_complete_card(self.api, card_id, row['input_id'])
+                await mark_complete_card(self.api, card_id, row['input_id'],
+                    state=(body.get('presentation') or {}).get('state', 'unknown'))
 
     async def run(self):
         """独占投递连接；未处理异常交给服务监督器关闭服务。"""

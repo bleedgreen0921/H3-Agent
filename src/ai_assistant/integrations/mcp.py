@@ -81,8 +81,53 @@ def stable_id(server, identity, name):
     return f'mcp_{prefix}_{digest}'
 
 
+def _nested_paths(schema, key, prefix='', depth=0):
+    """在 schema 的嵌套对象中定位同名字段，用于提示参数应放到的层级。"""
+    if depth > 6:
+        return []
+    properties = schema.get('properties') if isinstance(schema, dict) else None
+    if not isinstance(properties, dict):
+        return []
+    found = []
+    for name, child in properties.items():
+        if not isinstance(child, dict):
+            continue
+        if name == key:
+            found.append(prefix + name)
+        found.extend(_nested_paths(child, key, prefix + name + '.', depth + 1))
+    return found
+
+
+def _parameter_problems(schema, arguments, path=''):
+    """收集未知参数和缺失参数；一次返回全部问题，避免模型逐轮试错。"""
+    where = path or '顶层'
+    properties = schema.get('properties')
+    problems = []
+    if schema.get('additionalProperties') is not True:
+        unknown = sorted(set(arguments) - set(properties))
+        if unknown:
+            hints = []
+            for key in unknown:
+                candidates = [item for item in _nested_paths(schema, key) if item != key]
+                hints.append(f'{key}（应位于 {candidates[0]}）' if candidates else key)
+            problems.append(f'{where}包含未知参数：' + '、'.join(hints))
+    missing = [key for key in schema.get('required', ()) if key not in arguments]
+    if missing:
+        details = []
+        for key in missing:
+            child = properties.get(key) if isinstance(properties.get(key), dict) else {}
+            required = child.get('required') if isinstance(child, dict) else None
+            details.append(f'{key}（包含 {"、".join(required)}）' if required else key)
+        problems.append(f'{where}缺少必填参数：' + '、'.join(details))
+    return problems
+
+
 def validate_arguments(schema, arguments, path=''):
-    """按 MCP JSON schema 校验参数层级，拒绝会被服务端静默忽略的未知字段。"""
+    """按 MCP JSON schema 校验参数层级，拒绝会被服务端静默忽略的未知字段。
+
+    一次报告“未知参数”和“缺少必填参数”，并在嵌套字段同名时指出正确层级。
+    这样本地预检失败可被模型修正，而不是只看到第一条错误后反复试探。
+    """
     if not isinstance(schema, dict) or schema.get('type') != 'object':
         return
     properties = schema.get('properties')
@@ -90,15 +135,9 @@ def validate_arguments(schema, arguments, path=''):
         return
     if not isinstance(arguments, dict):
         raise ValueError(f'{path or "参数"}必须是对象')
-    if schema.get('additionalProperties') is not True:
-        unknown = sorted(set(arguments) - set(properties))
-        if unknown:
-            allowed = '、'.join(sorted(properties)) or '无'
-            where = path or '顶层'
-            raise ValueError(f'{where}包含未知参数：{"、".join(unknown)}；允许的参数：{allowed}')
-    missing = [key for key in schema.get('required', ()) if key not in arguments]
-    if missing:
-        raise ValueError(f'{path or "顶层"}缺少必填参数：{"、".join(missing)}')
+    problems = _parameter_problems(schema, arguments, path)
+    if problems:
+        raise ValueError('；'.join(problems))
     for key, value in arguments.items():
         child = properties.get(key)
         if isinstance(child, dict) and child.get('type') == 'object':
@@ -128,7 +167,27 @@ async def mcp_resources(config, workspace, *, caller=None):
                 tools = None
                 if settings.transport == 'feishu':
                     from ai_assistant.integrations.feishu import OfficialConnection
-                    tools = await OfficialConnection(config, settings, workspace).discover()
+                    from ai_assistant.integrations.feishu_docs import (
+                        SEMANTIC_TOOLS, create_semantic_tools)
+                    native_tools = [name for name in settings.tools if name not in SEMANTIC_TOOLS]
+                    native_writes = [name for name in settings.write_tools if name not in SEMANTIC_TOOLS]
+                    native_settings = settings.model_copy(update={
+                        'tools': native_tools, 'write_tools': native_writes})
+                    tools = (await OfficialConnection(
+                        config, native_settings, workspace).discover()) if native_tools else []
+                    if set(settings.tools) & SEMANTIC_TOOLS:
+                        import httpx
+                        from ai_assistant.integrations.feishu_files import FeishuAPI
+                        from ai_assistant.integrations.oauth import TokenStore
+                        http = await scope.enter_async_context(httpx.AsyncClient(
+                            timeout=config.mcp.call_timeout, trust_env=False,
+                            follow_redirects=False))
+                        tokens = TokenStore(config, workspace.root) if settings.identity == 'user' else None
+                        api = FeishuAPI(config.integrations.feishu, http, tokens)
+                        convert_api = FeishuAPI(config.integrations.feishu, http)
+                        semantic = {tool.name: tool for tool in create_semantic_tools(
+                            api, convert_api)}
+                        tools.extend(tool for name, tool in semantic.items() if name in settings.tools)
                 elif settings.transport == 'stdio':
                     overrides = {k: v.get_secret_value() for k, v in settings.env.items()}
                     binary = executable(settings.command, path=overrides.get('PATH'))

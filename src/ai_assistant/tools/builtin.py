@@ -175,7 +175,8 @@ async def edit_file(path: str, edits: Annotated[list[TextEdit], Field(min_length
 
 def create_builtin_tools(*, include_web: bool = False, include_write: bool = False) -> list[BaseTool]:
     """Return fresh native tool instances with safe expected-error handling."""
-    selected = [list_directory, read_text, search_text]
+    from ai_assistant.tools.results import read_tool_result
+    selected = [list_directory, read_text, search_text, read_tool_result]
     if include_web:
         selected += [web_search, web_fetch]
     if include_write:

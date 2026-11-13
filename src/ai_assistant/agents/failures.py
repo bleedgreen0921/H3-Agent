@@ -10,7 +10,25 @@ from ai_assistant.runtime.execution import ToolCleanupError, tool_scope, raise_i
 from ai_assistant.capabilities.policy import CapabilityPolicy
 
 
-FAILURE_REPLY = '未完成：工具执行失败，本轮已停止，不再重试或执行后续步骤。已确认的结果和回执保留；未确认的效果仍需核实，不能视为已回滚。'
+FAILURE_REPLY = '未完成：本轮已停止，不再重试或执行后续步骤。已确认的回执保留。'
+
+
+def tool_label(context, name):
+    """把内部 stable id 映射成业务名称；不把 mcp_* 暴露给用户。"""
+    catalog = getattr(context, 'services', {}).get('mcp')
+    entry = catalog.entries.get(name) if catalog else None
+    original = getattr(entry, 'original_name', None) if entry else None
+    if not original:
+        return '外部工具'
+    from ai_assistant.integrations.adapters import service_adapter
+    adapter = service_adapter(entry)
+    label = getattr(adapter, 'display_name', None) if adapter else None
+    if label is None:
+        return original
+    try:
+        return label(entry)
+    except Exception:
+        return original
 
 
 def readonly_call(request, policy=None):
@@ -108,8 +126,26 @@ class ToolFailureMiddleware(AgentMiddleware):
         errors = [message for message in batch if message.status == 'error'
                   and (message.artifact or {}).get('execution_fact', {}).get('control') != 'continue']
         if batch and errors:
-            names = '、'.join(dict.fromkeys(message.name or '工具' for message in errors))
-            reply = FAILURE_REPLY + ('\n失败事项：' + names if names else '\n远端业务核对未通过。')
+            details = []
+            unknown = False
+            for message in errors:
+                fact = (message.artifact or {}).get('execution_fact', {})
+                label = tool_label(runtime.context, message.name)
+                category = fact.get('error_category')
+                if category == 'invalid_arguments':
+                    details.append(f'{label}：参数未通过本地校验，未发送到远端；没有写入效果。')
+                elif category == 'effect_denied':
+                    details.append(f'{label}：当前任务为只读，未执行写入。')
+                elif category == 'identity_mismatch':
+                    details.append(f'{label}：目标文档已绑定其他飞书身份，未执行写入。')
+                elif category == 'permission':
+                    details.append(f'{label}：权限或授权不足，未执行写入。')
+                elif category == 'remote_rejected':
+                    details.append(f'{label}：远端明确拒绝，未执行写入。')
+                else:
+                    details.append(f'{label}：工具执行失败；远端效果未确认，不重试。')
+                    unknown = unknown or category in {'unknown', 'unclassified'}
+            reply = FAILURE_REPLY + ('\n' + '\n'.join(details) if details else '')
             for notice in self.notices:
                 try:
                     addition = await notice(runtime.context)
@@ -117,7 +153,6 @@ class ToolFailureMiddleware(AgentMiddleware):
                         reply += addition
                 except Exception:
                     pass
-            unknown = any((m.artifact or {}).get('execution_fact', {}).get('error_category') in {'unknown', 'unclassified'} for m in errors)
             return {'messages': [AIMessage(reply)], 'execution': {'status': 'unknown' if unknown else 'failed',
                     'phase': 'tool', 'reason': 'tool_error' if errors else 'business_check_failed'}, 'jump_to': 'end'}
 

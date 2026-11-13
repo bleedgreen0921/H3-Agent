@@ -35,6 +35,7 @@ class CommandResult:
     skill_ids: list[str] = field(default_factory=list)
     start_turn: bool = False
     recover: bool = False
+    turn_kwargs: dict = field(default_factory=dict)
 
 
 class CommandRegistry:

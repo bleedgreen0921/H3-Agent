@@ -198,6 +198,7 @@ class BotWorker:
             await self.enqueue_reply(row, value[1])
             return None
         result = None
+        command_kwargs = {}
         # 延迟工作卡只服务真实等待；即时指令和关闭状态不建卡。
         progress = None
         channel = getattr(getattr(self.config, 'channels', None), 'feishu', None)
@@ -219,6 +220,7 @@ class BotWorker:
                 return None
             text = result.turn_text or text
             skill_ids = result.skill_ids or None
+            command_kwargs = dict(getattr(result, 'turn_kwargs', None) or {})
         else:
             skill_ids = None
         try:
@@ -230,7 +232,8 @@ class BotWorker:
                 self.config, session_id=session_id, caller=caller, resources=self.resources))
             await self.save_binding(row, session.session_id, session.repository.conn)
             event("request.prepared", session_id=session.session_id, preparation_seconds=monotonic() - preparation_started)
-            turn_kwargs = dict(skill_ids=skill_ids, input_id=row['id'], user_source=text)
+            turn_kwargs = dict(skill_ids=skill_ids, input_id=row['id'], user_source=text,
+                               **command_kwargs)
             if progress is not None:
                 turn_kwargs['on_event'] = progress.on_event
             result = await session.run_turn(text, **turn_kwargs)
@@ -238,8 +241,8 @@ class BotWorker:
             display = project(result.result, saved_body(result.result, result.messages))
             await self.enqueue_reply(row, display.text, snapshot=display.snapshot(),
                 presentation_ref=progress.card_id if progress is not None else None)
-            # 成功时保留卡片到最终文本送达，送达后由发送器更新为已完成终态。
-            await self._finish_progress(progress, 'complete')
+            # 业务状态来自持久化结果；交付成功不能覆盖执行失败。
+            await self._finish_progress(progress, display.state)
             return session
         except BaseException as error:
             state = 'cancelled' if isinstance(error, asyncio.CancelledError) else 'failed'

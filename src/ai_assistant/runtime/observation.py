@@ -1,4 +1,5 @@
 """Per-turn native callbacks; no persistent event bus or message copy."""
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from time import monotonic
@@ -51,6 +52,8 @@ class TurnObserver(AsyncCallbackHandler):
         self._model_call_index = 0
         self._tool_names = {}
         self._last_tool = None
+        # 规划任务可并行调用模型；服务用量使用单连接，写入必须串行。
+        self._record_lock = asyncio.Lock()
 
     async def _record(self, *args):
         if self.store is None:
@@ -60,7 +63,8 @@ class TurnObserver(AsyncCallbackHandler):
             if getattr(self.store, "capabilities", None) and self.store.capabilities.linked:
                 options = dict(input_id=self.input_id, execution_thread_id=self.execution_thread_id,
                                parent_run_id=self._model_parents.get(args[0]))
-            await self.store.record(*args, **options)
+            async with self._record_lock:
+                await self.store.record(*args, **options)
         except Exception as error:
             self.store = None
             logging.getLogger(__name__).warning('Usage unavailable: input_id=%s session_id=%s phase=%s category=%s',

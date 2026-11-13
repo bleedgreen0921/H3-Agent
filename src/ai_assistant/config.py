@@ -97,10 +97,10 @@ class ToolSelectionConfig(BaseModel):
     """按轮暴露的工具选择；权限白名单仍由 mcp.servers 控制。"""
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     mode: Literal['retrieval', 'all'] = 'retrieval'
-    top_k: int = Field(default=8, ge=1, le=64, strict=True)
-    max_schema_tokens: int = Field(default=25000, ge=0, le=200000, strict=True)
+    top_k: int = Field(default=10, ge=1, le=64, strict=True)
+    max_schema_tokens: int = Field(default=40000, ge=0, le=200000, strict=True)
     core: list[str] = Field(default_factory=list)
-    max_search_calls: int = Field(default=3, ge=0, le=20, strict=True)
+    max_search_calls: int = Field(default=4, ge=0, le=20, strict=True)
     log_path: str | None = None
 
 
@@ -132,11 +132,11 @@ class AgentSettings(BaseModel):
 
     persona_file: Path | None = None
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True, protected_namespaces=())
-    model_call_limit: int = Field(default=40, gt=0, strict=True)
-    tool_call_limit: int = Field(default=100, gt=0, strict=True)
+    model_call_limit: int = Field(default=60, gt=0, strict=True)
+    tool_call_limit: int = Field(default=150, gt=0, strict=True)
     summary_call_limit: int = Field(default=20, gt=0, strict=True)
-    knowledge_call_limit: int = Field(default=15, gt=0, strict=True)
-    turn_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
+    knowledge_call_limit: int = Field(default=20, gt=0, strict=True)
+    turn_timeout_seconds: float = Field(default=1200, gt=0, allow_inf_nan=False)
 
 
 class SessionsConfig(BaseModel):
@@ -162,13 +162,29 @@ class SessionsConfig(BaseModel):
         return value
 
 
+class PlanningConfig(BaseModel):
+    """显式 /plan 模式的任务规划预算；默认不影响普通对话。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    enabled: bool = True
+    max_tasks: int = Field(default=10, ge=1, le=20, strict=True)
+    max_parallel: int = Field(default=4, ge=1, le=8, strict=True)
+    max_replans: int = Field(default=2, ge=0, le=3, strict=True)
+    task_retry_attempts: int = Field(default=2, ge=1, le=3, strict=True)
+    task_model_call_limit: int = Field(default=16, gt=0, strict=True)
+    task_tool_call_limit: int = Field(default=40, gt=0, strict=True)
+    task_timeout_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
+    planner_timeout_seconds: float = Field(default=90, gt=0, allow_inf_nan=False)
+    default_document_identity: Literal['user', 'bot'] = 'user'
+
+
 class ContextConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     memory_every_turns: int = Field(default=5, ge=0, strict=True)
     memory_tokens: int = Field(default=20000, ge=100, strict=True)
     compression_summary_ratio: float = Field(default=0.1, gt=0, lt=1, strict=True)
     compression_recent_turns: int = Field(default=30, gt=0, strict=True)
-    tool_result_tokens: int = Field(default=12000, ge=100)
+    tool_result_tokens: int = Field(default=20000, ge=100)
 
 
 class SkillsConfig(BaseModel):
@@ -198,6 +214,7 @@ class AppConfig(BaseModel):
     skills: SkillsConfig | None = None
     sessions: SessionsConfig | None = None
     context: ContextConfig | None = None
+    planning: PlanningConfig = Field(default_factory=PlanningConfig)
     agent: AgentSettings = Field(default_factory=AgentSettings)
     knowledge: KnowledgeConfig | None = None
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)

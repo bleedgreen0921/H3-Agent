@@ -23,10 +23,19 @@ class CapabilityPlannerMiddleware(AgentMiddleware):
             state.registry = self.registry
         records = request.state.get('active_skills', {}) if request.state else {}
         active = [key for key, value in records.items() if value is not None]
+        text = _last_user_text(request.messages)
+        from ai_assistant.capabilities.intent import extract
+        intent = extract(text)
+        identity = None
+        if intent.domains & {'docs'} or intent.objects & {'document'}:
+            feishu = getattr(context, 'services', {}).get('feishu')
+            identity = getattr(feishu, 'document_identity', None)
         state.plan = state.registry.plan(
-            _last_user_text(request.messages),
+            text,
             directory_budget=getattr(context, 'skills_directory_tokens', 6000),
             active_skill_ids=active,
+            identity=identity,
+            effect=intent.side_effect,
         )
         state.registry.record_plan(
             state.plan, input_id=getattr(context, 'input_id', None),
@@ -51,7 +60,18 @@ class ToolBindingMiddleware(AgentMiddleware):
         plan = getattr(state, 'plan', None)
         if plan is None or state.registry is None:
             return request
-        selected = state.registry.tools_for(plan.tool_ids)
+        selected_ids = list(plan.tool_ids)
+        if getattr(state, 'read_only', False) or getattr(plan, 'effect', None) == 'read':
+            selected_ids = [name for name in selected_ids
+                            if getattr(state.registry.descriptors.get(name), 'write', False) is False]
+        if getattr(plan, 'forbid_create', False):
+            selected_ids = [
+                name for name in selected_ids
+                if not any(term in getattr(state.registry.descriptors.get(name),
+                                           'original_name', '').casefold()
+                           for term in ('document_create', 'doc_create', 'spacenode_create'))
+            ]
+        selected = state.registry.tools_for(selected_ids)
         original = request.system_message
         text = original.text if original else ''
         if '当前工具按本轮任务按需暴露' not in text:

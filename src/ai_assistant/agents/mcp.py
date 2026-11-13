@@ -8,7 +8,7 @@ from langchain_core.tools import ToolException
 from ai_assistant.integrations.mcp import validate_arguments
 from ai_assistant.integrations.policy import authorize, operation_principal
 from ai_assistant.integrations.adapters import service_adapter
-from ai_assistant.integrations.tool_policy import ToolPreflightError
+from ai_assistant.integrations.tool_policy import PreflightIssue, ToolPreflightError
 from ai_assistant.capabilities.policy import CapabilityPolicy
 from ai_assistant.observability import event
 
@@ -65,6 +65,7 @@ class MCPMiddleware(AgentMiddleware):
                         'nature': 'read',
                         'control': 'stop',
                         'error_code': error.issue.code,
+                        'error_category': error.issue.code,
                     }},
                 ), context)
         return cls._project(entry, ToolMessage(
@@ -77,6 +78,7 @@ class MCPMiddleware(AgentMiddleware):
                 'nature': 'read',
                 'control': 'continue',
                 'error_code': error.issue.code,
+                'error_category': error.issue.code,
             }},
         ), context)
 
@@ -89,13 +91,38 @@ class MCPMiddleware(AgentMiddleware):
         try:
             authorize(context.caller, entry.settings, entry.original_name)
             arguments = deepcopy(request.tool_call['args'])
+            writing = (CapabilityPolicy.from_context(context).effect(entry.id) == 'write'
+                       or entry.original_name in entry.settings.write_tools)
+            state = getattr(context, 'capabilities', None)
+            plan = getattr(state, 'plan', None)
+            if plan is not None:
+                if plan.effect == 'read' and writing:
+                    raise ToolPreflightError(PreflightIssue(
+                        'effect_denied', '当前任务为只读，不能执行写入。', recoverable=False))
+                if plan.identity and entry.settings.identity and entry.settings.identity != plan.identity:
+                    raise ToolPreflightError(PreflightIssue(
+                        'identity_mismatch', '目标资源已绑定其他飞书身份；同一资源必须使用创建时的身份。',
+                        recoverable=False))
+            if writing and isinstance(arguments, dict):
+                target = (arguments.get('path') or {}).get('document_id') if isinstance(
+                    arguments.get('path'), dict) else None
+                target = target or arguments.get('document_id')
+                bindings = getattr(context, 'resource_bindings', {}) or {}
+                binding = bindings.get(target) if isinstance(bindings, dict) else None
+                if binding and (entry.server, entry.settings.identity) != tuple(binding):
+                    raise ToolPreflightError(PreflightIssue(
+                        'identity_mismatch', '该文档由另一飞书身份创建；同一资源必须使用创建时的身份。',
+                        recoverable=False))
             schema = getattr(getattr(entry, 'tool', None), 'args_schema', None)
             if schema is not None and not isinstance(schema, dict):
                 schema = schema.model_json_schema()
             try:
                 validate_arguments(schema, arguments)
             except ValueError as error:
-                raise ToolException(f'{entry.original_name} 参数不符合 schema：{error}') from None
+                # 参数校验发生在 operation 创建和远端调用之前；这是无副作用的
+                # 预检失败，必须允许模型按同一 schema 修正一次，而不是当成写失败。
+                raise ToolPreflightError(PreflightIssue(
+                    'invalid_arguments', str(error), recoverable=True)) from None
             preflight = getattr(adapter, 'preflight', None) if adapter is not None else None
             if preflight is not None:
                 checked = preflight(entry, arguments, context)
@@ -110,8 +137,6 @@ class MCPMiddleware(AgentMiddleware):
             path = adapter.idempotency_path(entry) if adapter else None
             if path and isinstance(arguments.get(path[0]), dict):
                 arguments[path[0]].pop(path[1], None)
-            writing = (CapabilityPolicy.from_context(context).effect(entry.id) == 'write'
-                       or entry.original_name in entry.settings.write_tools)
             operation = None
             if writing:
                 if context.operations is None or context.input_id is None:
@@ -137,10 +162,23 @@ class MCPMiddleware(AgentMiddleware):
                 raise
             result, status = adapter.interpret(entry, result) if adapter else (result,
                 'unknown' if getattr(result, 'status', '') == 'error' else 'succeeded')
+            references = {}
+            if adapter is not None:
+                reference_reader = getattr(adapter, 'references', None)
+                if reference_reader is not None:
+                    references = reference_reader(entry, result) or {}
+            if status == 'succeeded' and references.get('document_id'):
+                bindings = getattr(context, 'resource_bindings', None)
+                if isinstance(bindings, dict):
+                    bindings[references['document_id']] = (
+                        entry.server, entry.settings.identity)
             if operation:
                 operation['status'] = status
                 receipt = {'version': 1, 'accepted': status == 'succeeded', 'verification': 'unverified',
-                    **({'content': result.content, 'artifact': result.artifact} if isinstance(result, ToolMessage) else {'receipt': str(result)})}
+                    **({'content': result.content, 'artifact': result.artifact,
+                        'references': references}
+                       if isinstance(result, ToolMessage) else {'receipt': str(result),
+                                                               'references': references})}
                 try:
                     await context.operations.finish(operation['id'], status, receipt)
                 except Exception:

@@ -135,7 +135,8 @@ class ProgressCard:
             if kind == 'on_model_start':
                 self.phase = '正在思考…'
             elif kind == 'on_tool_start':
-                self.phase = '正在调用工具：' + friendly_tool(item.get('name'))
+                self.phase = '正在调用工具：' + friendly_tool(
+                    item.get('label') or item.get('name'))
             elif kind == 'on_tool_end':
                 self.phase = '整理工具结果…'
             elif kind == 'on_tool_error':
@@ -286,16 +287,17 @@ def _simple_card(title, template, summary, text):
     return _card_json(title, template, summary, '', text)
 
 
-async def mark_complete_card(api, card_id, input_id):
-    """最终文本全部送达后，把工作卡更新为已完成终态并保留；不撤回。"""
+async def mark_complete_card(api, card_id, input_id, *, state="complete"):
+    """交付成功不等于业务成功；按已保存的呈现状态更新终态。"""
     if api is None or not card_id:
         return
+    template, title = STATE_STYLES.get(state, ('orange', '结果待核实'))
+    text = '完整答案已送达。' if state == 'complete' else '执行结果已送达；' + title + '，请查看正文与回执。'
     try:
         async with asyncio.timeout(CALL_TIMEOUT):
             await api.request('PATCH', '/im/v1/messages/' + quote(card_id, safe=''),
                               json={'content': json.dumps(_simple_card(
-                                  '已完成', 'green', '已完成',
-                                  '完整答案已送达。'), ensure_ascii=False)})
+                                  title, template, title, text), ensure_ascii=False)})
         event('progress.completed', input_id=input_id, status='retained')
     except Exception as error:
         event('progress.failed', input_id=input_id, status='complete_card_failed',

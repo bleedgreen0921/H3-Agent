@@ -30,12 +30,15 @@ class FeishuService:
     default_task_assignee: str = 'none'
     task_members: str = 'model'
     default_calendar_id: str | None = None
+    document_identity: str = 'user'
 
 
 @dataclass(frozen=True)
 class ToolContext:
     workspace: ReadOnlyWorkspace
     effect_facts: list = field(default_factory=list, kw_only=True, repr=False, compare=False)
+    # 本轮已创建/已绑定的外部资源 -> (server, identity)；防止 bot 创建后 user 写入。
+    resource_bindings: dict = field(default_factory=dict, kw_only=True, repr=False, compare=False)
     inflight_tools: set = field(default_factory=set, kw_only=True, repr=False, compare=False)
     executed_tool_calls: set = field(default_factory=set, kw_only=True, repr=False, compare=False)
     web: DeepSeekWeb | None = None
@@ -47,6 +50,7 @@ class ToolContext:
     input_id: str | None = None
     session_id: str | None = None
     execution_thread_id: str | None = None
+    task_id: str | None = None
     skills_directory_tokens: int = 6000
     timezone: str = 'Asia/Shanghai'
     resolved_datetimes: set[tuple[str, bool]] = field(default_factory=set, compare=False)

@@ -15,9 +15,13 @@ def capabilities():
 
 
 def allowed_capabilities(settings):
+    from ai_assistant.integrations.feishu_docs import SEMANTIC_TOOLS
     manifest = {item['native_name']: item for item in capabilities()['tools']}
     selected = []
     for name in settings.tools:
+        # 语义工具是本地适配层，不经过官方 MCP 的 tool 清单。
+        if name in SEMANTIC_TOOLS:
+            continue
         item = manifest.get(name)
         if item is None or settings.identity not in item['identities']:
             raise ConfigError('Feishu tool or identity is outside the versioned capability manifest.')

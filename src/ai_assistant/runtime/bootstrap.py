@@ -65,7 +65,8 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         feishu = (FeishuService(config.integrations.feishu.owner_open_id,
                                 config.integrations.feishu.default_task_assignee,
                                 config.integrations.feishu.task_members,
-                                config.integrations.feishu.default_calendar_id)
+                                config.integrations.feishu.default_calendar_id,
+                                config.planning.default_document_identity)
                   if caller.personal and config.integrations.feishu else FeishuService())
         context = replace(context, usage_store=usage_store,
                           services={**context.services, 'feishu': feishu},
@@ -116,13 +117,48 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             if cache is not None:
                 cache[key] = registry
         context = replace(context, capabilities=CapabilityTurnState(registry=registry))
-        agent = create_assistant_agent(model, tools, checkpointer=saver, settings=config.agent, persona=persona,
-            context_settings=config.context,
-            max_input_tokens=config.models[selected].max_input_tokens,
-            model_parameters=config.models[selected].parameters,
-            prompt_sections=prompt_sections, component_middleware=component_middleware,
-            failure_notices=failure_notices, capability_registry=registry,
-            capability_policy=registry.build_policy())
+        # 结果预算与上下文配置同源；未启用上下文管理时使用 agent 层默认值。
+        result_tokens = config.context.tool_result_tokens if config.context else None
+        planning_enabled = bool(getattr(config, 'planning', None) and config.planning.enabled)
+        if planning_enabled:
+            from ai_assistant.agents.planning import PlanState, create_planning_agent
+            normal_agent = create_assistant_agent(model, tools, checkpointer=None,
+                settings=config.agent, persona=persona,
+                context_settings=config.context,
+                tool_result_tokens=result_tokens,
+                max_input_tokens=config.models[selected].max_input_tokens,
+                model_parameters=config.models[selected].parameters,
+                prompt_sections=prompt_sections, component_middleware=component_middleware,
+                failure_notices=failure_notices, capability_registry=registry,
+                capability_policy=registry.build_policy(), state_schema=PlanState)
+            task_settings = config.agent.model_copy(update={
+                'model_call_limit': config.planning.task_model_call_limit,
+                'tool_call_limit': config.planning.task_tool_call_limit,
+            })
+            task_agent = create_assistant_agent(model, tools, checkpointer=None,
+                settings=task_settings, persona=persona, context_settings=None,
+                tool_result_tokens=result_tokens,
+                max_input_tokens=config.models[selected].max_input_tokens,
+                model_parameters=config.models[selected].parameters,
+                prompt_sections=prompt_sections, component_middleware=component_middleware,
+                failure_notices=failure_notices, capability_registry=registry,
+                capability_policy=registry.build_policy())
+            agent = create_planning_agent(
+                normal_agent=normal_agent, task_agent=task_agent, model=model,
+                checkpointer=saver, registry=registry, settings=config.planning,
+                max_input_tokens=config.models[selected].max_input_tokens)
+            # 维护逻辑仍从 session.agent 读取记忆入口；规划父图本身不执行会话压缩。
+            agent.session_memory = normal_agent.session_memory
+            agent.memory_every_turns = normal_agent.memory_every_turns
+        else:
+            agent = create_assistant_agent(model, tools, checkpointer=saver, settings=config.agent,
+                persona=persona, context_settings=config.context,
+                tool_result_tokens=result_tokens,
+                max_input_tokens=config.models[selected].max_input_tokens,
+                model_parameters=config.models[selected].parameters,
+                prompt_sections=prompt_sections, component_middleware=component_middleware,
+                failure_notices=failure_notices, capability_registry=registry,
+                capability_policy=registry.build_policy())
         session = AssistantSession(agent, context, config.agent, model_name=selected,
                                    repository=repository)
         await session.open(session_id)

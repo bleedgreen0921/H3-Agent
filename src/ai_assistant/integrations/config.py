@@ -35,8 +35,8 @@ class MCPServer(Settings):
 
 
 class MCPConfig(Settings):
-    connect_timeout: float = Field(default=15, gt=0, allow_inf_nan=False)
-    call_timeout: float = Field(default=60, gt=0, allow_inf_nan=False)
+    connect_timeout: float = Field(default=30, gt=0, allow_inf_nan=False)
+    call_timeout: float = Field(default=120, gt=0, allow_inf_nan=False)
     state_dir: str = '~/.local/state/ai-assistant'
     servers: dict[str, MCPServer] = Field(default_factory=dict)
 

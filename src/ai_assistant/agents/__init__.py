@@ -87,7 +87,8 @@ def load_project_rules(context):
 def create_assistant_agent(model, tools, *, checkpointer, settings,
                            context_settings=None, max_input_tokens=None, model_parameters=None,
                            persona='', capability_registry=None, prompt_sections=(),
-                           component_middleware=(), failure_notices=(), capability_policy=None):
+                           component_middleware=(), failure_notices=(), capability_policy=None,
+                           state_schema=None, tool_result_tokens=None):
     """组装原生 LangChain Agent，并配置请求准备、调用限制及上下文管理。
 
     本函数只负责构建 Agent；模型调用和工具调度交给框架，轮次管理由调用方负责。
@@ -107,6 +108,9 @@ def create_assistant_agent(model, tools, *, checkpointer, settings,
         prompt_sections: 由组件贡献的领域提示片段。
         failure_notices: 由组件贡献的失败提示 hook。
         capability_policy: 工具读写分类；未提供时从 tools 推导。
+        state_schema: 图状态类型；规划父图使用 PlanState，默认 TurnState。
+        tool_result_tokens: 单个工具结果的模型可见预算；优先级为显式参数、
+            上下文配置、默认值。不随 context_settings 是否为 None 改变。
 
     返回：
         create_agent 构建的 Agent，并附加 session_memory 和 memory_every_turns，
@@ -219,15 +223,16 @@ def create_assistant_agent(model, tools, *, checkpointer, settings,
         # 不启用摘要也可以单独执行输入预算检查，限制实际提交给模型的上下文。
         from ai_assistant.agents.context import InputBudgetMiddleware
         middleware.append(InputBudgetMiddleware(max_input_tokens))
-    from ai_assistant.agents.results import ToolResultMiddleware
-    # 限制单个工具结果的模型可见正文，保留原始内容及必要回执；默认预算为 12000。
-    middleware.append(ToolResultMiddleware(context_settings.tool_result_tokens if context_settings else 12000,
+    from ai_assistant.agents.results import ToolResultMiddleware, result_budget
+    # 限制单个工具结果的模型可见正文，保留原始内容及必要回执；预算来源唯一。
+    middleware.append(ToolResultMiddleware(result_budget(tool_result_tokens, context_settings),
         policy=capability_policy))
     # ToolContext 承载运行时依赖；TurnState 定义图状态，交由 checkpoint 持久化。
     # 直接复用框架的 Agent 图及工具循环，本函数不另建调度循环。
     agent = create_agent(model, tools, system_prompt=prompt,
                         context_schema=ToolContext, checkpointer=checkpointer,
-                        middleware=middleware, state_schema=TurnState)
+                        middleware=middleware,
+                        state_schema=state_schema or TurnState)
 
     # 暴露会话记忆入口及更新间隔供 runtime 使用；这里只保存引用，不触发摘要。
     agent.session_memory = memory

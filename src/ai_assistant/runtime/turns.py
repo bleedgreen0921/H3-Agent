@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 
 async def execute_turn(session, text, *, skill_ids=None, on_event=None,
-                   input_id=None, user_source=None):
+                   input_id=None, user_source=None, planning_action=None,
+                   planning_goal=None):
     if session._closed:
         raise RuntimeError('Session is closed.')
     if session._running:
@@ -46,7 +47,8 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
     registry = getattr(previous, 'registry', None)
     turn_context = replace(session.context, project_rules=project_rules, input_id=input_id, session_id=session.session_id,
                            execution_thread_id=session._thread,
-                           resolved_datetimes=set(), effect_facts=[], inflight_tools=set(), executed_tool_calls=set(),
+                           resolved_datetimes=set(), effect_facts=[], resource_bindings={},
+                           inflight_tools=set(), executed_tool_calls=set(),
                            capabilities=CapabilityTurnState(registry=registry))
     started = monotonic()
     timings = {}
@@ -103,7 +105,10 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
         inputs.append(user_message(session.session_id, input_id, business_text, source=user_source))
         activated_skills = set()
         graph_input.update(messages=inputs, turn_result=None,
-                           execution=None, diagnostics=[], project_rules_snapshot=project_rules)
+                           execution=None, diagnostics=[], project_rules_snapshot=project_rules,
+                           input_id=input_id, planning_action=planning_action,
+                           planning_goal=planning_goal, planning_note=None,
+                           dispatch=[], effect_facts=[])
         if skill_ids:
             from ai_assistant.skills.catalog import SkillError
             if session.context.services.get('skills') is None:
@@ -128,11 +133,13 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
                         metadata = event.get('metadata', {})
                         chunk = event.get('data', {}).get('chunk')
                         if (metadata.get('langgraph_node') == 'model' and metadata.get('lc_source') != 'summarization'
+                                and metadata.get('assistant_phase') != 'task'
                                 and isinstance(chunk, AIMessage) and not timings.get('first_body_seconds')
                                 and any(block.get('text') for block in chunk.content_blocks if block.get('type') == 'text')):
                             timings['first_body_seconds'] = monotonic() - started
                             observation_event('model.first_body', model_first_body_seconds=monotonic() - agent_started)
                         if (metadata.get('langgraph_node') == 'model' and metadata.get('lc_source') != 'summarization'
+                                and metadata.get('assistant_phase') != 'task'
                                 and isinstance(chunk, AIMessage)):
                             delta = ''.join(block.get('text', '') for block in chunk.content_blocks
                                             if isinstance(block, dict) and block.get('type') == 'text')
@@ -141,7 +148,9 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
                                                 'run_id': event.get('run_id')})
                     if event['event'] == 'on_chat_model_start':
                         metadata = event.get('metadata', {})
-                        if metadata.get('langgraph_node') == 'model' and metadata.get('lc_source') != 'summarization':
+                        if (metadata.get('langgraph_node') == 'model'
+                                and metadata.get('lc_source') != 'summarization'
+                                and metadata.get('assistant_phase') != 'task'):
                             await emit_aux({'event': 'on_model_start'})
                     if event['event'] == 'on_tool_end'  and event.get('name') == 'load_skill' and session.context.services.get('skills'):
                         from langgraph.types import Command
@@ -149,6 +158,12 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
                         if isinstance(output, Command) and isinstance(output.update, dict):
                             activated_skills.update(s.id for s in session.context.services.get('skills').active(output.update.get('active_skills', {})))
                     if event['event'] in {'on_tool_start', 'on_tool_end', 'on_tool_error'}:
+                        if event['event'] == 'on_tool_start':
+                            try:
+                                from ai_assistant.agents.failures import tool_label
+                                event = {**event, 'label': tool_label(turn_context, event.get('name'))}
+                            except Exception:
+                                pass
                         await emit_aux(event)
                     if event['event'] == 'on_chain_end' and event['run_id'] == root_id:
                         result = event['data']['output']

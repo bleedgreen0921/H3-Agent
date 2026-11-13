@@ -175,7 +175,8 @@
         "user"
       ],
       "scopes": [
-        "docx:document"
+        "docx:document",
+        "docx:document.block:convert"
       ]
     },
     {
@@ -188,7 +189,8 @@
         "user"
       ],
       "scopes": [
-        "docx:document"
+        "docx:document",
+        "docx:document.block:convert"
       ],
       "path": "/open-apis/docx/v1/documents/:document_id",
       "method": "GET"
@@ -203,7 +205,8 @@
         "user"
       ],
       "scopes": [
-        "docx:document"
+        "docx:document",
+        "docx:document.block:convert"
       ],
       "path": "/open-apis/docx/v1/documents/:document_id/raw_content",
       "method": "GET"
@@ -218,9 +221,26 @@
         "user"
       ],
       "scopes": [
-        "docx:document"
+        "docx:document",
+        "docx:document.block:convert"
       ],
       "path": "/open-apis/docx/v1/documents",
+      "method": "POST"
+    },
+    {
+      "name": "docx.v1.document.convert",
+      "native_name": "docx_v1_document_convert",
+      "domain": "docx",
+      "write": false,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "docx:document",
+        "docx:document.block:convert"
+      ],
+      "path": "/open-apis/docx/v1/documents/blocks/convert",
       "method": "POST"
     },
     {
@@ -233,7 +253,8 @@
         "user"
       ],
       "scopes": [
-        "docx:document"
+        "docx:document",
+        "docx:document.block:convert"
       ],
       "path": "/open-apis/docx/v1/documents/:document_id/blocks/:block_id",
       "method": "GET"
@@ -248,7 +269,8 @@
         "user"
       ],
       "scopes": [
-        "docx:document"
+        "docx:document",
+        "docx:document.block:convert"
       ],
       "path": "/open-apis/docx/v1/documents/:document_id/blocks",
       "method": "GET"
@@ -263,7 +285,8 @@
         "user"
       ],
       "scopes": [
-        "docx:document"
+        "docx:document",
+        "docx:document.block:convert"
       ],
       "path": "/open-apis/docx/v1/documents/:document_id/blocks/:block_id",
       "method": "PATCH"
@@ -278,7 +301,8 @@
         "user"
       ],
       "scopes": [
-        "docx:document"
+        "docx:document",
+        "docx:document.block:convert"
       ],
       "path": "/open-apis/docx/v1/documents/:document_id/blocks/batch_update",
       "method": "PATCH"
@@ -293,7 +317,8 @@
         "user"
       ],
       "scopes": [
-        "docx:document"
+        "docx:document",
+        "docx:document.block:convert"
       ],
       "path": "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children",
       "method": "POST"
@@ -308,10 +333,27 @@
         "user"
       ],
       "scopes": [
-        "docx:document"
+        "docx:document",
+        "docx:document.block:convert"
       ],
       "path": "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/children",
       "method": "GET"
+    },
+    {
+      "name": "docx.v1.documentBlockDescendant.create",
+      "native_name": "docx_v1_documentBlockDescendant_create",
+      "domain": "docx",
+      "write": true,
+      "identities": [
+        "bot",
+        "user"
+      ],
+      "scopes": [
+        "docx:document",
+        "docx:document.block:convert"
+      ],
+      "path": "/open-apis/docx/v1/documents/:document_id/blocks/:block_id/descendant",
+      "method": "POST"
     },
     {
       "name": "drive.v1.file.list",

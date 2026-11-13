@@ -36,8 +36,12 @@ def _skill_directory(registry, intent, terms, active, budget):
     return selected, active
 
 
-def build_plan(registry, query, *, directory_budget=6000, active_skill_ids=()):
+def build_plan(registry, query, *, directory_budget=6000, active_skill_ids=(),
+               effect=None):
     intent = extract(query)
+    if effect in {'read', 'write'}:
+        from dataclasses import replace
+        intent = replace(intent, side_effect=effect)
     terms = query_terms(query)
     mode = getattr(registry.settings, 'mode', 'retrieval')
     all_tool_ids = registry.all_tool_ids()
@@ -50,6 +54,7 @@ def build_plan(registry, query, *, directory_budget=6000, active_skill_ids=()):
         return ExposurePlan(
             tool_ids=all_tool_ids, skill_directory_ids=skill_ids,
             active_skill_ids=active_skills, reason='all', intent=intent,
+            effect=intent.side_effect,
             tool_schema_tokens=registry.schema_tokens(all_tool_ids),
             skill_directory_tokens=registry.skill_directory_tokens(skill_ids))
 
@@ -131,5 +136,6 @@ def build_plan(registry, query, *, directory_budget=6000, active_skill_ids=()):
     return ExposurePlan(
         tool_ids=selected, skill_directory_ids=skill_ids,
         active_skill_ids=active_skills, reason=reason, intent=intent,
+        effect=intent.side_effect,
         tool_schema_tokens=used,
         skill_directory_tokens=registry.skill_directory_tokens(skill_ids))

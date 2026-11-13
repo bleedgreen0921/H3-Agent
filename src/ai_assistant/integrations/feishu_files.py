@@ -47,11 +47,16 @@ class FeishuAPI:
     async def request(self, method, path, **kwargs):
         headers = {'Authorization': 'Bearer ' + await self.access()}
         response = await self.client.request(method, BASE + path, headers=headers, **kwargs)
-        response.raise_for_status()
-        data = response.json()
-        if data.get('code', 0) != 0:
+        try:
+            data = response.json()
+        except ValueError:
+            response.raise_for_status()
+            return {}
+        # 飞书常以 4xx + JSON code 返回业务错误；先解析 code，保留可读拒绝原因。
+        if isinstance(data, dict) and data.get('code', 0) != 0:
             raise FeishuRejected(data.get('code'), http_status=response.status_code)
-        return data.get('data', data)
+        response.raise_for_status()
+        return data.get('data', data) if isinstance(data, dict) else data
 
     async def send_message(self, chat_id, message, operation_id):
         from ai_assistant.channels.feishu.message import request_body, validate_message

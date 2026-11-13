@@ -143,6 +143,17 @@ async def _rag(ctx):
     return CommandResult()
 
 
+async def _plan(ctx):
+    if not getattr(getattr(ctx.worker.config, 'planning', None), 'enabled', False):
+        await ctx.worker.enqueue_reply(ctx.row, '规划能力未启用。')
+        return CommandResult()
+    action, goal = ctx.value
+    text = {'run': '执行计划', 'exit': '退出规划模式', 'status': '查看计划状态'}.get(
+        action, goal or '规划任务')
+    return CommandResult(start_turn=True, turn_text=text,
+                         turn_kwargs={'planning_action': action, 'planning_goal': goal})
+
+
 async def _skill(ctx):
     from ai_assistant.skills.catalog import SkillError
     identity, text = ctx.value
@@ -191,6 +202,17 @@ def _skill_parse(text):
     return identity, request.strip()
 
 
+def _plan_parse(text):
+    """解析 /plan 子命令；其余内容全部作为初始目标。"""
+    text = (text or '').strip()
+    if not text:
+        return 'create', None
+    head, _, rest = text.partition(' ')
+    if not rest and head in {'run', 'exit', 'status'}:
+        return head, None
+    return 'create', text
+
+
 def _rag_parse(text):
     from ai_assistant.knowledge.commands import parse as parse_rag
     parts = ['/rag'] + (text.split(maxsplit=1) if text else [])
@@ -205,6 +227,8 @@ def default_registry():
         CommandSpec('/list', '/list [页码]', _page, _list),
         CommandSpec('/delete', '/delete <会话ID>', _delete_parse, _delete),
         CommandSpec('/skills', '/skills', _no_args, _skills),
+        CommandSpec('/plan', '/plan <目标> | /plan run | /plan status | /plan exit',
+                    _plan_parse, _plan, turn=True),
         CommandSpec('/skill', '/skill <ID> <请求>', _skill_parse, _skill, turn=True),
         CommandSpec('/rag', '/rag ...', _rag_parse, _rag, recover_rag=True,
                     turn_check=lambda value: bool(value and value[0] == 'add')),
