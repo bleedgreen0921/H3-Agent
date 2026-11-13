@@ -8,7 +8,7 @@ from ai_assistant.interfaces.outbox import enqueue_parts
 from ai_assistant.observability import observed
 
 
-@observed("reply.enqueue", lambda conn, settings, row, text, **kw: {"input_id": row["id"]})
+@observed("reply.enqueue.text", lambda conn, settings, row, text, **kw: {"input_id": row["id"]})
 async def enqueue_text(conn, settings, row, text, *, purpose='answer', snapshot=None, presentation_ref=None):
     # 接收端之外的第二道边界：历史群请求也不能登记新的回复。
     if (row.get('body') or {}).get('group') is not False:

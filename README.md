@@ -92,7 +92,7 @@ Spark 使用现有 OpenAI 兼容 provider，模型为 `spark-x2.6`，首版关�
 
 ## Trace 与 LangSmith
 
-观测默认关闭，可显式启用 LangSmith；默认隐藏正文，通过 `input_id` 关联接收日志、Agent 调用树、结果提交、摘要与独立投递。示例见 [观测配置](config.example/observability.toml)，部署、显式存储扩展与模拟验收见 [观测说明](docs/observability.md)。不接入评测集或评测流水线。
+观测默认关闭，可显式启用 LangSmith；默认隐藏正文和账号标识，通过 `input_id` 关联接收日志、Agent 调用树、能力计划、知识后台任务、结果提交、摘要与独立投递。能力计划另可用 `plan_hash` 对照可选的能力选择 JSONL。示例见 [观测配置](config.example/observability.toml)，部署、显式存储扩展与模拟验收见 [观测说明](docs/observability.md)。不接入评测集或评测流水线。
 
 ## 当前接口与会话历史重置
 

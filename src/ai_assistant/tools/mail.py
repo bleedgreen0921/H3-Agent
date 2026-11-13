@@ -12,7 +12,20 @@ from langchain.tools import ToolRuntime, tool
 from langchain_core.tools import ToolException
 from ai_assistant.cancellation import _drain_worker
 from ai_assistant.integrations.mail_worker import describe_error
+from ai_assistant.integrations.tool_policy import ACCOUNT_TEXT_PATTERNS, RedactionPolicy, redact_value
 from ai_assistant.tools.context import ToolContext
+
+
+# 邮件工具需要保留任务写入所需的成员 ID；只隐藏邮箱/电话等直接账号字段。
+MAIL_OUTPUT_POLICY = RedactionPolicy(
+    keys=frozenset({'email', 'mobile', 'phone'}),
+    patterns=ACCOUNT_TEXT_PATTERNS,
+)
+# prepare 的 members 是后续 task_create 的执行参数，必须保留 open_id。
+MAIL_PREPARE_POLICY = RedactionPolicy(
+    keys=frozenset({'email', 'mobile', 'phone'}),
+    patterns=(),
+)
 
 
 def allowed(caller):
@@ -193,19 +206,19 @@ def service(runtime):
 @tool
 async def search_email(runtime: ToolRuntime[ToolContext], since: str | None = None, before: str | None = None, cursor: str | None = None) -> dict:
     """只读查询收件箱，默认近七个自然日，包含已读未读；日期为 ISO，before 不含当天。"""
-    return await service(runtime).search(runtime.context, since, before, cursor)
+    return redact_value(await service(runtime).search(runtime.context, since, before, cursor), MAIL_OUTPUT_POLICY)
 
 
 @tool
 async def read_email(mail_ref: str, runtime: ToolRuntime[ToolContext], cursor: str | None = None) -> dict:
     """只读读取来源邮件的文本正文，不下载附件或访问链接；有游标必须续读或说明缺口。"""
-    return await service(runtime).read_email(mail_ref, cursor)
+    return redact_value(await service(runtime).read_email(mail_ref, cursor), MAIL_OUTPUT_POLICY)
 
 
 @tool
 async def prepare_email_task(mail_ref: str, task_data: dict, runtime: ToolRuntime[ToolContext]) -> dict:
     """用户确认最终条目后绑定已读邮件与单个任务参数；本工具不写飞书。"""
-    return await service(runtime).prepare(runtime.context, mail_ref, task_data)
+    return redact_value(await service(runtime).prepare(runtime.context, mail_ref, task_data), MAIL_PREPARE_POLICY)
 
 
 def email_tools():

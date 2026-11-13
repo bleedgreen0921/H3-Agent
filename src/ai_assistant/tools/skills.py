@@ -39,6 +39,13 @@ async def search_skills(runtime: ToolRuntime[ToolContext], query: str = '',
             if item['id'] not in plan.skill_directory_ids:
                 plan.skill_directory_ids.append(item['id'])
         plan.skill_directory_tokens = state.registry.skill_directory_tokens(plan.skill_directory_ids)
+        state.registry.record_plan(
+            plan, input_id=getattr(runtime.context, 'input_id', None),
+            session_id=getattr(runtime.context, 'session_id', None),
+            change='expand_skills',
+            execution_thread_id=getattr(runtime.context, 'execution_thread_id', None),
+            search_calls=state.search_calls,
+        )
     return result
 
 
@@ -52,6 +59,8 @@ async def load_skill(skill_id: str, runtime: ToolRuntime[ToolContext]) -> Comman
     info = skill.info()
     info.update(loaded=True, workspace=str(runtime.context.workspace.root),
                 output='Write outputs to the configured workspace using the available file tools.')
+    from ai_assistant.observability import event
+    event('capability.skill', skill_id=skill.id, change='load', status='loaded')
     return Command(update={'active_skills': {skill.id: skill.digest}, 'messages': [
         ToolMessage(content=str(info), tool_call_id=runtime.tool_call_id, name='load_skill')]})
 
@@ -63,6 +72,8 @@ async def unload_skill(skill_id: str, runtime: ToolRuntime[ToolContext]) -> Comm
         skill = catalog(runtime).resolve(skill_id)
     except SkillError as exc:
         raise ToolException(str(exc)) from None
+    from ai_assistant.observability import event
+    event('capability.skill', skill_id=skill.id, change='unload', status='unloaded')
     return Command(update={'active_skills': {skill.id: None}, 'messages': [
         ToolMessage(content='Unloaded ' + skill.id, tool_call_id=runtime.tool_call_id, name='unload_skill')]})
 

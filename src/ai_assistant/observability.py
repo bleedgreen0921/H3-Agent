@@ -13,6 +13,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ai_assistant.integrations.tool_policy import redact_text
+
 
 class ObservabilityConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -33,7 +35,30 @@ _ALLOWED = frozenset({"input_id", "session_id", "thread_id", "execution_thread_i
     "result_commit_seconds", "reply_delivery_seconds", "maintenance_seconds",
     "run_id", "parent_run_id", "profile", "role", "tool", "remote_id", "execution_status",
     "model_first_body_seconds", "input_tokens", "output_tokens", "total_tokens",
-    "tool_count", "selected_count", "schema_tokens", "reason"})
+    "tool_count", "selected_count", "schema_tokens", "reason",
+    # 能力计划与命令：只记录名称、计数、哈希和内部标识，不记录用户正文。
+    "kind", "command", "target_id", "change", "plan_hash", "skill_id", "action",
+    "skill_count", "selected_skill_count", "active_skill_count", "skill_directory_tokens",
+    "selected_tools", "selected_skills", "search_calls",
+    # 边界事件：稳定错误码、可重试标记和模型调用顺序。
+    "code", "retryable", "recoverable", "call_index", "after_tool",
+    # 知识后台：job/sync/document/source/build 标识用于跨 trace 关联。
+    "sync_id", "job_id", "document_id", "source_id", "build_id",
+    "candidate_count", "evidence_count", "item_count",
+    # 本地写入与结果汇总：不记录路径或正文。
+    "effect_id", "effect_count", "confirmed_effects", "write_tools"})
+
+
+def csv_ids(values, limit=2000):
+    """把标识集合整理成有界、去重的标量，供日志或 trace metadata 使用。"""
+    items, seen = [], set()
+    for value in values or ():
+        text = str(value)
+        if text and text not in seen:
+            seen.add(text)
+            items.append(text)
+    joined = ",".join(items)
+    return joined if len(joined) <= limit else joined[:limit] + "..."
 
 
 @contextmanager
@@ -47,18 +72,25 @@ def bind(**values):
 
 
 def event(name, **values):
+    """写入本地安全 JSON 事件；启用 trace 时同步附加到当前 LangSmith run。
+
+    `model.` / `tool.` 前缀只用于本地日志，避免与原生模型/工具 run 重复；
+    业务阶段事件不要使用这两个前缀，否则不会进入 LangSmith metadata。
+    """
     service = _service.get()
+    # None 不覆盖上下文中的既有标识；允许列表之外的字段直接丢弃。
+    safe = {k: v for k, v in values.items() if k in _ALLOWED and v is not None}
     if service and service.client and (not name.startswith(("model.", "tool.")) or name == "model.first_body"):
         try:
             from langsmith.run_helpers import get_current_run_tree
             run = get_current_run_tree()
             if run:
                 run.add_metadata({k: str(v) if k.endswith("_id") and v is not None else v
-                                  for k, v in values.items() if k in _ALLOWED and v is not None})
+                                  for k, v in safe.items()})
         except Exception as error:
             service.warning(error)
     logging.getLogger("ai_assistant.observability").info(name,
-        extra={"observation": {**_context.get(), **{k: v for k, v in values.items() if k in _ALLOWED}}})
+        extra={"observation": {**_context.get(), **safe}})
 
 
 class JsonFormatter(logging.Formatter):
@@ -90,6 +122,7 @@ def _sanitize(value, secrets=()):
             if secret:
                 value = value.replace(secret, "[redacted]")
         value = re.sub(r"(?i)bearer\s+[^\s\"']+|\bsk-[A-Za-z0-9_-]+", "[redacted]", value)
+        return redact_text(value)
     return value
 
 

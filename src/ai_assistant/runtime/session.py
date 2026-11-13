@@ -6,7 +6,7 @@ from ai_assistant.config import ConfigError
 from ai_assistant.storage.sessions import SessionError, SessionStorageError
 from ai_assistant.runtime.turns import execute_turn
 from ai_assistant.runtime.maintenance import maintain_session_memory
-from ai_assistant.observability import span
+from ai_assistant.observability import event, span
 
 
 class AssistantSession:
@@ -43,7 +43,13 @@ class AssistantSession:
             return
         caller = self.context.caller
         binding = caller.binding if caller and caller.scope != 'local' else None
-        row = await self.repository.open(self.context.workspace.root, session_id, binding=binding)
+        try:
+            row = await self.repository.open(self.context.workspace.root, session_id, binding=binding)
+        except SessionError as error:
+            event('session.open_failed', status='failed',
+                  code=getattr(error, 'code', 'session_error'),
+                  retryable=getattr(error, 'retryable', False))
+            raise
         self._session_id = str(row['id'])
         self._thread, self._complete = row['thread_id'], row['complete']
         self._threads = row.get('thread_ids') or [self._thread]
@@ -52,6 +58,8 @@ class AssistantSession:
             state = await self.agent.aget_state(self._complete)
             from ai_assistant.runtime.history import saved_turn
             if not state.values or state.next or saved_turn(state.values, threads=self._threads) is None:
+                event('session.open_failed', status='failed',
+                      code='session_checkpoint_invalid', retryable=False)
                 raise SessionError('不支持的 checkpoint 格式或正文缺失；未恢复或重新执行。')
 
     async def new_conversation(self):

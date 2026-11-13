@@ -2,6 +2,7 @@
 
 import asyncio
 from typing import Annotated
+from uuid import uuid4
 
 from langchain.tools import ToolRuntime, tool
 from langchain_core.tools import BaseTool, ToolException
@@ -117,6 +118,7 @@ async def _write_call(runtime, method, *args):
     context = runtime.context
     if context.writes is None:
         raise ToolException('文件写入工具尚未启用。')
+    effect_id = uuid4().hex
     async with context.operation_lock:
         worker = asyncio.create_task(asyncio.to_thread(getattr(context.writes, method), *args))
         try:
@@ -130,12 +132,17 @@ async def _write_call(runtime, method, *args):
                 if receipt is not None:
                     context.effect_facts.append({'kind': 'local_file', 'tool': method,
                         'status': 'saved', 'path': receipt['path'], 'sha256': receipt['sha256'],
-                        'summary': '取消前本地文件已发布'})
+                        'effect_id': effect_id, 'summary': '取消前本地文件已发布'})
+                    from ai_assistant.observability import event
+                    event('file.published', effect_id=effect_id, tool=method, status='saved')
             raise
         except WorkspaceError as exc:
             from ai_assistant.workspace.writes import PublishedWorkspaceError
             if isinstance(exc, PublishedWorkspaceError):
-                return str(exc), {**exc.receipt, 'execution_fact': {'version': 1, 'nature': 'effect',
+                from ai_assistant.observability import event
+                event('file.published', effect_id=effect_id, tool=method, status='unknown')
+                return str(exc), {**exc.receipt, 'effect_id': effect_id,
+                        'execution_fact': {'version': 1, 'nature': 'effect',
                         'published': True, 'control': 'stop', 'error_category': 'unknown'}}
             raise ToolException(str(exc)) from None
     content = f"文件：{result['path']}\nSHA-256：{result['sha256']}"
@@ -145,7 +152,9 @@ async def _write_call(runtime, method, *args):
         content += f"\n已替换 {result['replacements']} 处。\n{result['diff']}"
         if result['truncated']:
             content += '\n[差异已截断]'
-    return content, {**result, 'receipt_version': 1, 'published': True}
+    from ai_assistant.observability import event
+    event('file.published', effect_id=effect_id, tool=method, status='saved')
+    return content, {**result, 'receipt_version': 1, 'published': True, 'effect_id': effect_id}
 
 
 @tool(response_format='content_and_artifact')

@@ -1,21 +1,57 @@
-"""飞书 MCP adapter facade：transport/docs/tasks/mail_bridge 的组合。"""
+"""飞书 MCP adapter facade：transport/docs/tasks/calendar/mail_bridge 的组合。"""
+from ai_assistant.integrations.feishu_adapter.calendar import (
+    after_read as calendar_after_read,
+    guidance as calendar_guidance,
+    preflight as calendar_preflight,
+    prepare as calendar_prepare,
+    verify as calendar_verify,
+)
 from ai_assistant.integrations.feishu_adapter.docs import guidance as docs_guidance
 from ai_assistant.integrations.feishu_adapter.docs import unfinished_document_notice
 from ai_assistant.integrations.feishu_adapter.mail_bridge import email_source_key
+from ai_assistant.integrations.feishu_adapter.projection import project, project_output
 from ai_assistant.integrations.feishu_adapter.tasks import (
-    after_read, guidance as task_guidance, prepare as prepare_task, task_write, verify,
+    after_read as task_after_read, guidance as task_guidance,
+    preflight as task_preflight, prepare as prepare_task, task_write,
+    verify as task_verify,
 )
 from ai_assistant.integrations.feishu_adapter.transport import IDEMPOTENCY, idempotency_path, interpret
 
 
 def guidance(entries, context):
-    return docs_guidance(entries) + task_guidance(entries)
+    return docs_guidance(entries) + task_guidance(entries) + calendar_guidance(entries)
+
+
+def is_calendar(entry):
+    return getattr(entry, 'original_name', '').startswith('calendar_v4_')
+
+
+def preflight(entry, arguments, context):
+    if is_calendar(entry):
+        calendar_preflight(entry, arguments, context)
+    else:
+        task_preflight(entry, arguments, context)
 
 
 async def prepare(entry, arguments, context, state, config=None):
     email_source_key(entry, arguments, context)
+    if is_calendar(entry):
+        return calendar_prepare(entry, arguments, context), None
     return prepare_task(context, entry, arguments), None
 
 
-__all__ = ['IDEMPOTENCY', 'idempotency_path', 'guidance', 'task_write', 'prepare',
-           'interpret', 'verify', 'after_read', 'email_source_key', 'unfinished_document_notice']
+async def verify(entry, operation, arguments, expected, result, context, config=None):
+    if is_calendar(entry):
+        return calendar_verify(entry, operation, arguments, expected, result, context, config)
+    return await task_verify(entry, operation, arguments, expected, result, context, config)
+
+
+async def after_read(entry, arguments, result, context):
+    if is_calendar(entry):
+        return calendar_after_read(entry, arguments, result, context)
+    return await task_after_read(entry, arguments, result, context)
+
+
+__all__ = ['IDEMPOTENCY', 'idempotency_path', 'guidance', 'task_write', 'preflight', 'prepare',
+           'interpret', 'verify', 'after_read', 'email_source_key', 'project', 'project_output',
+           'unfinished_document_notice']

@@ -29,13 +29,19 @@ def execution_fact(result, request, *, unexpected=False, policy=None):
         return result
     artifact = result.artifact if isinstance(result.artifact, dict) else {'original_artifact': result.artifact}
     reading = readonly_call(request, policy)
-    error = result.status == 'error' or artifact.get('execution_fact', {}).get('control') == 'stop'
+    existing = artifact.get('execution_fact')
+    existing = existing if isinstance(existing, dict) else {}
+    error = result.status == 'error' or existing.get('control') == 'stop'
     recoverable = error and reading and not unexpected
-    fact = {'version': 1, 'nature': 'read' if reading else 'effect',
-            'error_category': ('read_error' if recoverable else 'unclassified' if unexpected else 'effect_error') if error else None,
-            'control': 'continue' if not error or recoverable else 'stop'}
-    if artifact.get('execution_fact', {}).get('control') == 'stop':
-        fact = artifact['execution_fact']
+    # 本地 preflight 已明确“无副作用、可修正”，即使工具是写能力也保留该事实。
+    if existing.get('control') == 'continue' and existing.get('nature') == 'read':
+        fact = existing
+    else:
+        fact = {'version': 1, 'nature': 'read' if reading else 'effect',
+                'error_category': ('read_error' if recoverable else 'unclassified' if unexpected else 'effect_error') if error else None,
+                'control': 'continue' if not error or recoverable else 'stop'}
+    if existing.get('control') == 'stop':
+        fact = existing
     if not error and request.tool_call['name'] in {'create_file', 'edit_file'}:
         fact['published'] = True
     return result.model_copy(update={'status': 'error' if error else result.status,

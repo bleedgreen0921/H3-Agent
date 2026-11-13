@@ -1,8 +1,9 @@
 """飞书任务写入参数保护与本次接口返回核对；失败绝不重放。"""
 import json
-from datetime import datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from langchain_core.tools import ToolException
+
+from ai_assistant.integrations.feishu_temporal import time_view
+from ai_assistant.integrations.tool_policy import PreflightIssue, ToolPreflightError
 
 TASK_WRITES = {'task_v2_task_create', 'task_v2_task_patch', 'task_v2_task_addMembers'}
 
@@ -49,22 +50,8 @@ def task_view(result, timezone):
     task = task_data(result)
     if not task:
         return None
-    view = {}
-    view['timezone'] = timezone
-    for field in ('start', 'due'):
-        if field not in task:
-            continue
-        value = dict(task[field]) if isinstance(task[field], dict) else task[field]
-        if isinstance(value, dict):
-            try:
-                value['local_datetime'] = datetime.fromtimestamp(
-                    int(value['timestamp']) / 1000, ZoneInfo(timezone)).isoformat()
-            except (KeyError, ValueError, TypeError, OverflowError, OSError, ZoneInfoNotFoundError):
-                value['display_error'] = '时间戳无法转换，保留原值'
-        else:
-            value = {'original_value': value, 'display_error': '时间格式无法转换，保留原值'}
-        view[field] = value
-    return {'source': '本次接口返回的本地时间说明', 'task': view}
+    view = time_view(task, timezone, ('start', 'due'), report_invalid=True)
+    return {'source': '本次接口返回的本地时间说明', 'task': view} if view else None
 
 
 def task_model_result(result, context):
@@ -89,10 +76,83 @@ def expected_data(name, arguments):
     return {k: v for k, v in data.get('task', {}).items() if k in data.get('update_fields', [])} if name == 'task_v2_task_patch' else data
 
 
+def preflight_task(context, entry, arguments):
+    """只读校验；在默认成员注入和 operation 创建之前调用。"""
+    name = entry.original_name
+    expected = expected_data(name, arguments)
+    _validate_task(context, name, expected)
+
+
+def _owner_only(context):
+    service = (getattr(context, 'services', None) or {}).get('feishu')
+    return getattr(service, 'task_members', 'model') == 'owner_only'
+
+
+def _owner_id(context):
+    service = (getattr(context, 'services', None) or {}).get('feishu')
+    return getattr(service, 'owner_open_id', None)
+
+
+def _validate_task(context, name, expected):
+    """可复用的任务前置条件；本地失败不产生外部副作用。"""
+    if not isinstance(expected, dict):
+        return
+    if _owner_only(context) and name == 'task_v2_task_addMembers':
+        raise ToolPreflightError(PreflightIssue(
+            code='task.members_owner_only',
+            message='当前部署的负责人由系统绑定，不能修改任务成员。',
+            field='data.members'))
+    reminders = expected.get('reminders')
+    if name == 'task_v2_task_create' and reminders and not expected.get('due'):
+        raise ToolPreflightError(PreflightIssue(
+            code='task.reminders_require_due',
+            message='飞书任务提醒只能按截止时间 due 触发。请提供截止时间；'
+                    '如果要在会议或考试开始前提醒，请创建日历日程。',
+            field='data.due'))
+    members = expected.get('members')
+    if _owner_only(context) and name == 'task_v2_task_create' and members:
+        owner = _owner_id(context)
+        if not isinstance(members, list) or any(
+                not isinstance(member, dict) or member.get('id') != owner for member in members):
+            raise ToolPreflightError(PreflightIssue(
+                code='task.members_owner_only',
+                message='当前部署的负责人由系统绑定，请不要传 members 或指定其他成员。',
+                field='data.members'))
+    for field in ('start', 'due'):
+        value = expected.get(field)
+        if not isinstance(value, dict) or not value.get('timestamp'):
+            continue
+        key = (str(value['timestamp']), bool(value.get('is_all_day', False)))
+        if key not in context.resolved_datetimes:
+            raise ToolPreflightError(PreflightIssue(
+                code='task.time_not_resolved',
+                message=f'{field} 未匹配本轮可信时间转换；请先调用 resolve_datetime（全天任务提供明确日期）。',
+                field=f'data.{field}'))
+    start, due = expected.get('start'), expected.get('due')
+    if isinstance(start, dict) and isinstance(due, dict) and start.get('timestamp') and due.get('timestamp'):
+        if bool(start.get('is_all_day', False)) != bool(due.get('is_all_day', False)):
+            raise ToolPreflightError(PreflightIssue(
+                code='task.time_flags_mismatch',
+                message='开始和截止时间的全天标记必须一致。',
+                field='data.start'))
+        if int(start['timestamp']) > int(due['timestamp']):
+            raise ToolPreflightError(PreflightIssue(
+                code='task.start_after_due',
+                message='开始时间不能晚于截止时间。',
+                field='data.start'))
+
+
 def prepare_task(context, entry, arguments):
     name = entry.original_name
     expected = expected_data(name, arguments)
-    if name == 'task_v2_task_create' and 'members' not in expected:
+    if name == 'task_v2_task_create' and _owner_only(context):
+        owner = _owner_id(context)
+        if not owner:
+            raise ToolException('未配置可信主人身份，无法设置负责人。')
+        if not expected.get('members'):
+            expected['members'] = [{'id': owner, 'type': 'user', 'role': 'assignee'}]
+        arguments.setdefault('params', {})['user_id_type'] = 'open_id'
+    elif name == 'task_v2_task_create' and 'members' not in expected:
         caller = context.caller
         if caller and caller.owner and caller.scope == 'private' and caller.channel == 'feishu_private' and context.services['feishu'].default_task_assignee == 'owner':
             if not context.services['feishu'].owner_open_id:
@@ -101,19 +161,7 @@ def prepare_task(context, entry, arguments):
             arguments.setdefault('params', {})['user_id_type'] = 'open_id'
     if name == 'task_v2_task_patch' and ('members' in arguments.get('data', {}).get('task', {}) or 'members' in arguments.get('data', {}).get('update_fields', [])):
         raise ToolException('负责人修改必须使用 task_v2_task_addMembers，不能放入 patch。')
-    for field in ('start', 'due'):
-        value = expected.get(field)
-        if not isinstance(value, dict) or not value.get('timestamp'):
-            continue
-        key = (str(value['timestamp']), bool(value.get('is_all_day', False)))
-        if key not in context.resolved_datetimes:
-            raise ToolException(f'{field} 未匹配本轮可信时间转换；请先调用 resolve_datetime（全天任务提供明确日期）。')
-    start, due = expected.get('start'), expected.get('due')
-    if isinstance(start, dict) and isinstance(due, dict) and start.get('timestamp') and due.get('timestamp'):
-        if bool(start.get('is_all_day', False)) != bool(due.get('is_all_day', False)):
-            raise ToolException('开始和截止时间的全天标记必须一致。')
-        if int(start['timestamp']) > int(due['timestamp']):
-            raise ToolException('开始时间不能晚于截止时间。')
+    _validate_task(context, name, expected)
     return expected
 
 

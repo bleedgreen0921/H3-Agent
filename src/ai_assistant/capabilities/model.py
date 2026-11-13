@@ -47,6 +47,7 @@ class CapabilityTurnState:
     registry: object | None = None
     plan: ExposurePlan | None = None
     search_calls: int = 0
+    preflight_failures: int = 0
 
     @property
     def initialized(self):

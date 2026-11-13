@@ -104,41 +104,54 @@ async def prepare_chunks(store, job):
 async def build(store, job):
     c = store.config
     limiter = getattr(store, 'parse_limiter', None)
-    if limiter is None:
-        chunks = await prepare_chunks(store, job)
-    else:
-        async with limiter:
+    from ai_assistant.observability import span
+    with span('knowledge.index.parse', job_id=job.get('id')):
+        if limiter is None:
             chunks = await prepare_chunks(store, job)
+        else:
+            async with limiter:
+                chunks = await prepare_chunks(store, job)
     from langchain_classic.indexes import SQLRecordManager, aindex
-    async with embedding(c) as model:
-        engine, vectors = await vector_store(c, model)
-        try:
-            # Unique namespace AND build metadata fence all full-cleanup operations.
-            manager = SQLRecordManager('rag:' + job['build_id'], engine=store.engine, async_mode=True)
-            await aindex(chunks, manager, vectors, batch_size=c.embedding.batch_size,
-                         cleanup='full', source_id_key='document_id', key_encoder='sha256')
-            # All embedding requests and vector writes finish before keyword preparation/publication.
-            rows = await store.chunk_rows(job['build_id'])
-            if not any(row.content.strip() for row in rows):
-                raise IngestionError('empty_index', '当前构建未写入有效片段，已停止发布。',
-                                     f'build_id={job["build_id"]}; stored_rows={len(rows)}')
-            values = await asyncio.to_thread(lambda: [dict(id=r.langchain_id, words=terms(r.content)) for r in rows])
-            await store.update_chunk_tsv(values)
-            await store.publish(job)
-        finally:
-            await engine.close()
+    with span('knowledge.index.embed', job_id=job.get('id')):
+        async with embedding(c) as model:
+            engine, vectors = await vector_store(c, model)
+            try:
+                # Unique namespace AND build metadata fence all full-cleanup operations.
+                manager = SQLRecordManager('rag:' + job['build_id'], engine=store.engine, async_mode=True)
+                await aindex(chunks, manager, vectors, batch_size=c.embedding.batch_size,
+                             cleanup='full', source_id_key='document_id', key_encoder='sha256')
+                # All embedding requests and vector writes finish before keyword preparation/publication.
+                rows = await store.chunk_rows(job['build_id'])
+                if not any(row.content.strip() for row in rows):
+                    raise IngestionError('empty_index', '当前构建未写入有效片段，已停止发布。',
+                                         f'build_id={job["build_id"]}; stored_rows={len(rows)}')
+                values = await asyncio.to_thread(lambda: [dict(id=r.langchain_id, words=terms(r.content)) for r in rows])
+                await store.update_chunk_tsv(values)
+            finally:
+                await engine.close()
+    with span('knowledge.index.publish', job_id=job.get('id')):
+        await store.publish(job)
 
 
 async def run_once(store):
     job = await store.claim()
     if job is None:
         return False
+    from ai_assistant.observability import event, span
+    with span('knowledge.index', job_id=job.get('id'), document_id=job.get('document_id'),
+              build_id=job.get('build_id')):
+        event('knowledge.index.started', job_id=job.get('id'), status='running')
+        return await _run_claimed(store, job)
 
+
+async def _run_claimed(store, job):
     async def heartbeat():
         while True:
             await asyncio.sleep(store.config.heartbeat_seconds)
             await store.heartbeat(job)
 
+    from ai_assistant.observability import event
+    error_code = None
     task = asyncio.create_task(build(store, job))
     pulse = asyncio.create_task(heartbeat())
     try:
@@ -150,6 +163,7 @@ async def run_once(store):
                 completed.result()
     except asyncio.CancelledError:
         # Leave the task leased; another worker recovers after expiry.
+        event('knowledge.index.failed', job_id=job.get('id'), status='cancelled', category='CancelledError')
         raise
     except Exception as exc:
         # Resolve an unknown commit outcome before marking/retrying anything.
@@ -158,6 +172,7 @@ async def run_once(store):
             transient = isinstance(exc, (OperationalError, ConnectionError)) or (
                 isinstance(exc, DBAPIError) and exc.connection_invalidated)
             code = exc.code if isinstance(exc, IngestionError) else ('transient_database' if transient else 'ingestion_failed')
+            error_code = code
             message = 'transient_database' if transient else (str(exc) if isinstance(exc, KnowledgeError) else type(exc).__name__)
             diagnostic_path = None
             if isinstance(exc, IngestionError):
@@ -168,6 +183,11 @@ async def run_once(store):
                     message += '（诊断文件未能保存。）'
             await store.fail(job, transient=transient, error=message,
                              error_code=code, diagnostic_path=diagnostic_path)
+        event('knowledge.index.failed', job_id=job.get('id'), status='failed',
+              category=type(exc).__name__, reason=error_code)
+    else:
+        event('knowledge.index.published', job_id=job.get('id'), document_id=job.get('document_id'),
+              build_id=job.get('build_id'), status='succeeded')
     finally:
         for running in (task, pulse):
             if not running.done():

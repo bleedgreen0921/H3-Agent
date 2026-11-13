@@ -63,7 +63,9 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             skill_snapshot=getattr(resources, "skills", None) if caller.personal else None))
         from ai_assistant.tools.context import FeishuService
         feishu = (FeishuService(config.integrations.feishu.owner_open_id,
-                                config.integrations.feishu.default_task_assignee)
+                                config.integrations.feishu.default_task_assignee,
+                                config.integrations.feishu.task_members,
+                                config.integrations.feishu.default_calendar_id)
                   if caller.personal and config.integrations.feishu else FeishuService())
         context = replace(context, usage_store=usage_store,
                           services={**context.services, 'feishu': feishu},

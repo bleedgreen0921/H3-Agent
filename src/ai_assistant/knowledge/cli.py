@@ -40,6 +40,18 @@ def add_commands(commands):
 
 
 async def execute(config, args):
+    from ai_assistant.observability import (ObservationService, configuration_secrets,
+                                            current_service, span)
+    watched = {'worker', 'search', 'submit', 'sync', 'delete', 'rebuild'}
+    if (args.action in watched and config.observability.enabled
+            and current_service() is None):
+        async with ObservationService(config.observability, configuration_secrets(config)):
+            with span('cli.knowledge', action=args.action):
+                return await _execute(config, args)
+    return await _execute(config, args)
+
+
+async def _execute(config, args):
     c = config.knowledge
     if c is None:
         raise ConfigError('未配置 [knowledge]。')
@@ -71,10 +83,17 @@ async def execute(config, args):
             from ai_assistant.knowledge.sync import configure
             await configure(config,store)
             ident = await store.request_sync({'source_id': args.source} if args.source else {})
+            from ai_assistant.observability import event
+            event('knowledge.management', action='sync', status='submitted', sync_id=ident,
+                  target_id=args.source)
             print(ident, flush=True)
         elif args.action == 'submit':
             from ai_assistant.knowledge.sync import register
-            print(json.dumps(await register(config, args.path, tags=args.tag), ensure_ascii=False))
+            result = await register(config, args.path, tags=args.tag)
+            from ai_assistant.observability import event
+            event('knowledge.management', action='submit', status=result.get('status'),
+                  source_id=result.get('source_id'), sync_id=result.get('sync_id'))
+            print(json.dumps(result, ensure_ascii=False))
         elif args.action == 'status':
             from ai_assistant.knowledge.management import status
             result = await status(store, args.job_id)
@@ -100,18 +119,28 @@ async def execute(config, args):
             if args.tag:
                 filters['tags'] = args.tag
             docs = await create_knowledge_retriever(c, filters=filters).ainvoke(args.query)
+            from ai_assistant.observability import event
+            event('knowledge.search', status='complete', candidate_count=len(docs))
             print(render_evidence(docs))
             print('检索范围：已发布快照；查询不自动同步。')
             if not docs:
                 print('暂无可检索内容或相关证据；可提交入库、主动同步或查询任务状态。')
         elif args.action == 'delete':
-            print(f'退出查询范围的文档数：{await store.delete(args.document_id)}')
+            removed = await store.delete(args.document_id)
+            from ai_assistant.observability import event
+            event('knowledge.management', action='delete', status='succeeded',
+                  document_id=args.document_id, target_id=args.document_id, item_count=removed)
+            print(f'退出查询范围的文档数：{removed}')
         elif args.action == 'rebuild':
             version = await store.version_for_rebuild(args.document_id)
             if version is None:
                 raise KnowledgeError('文档不存在或已移除；请先显式添加恢复。')
-            print(await store.submit(source_uri=version['source_uri'], digest=version['digest'],
-                snapshot=version['snapshot'], metadata=version['metadata'], force=True, restore=False))
+            job = await store.submit(source_uri=version['source_uri'], digest=version['digest'],
+                snapshot=version['snapshot'], metadata=version['metadata'], force=True, restore=False)
+            from ai_assistant.observability import event
+            event('knowledge.management', action='rebuild', status='submitted',
+                  document_id=args.document_id, job_id=job)
+            print(job)
         elif args.action == 'check':
             if args.database:
                 await store.check_tables(('rag_documents', 'rag_versions', 'rag_jobs', 'rag_builds',

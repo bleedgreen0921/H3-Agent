@@ -1,6 +1,8 @@
 """已保存轮次的纯呈现投影；不执行模型、工具或业务状态推断。"""
 from dataclasses import asdict, dataclass
 
+from ai_assistant.integrations.tool_policy import project_output_text
+
 
 SAFE_MESSAGE = '保存未确认、状态待核实；请读取历史记录及操作回执核实，未自动重跑。'
 LABELS = {'partial': '部分完成', 'failed': '未完成', 'unknown': '状态待核实',
@@ -31,6 +33,7 @@ def project(result, body):
     """调用方仅传入持久结果和对应原文；不转换缺失当前契约的结果。"""
     state = result['status']
     label = '' if state == 'complete' else LABELS.get(state, '状态待核实')
+    body = project_output_text(body)
     return Presentation(state, label, body, {'input_id': result.get('input_id'),
                         'body_locator': result.get('body_locator')}, result.get('diagnostics') or [])
 

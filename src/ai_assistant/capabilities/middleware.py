@@ -28,12 +28,13 @@ class CapabilityPlannerMiddleware(AgentMiddleware):
             directory_budget=getattr(context, 'skills_directory_tokens', 6000),
             active_skill_ids=active,
         )
-        state.registry.record_plan(state.plan, input_id=getattr(context, 'input_id', None),
-                                  session_id=getattr(context, 'session_id', None))
-        from ai_assistant.observability import event
-        event('tool.selection', tool_count=len(state.registry.all_tool_ids()),
-              selected_count=len(state.plan.tool_ids),
-              schema_tokens=state.plan.tool_schema_tokens, reason=state.plan.reason)
+        state.registry.record_plan(
+            state.plan, input_id=getattr(context, 'input_id', None),
+            session_id=getattr(context, 'session_id', None),
+            change='initial',
+            execution_thread_id=getattr(context, 'execution_thread_id', None),
+            search_calls=state.search_calls,
+        )
         return request
 
     def wrap_model_call(self, request, handler):

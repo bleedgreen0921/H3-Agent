@@ -12,6 +12,7 @@ from ai_assistant.storage.sessions import SessionError, session_storage
 
 
 async def _session_end(ctx, name):
+    from ai_assistant.observability import event
     async with session_storage(ctx.worker.config.sessions) as repo:
         stored = await prepare_session_end(repo, ctx.row)
         if stored['result']:
@@ -28,6 +29,7 @@ async def _session_end(ctx, name):
         async with repo.conn.transaction():
             active = target.get('active_input_id')
             if active:
+                event('request.cancelled', command=name, target_id=active)
                 await OutboxRepository(repo.conn).block_pending(active)
                 await InboxRepository(repo.conn).block_running(active, ctx.row['binding'])
             if name == '/new':
@@ -107,6 +109,8 @@ async def _delete(ctx):
                     raise SessionError('会话正在执行，请先 /cancel 并等待清理结束。')
                 await commands.begin(ctx.row['id'], ctx.row['binding'], '/delete', target)
                 await repo.delete(target, binding=ctx.row['binding'])
+                from ai_assistant.observability import event
+                event('request.session_action', command='/delete', target_id=target, status='deleted')
                 text = '会话已删除（应用侧聊天、摘要及 checkpoint）。飞书消息、知识库、文件和必要业务回执保留。'
             except SessionError:
                 check = await repo.status(target)

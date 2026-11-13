@@ -3,6 +3,7 @@
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 
 from ai_assistant.knowledge import KnowledgeError
 from ai_assistant.knowledge.config import resolve_knowledge_paths
@@ -81,6 +82,7 @@ async def configure(config, store):
 
 
 async def synchronize(config, store, run):
+    from ai_assistant.observability import event
     jobs = []
     errors = []
     filters = run["filters"]
@@ -108,6 +110,8 @@ async def synchronize(config, store, run):
         definition = source["config"]
         if filters.get("source_id") and filters["source_id"] != name:
             continue
+        source_started = monotonic()
+        source_errors = len(errors)
         previous = await store.members(name)
         if target_uri:
             previous = [m for m in previous if m["uri"] == target_uri]
@@ -158,6 +162,9 @@ async def synchronize(config, store, run):
                 }
             )
             await store.record_scan_errors(run, errors)
+            event('knowledge.sync.source', sync_id=run.get("id"), source_id=name,
+                  status='failed', reason=exc.code if isinstance(exc, SourceFailure) else type(exc).__name__,
+                  elapsed_seconds=monotonic() - source_started)
             continue
         for uri, descriptor in descriptors:
             previous_document = await store.document_for_uri(uri)
@@ -240,6 +247,8 @@ async def synchronize(config, store, run):
                 )
                 await store.observe(name, uri, descriptor, "available", sync_run=run)
                 jobs.append({"job_id": job, "source_id": name, "uri": uri})
+                event('knowledge.sync.submitted', sync_id=run.get("id"), source_id=name,
+                      job_id=job, status='queued')
             except Exception as exc:
                 from ai_assistant.knowledge import LeaseLost
 
@@ -268,6 +277,9 @@ async def synchronize(config, store, run):
                 )
             await store.record_scan_errors(run, errors)
         await store.mark_source_ok(name)
+        event('knowledge.sync.source', sync_id=run.get("id"), source_id=name,
+              status='partial' if len(errors) > source_errors else 'complete',
+              item_count=len(descriptors), elapsed_seconds=monotonic() - source_started)
     await store.settle_scan(run, jobs, errors)
 
 
@@ -276,12 +288,19 @@ async def sync_once(config, store):
     if run is None:
         await store.finish_syncs()
         return False
+    from ai_assistant.observability import event, span
+    with span('knowledge.sync', sync_id=run.get("id")):
+        event('knowledge.sync.started', sync_id=run.get("id"), status='running')
+        return await _sync_claimed(config, store, run)
 
+
+async def _sync_claimed(config, store, run):
     async def heartbeat():
         while True:
             await asyncio.sleep(10)
             await store.sync_heartbeat(run)
 
+    from ai_assistant.observability import event
     task = asyncio.create_task(synchronize(config, store, run))
     pulse = asyncio.create_task(heartbeat())
     try:
@@ -295,6 +314,8 @@ async def sync_once(config, store):
             for completed in done:
                 completed.result()
     except asyncio.CancelledError:
+        event('knowledge.sync.failed', sync_id=run.get("id"), status='cancelled',
+              category='CancelledError')
         raise
     except Exception as exc:
         from ai_assistant.knowledge import LeaseLost
@@ -303,11 +324,14 @@ async def sync_once(config, store):
             await store.settle_scan(
                 run, [], [{"source": "sync", "reason": type(exc).__name__}]
             )
+        event('knowledge.sync.failed', sync_id=run.get("id"), status='failed',
+              category=type(exc).__name__)
     finally:
         task.cancel()
         pulse.cancel()
         await asyncio.gather(task, pulse, return_exceptions=True)
     await store.finish_syncs()
+    event('knowledge.sync.finished', sync_id=run.get("id"), status='complete')
     return True
 
 

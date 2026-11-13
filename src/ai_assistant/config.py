@@ -145,6 +145,7 @@ class SessionsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
     backend: str = Field(default="postgresql", min_length=1)
     database_url: SecretStr
+    open_lock_timeout_seconds: float = Field(default=2.0, ge=0, le=30)
 
     @field_validator('backend')
     @classmethod

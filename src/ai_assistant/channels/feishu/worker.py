@@ -26,16 +26,26 @@ def failure_message(error):
     """仅暴露错误类别，避免异常正文包含凭据或文档内容。"""
     from ai_assistant.agents.context import ContextBudgetError
     from ai_assistant.runtime import TurnIncompleteError
-    from ai_assistant.storage.sessions import SessionStorageError
+    from ai_assistant.storage.sessions import (
+        SessionBindingError, SessionBusyError, SessionDeletingError, SessionError,
+        SessionFormatError, SessionNotFoundError, SessionStorageError, SessionWorkspaceError,
+    )
     if getattr(error, 'turn_message', None):
         return error.turn_message
     if isinstance(error, TurnIncompleteError):
         return str(error)
     if isinstance(error, ContextBudgetError):
         reason = '上下文超出预算：当前请求、必需回执或固定提示与工具 schema 无法容纳。请精简 mcp.servers.<服务>.tools 或 Skills、分页读取、缩小范围，或将文档入库。'
+    elif isinstance(error, SessionBusyError):
+        reason = error.safe_message
     elif isinstance(error, SessionStorageError):
         from ai_assistant.runtime.presentation import SAFE_MESSAGE
         return SAFE_MESSAGE
+    elif isinstance(error, (SessionNotFoundError, SessionBindingError, SessionWorkspaceError,
+                            SessionFormatError, SessionDeletingError)):
+        reason = error.safe_message
+    elif isinstance(error, SessionError):
+        reason = error.safe_message
     elif isinstance(error, TimeoutError):
         reason = '本轮执行超时。'
     else:
@@ -182,6 +192,8 @@ class BotWorker:
         caller = caller_for(self.config, row)
         text = row['body']['text'].strip()
         command, value = self.commands.parse(text)
+        if command is not None:
+            event('request.command', command=command)
         if command is None and value and value[0] == 'error':
             await self.enqueue_reply(row, value[1])
             return None

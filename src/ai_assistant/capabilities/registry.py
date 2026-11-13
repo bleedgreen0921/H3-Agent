@@ -1,4 +1,5 @@
 """全量能力注册表：工具与 Skills 统一登记，权限已在装配前过滤。"""
+import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -147,15 +148,34 @@ class CapabilityRegistry:
         items.sort(key=lambda item: (-item[0], item[1]))
         return [item[2].summary() for item in items[:max(1, min(limit, 30))]]
 
-    def record_plan(self, plan, input_id=None, session_id=None):
+    def record_plan(self, plan, input_id=None, session_id=None, *,
+                    change='initial', execution_thread_id=None, search_calls=0):
+        """记录一次能力计划快照；初始计划、扩展和 Skill 变更共用同一结构。"""
+        plan_hash = self._plan_hash(plan)
+        from ai_assistant.observability import csv_ids, event
+        # 先写 trace：即使本地选择日志不可用，能力选择仍可在观测侧看到。
+        event('capability.plan', input_id=input_id, session_id=session_id,
+              execution_thread_id=execution_thread_id, plan_hash=plan_hash, change=change,
+              tool_count=len(self.all_tool_ids()), selected_count=len(plan.tool_ids),
+              schema_tokens=plan.tool_schema_tokens,
+              skill_count=len(self.skill_ids), selected_skill_count=len(plan.skill_directory_ids),
+              skill_directory_tokens=plan.skill_directory_tokens,
+              active_skill_count=len(plan.active_skill_ids),
+              selected_tools=csv_ids(plan.tool_ids),
+              selected_skills=csv_ids(plan.skill_directory_ids),
+              search_calls=search_calls, reason=plan.reason)
         if self.log_path is None:
             return
         record = {
             'ts': datetime.now(timezone.utc).isoformat(),
             'input_id': input_id,
             'session_id': session_id,
+            'execution_thread_id': execution_thread_id,
             'mode': getattr(self.settings, 'mode', 'retrieval'),
             'reason': plan.reason,
+            'change': change,
+            'plan_hash': plan_hash,
+            'search_calls': search_calls,
             'intent': plan.intent.summary() if plan.intent else None,
             'tools': list(plan.tool_ids),
             'tool_schema_tokens': plan.tool_schema_tokens,
@@ -169,3 +189,11 @@ class CapabilityRegistry:
                 stream.write(json.dumps(record, ensure_ascii=False) + '\n')
         except OSError:
             logger.warning('Capability selection log unavailable: %s', self.log_path)
+
+    @staticmethod
+    def _plan_hash(plan):
+        payload = {'tools': sorted(plan.tool_ids),
+                   'skills': sorted(plan.skill_directory_ids),
+                   'active': sorted(plan.active_skill_ids)}
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode()
+        return hashlib.sha256(encoded).hexdigest()[:16]

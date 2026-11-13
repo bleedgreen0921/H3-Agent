@@ -72,6 +72,9 @@ async def search_knowledge(
         coverage += '\n暂无可检索内容或相关证据；可提交入库、主动同步或查询任务状态。'
     if len(selected) < len(docs):
         coverage += f"\n证据展示受预算限制（候选 {len(docs)}，展示 {len(selected)}）；可缩小问题或指定文档继续检索。"
+    from ai_assistant.observability import event
+    event("knowledge.search", status="complete", candidate_count=len(docs),
+          evidence_count=len(selected))
     # artifact 即模型所见证据：未展示候选不进入回执与历史。
     return text + coverage, selected
 
@@ -87,6 +90,9 @@ async def ingest_document(
     from ai_assistant.knowledge.registration import register_document
     result = await register_document(require_config(runtime), reference, identity=identity,
         input_id=runtime.context.input_id, principal=getattr(runtime.context.caller, 'binding', 'local'))
+    from ai_assistant.observability import event
+    event("knowledge.registration", action="add", status=result.get("status"),
+          source_id=result.get("source_id"), sync_id=result.get("sync_id"))
     import json
     return json.dumps(result, ensure_ascii=False), {'registration': result, 'receipt_version': 1,
         'execution_fact': {'version': 1, 'nature': 'effect', 'control': 'continue',

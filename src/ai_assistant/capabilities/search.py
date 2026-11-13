@@ -27,6 +27,13 @@ async def search_tools(query: str, runtime: ToolRuntime[ToolContext],
             known.add(item)
     state.plan.tool_schema_tokens = state.registry.schema_tokens(state.plan.tool_ids)
     state.search_calls += 1
+    state.registry.record_plan(
+        state.plan, input_id=getattr(runtime.context, 'input_id', None),
+        session_id=getattr(runtime.context, 'session_id', None),
+        change='expand_tools',
+        execution_thread_id=getattr(runtime.context, 'execution_thread_id', None),
+        search_calls=state.search_calls,
+    )
     return {'tools': results, 'exposed_capabilities': len(state.plan.tool_ids)}
 
 

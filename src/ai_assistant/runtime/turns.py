@@ -12,7 +12,7 @@ from ai_assistant.agents import load_project_rules
 from ai_assistant.storage.sessions import SessionError, SessionStorageError
 from ai_assistant.runtime.observation import TurnObserver
 from ai_assistant.runtime.types import AgentTurn, RECOVERY_NOTICE, TurnIncompleteError, final_text, request_preview
-from ai_assistant.observability import span, event as observation_event
+from ai_assistant.observability import span, event as observation_event, csv_ids
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
     previous = getattr(session.context, 'capabilities', None)
     registry = getattr(previous, 'registry', None)
     turn_context = replace(session.context, project_rules=project_rules, input_id=input_id, session_id=session.session_id,
+                           execution_thread_id=session._thread,
                            resolved_datetimes=set(), effect_facts=[], inflight_tools=set(), executed_tool_calls=set(),
                            capabilities=CapabilityTurnState(registry=registry))
     started = monotonic()
@@ -83,6 +84,7 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
                                            recovered, as_node='__start__')
             session._thread = branch
             session._threads.append(branch)
+            turn_context = replace(turn_context, execution_thread_id=branch)
             observation_event('request.branch', execution_thread_id=branch)
         if session.repository is not None:
             await session.repository.start(session._thread)
@@ -157,13 +159,14 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
             raise SessionStorageError('Session connection lost; completion was not confirmed.')
         # 会话锁保护最新状态；完成指针只表示已确认提交的位置。
         state = await session.agent.aget_state({'configurable': {'thread_id': session._thread}})
-        if state.next:
-            raise RuntimeError('Agent has pending execution.')
         operations = await session.context.operations.list(input_id) if session.context.operations else []
-        from ai_assistant.runtime.outcomes import turn_result
+        from ai_assistant.runtime.outcomes import turn_result, SUCCESS
         execution_state = {**state.values, 'execution': state.values.get('execution') or
                            {'status': 'complete', 'phase': 'execution'}}
         unified = turn_result(execution_state, operations, executed_tool_calls=turn_context.executed_tool_calls).to_dict() | {'input_id': input_id}
+        # 只有完整的终态才能作为下一次恢复点；失败轮次允许保留结果，但不能推进 complete。
+        if state.next and unified['status'] == 'complete':
+            raise RuntimeError('Agent has pending execution.')
         body_message = state.values['messages'][-1]
         unified['body_locator'] = {'thread_id': session._thread, 'checkpoint_ns': '', 'message_id': body_message.id}
         update = {'turn_result': unified}
@@ -171,7 +174,7 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
             first = next((m for m in state.values['messages'] if isinstance(m, HumanMessage) and m.content != RECOVERY_NOTICE and not m.additional_kwargs.get('lc_source')), None)
             if first:
                 update['conversation_title'] = request_preview(first.additional_kwargs.get('user_source', first.text))
-        if state.values.get('last_counted_input_id') != input_id:
+        if state.values.get('last_counted_input_id') != input_id and unified['status'] == 'complete':
             completed = state.values.get('completed_turns', 0) + 1
             update.update(completed_turns=completed, last_counted_input_id=input_id)
         commit_started = monotonic()
@@ -179,16 +182,29 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
         with span('result.commit'):
             state_config = await session.agent.aupdate_state(state.config, update)
         saved_result = unified
+        committed_state = await latest_state(session.agent, session._thread)
+        resumable = unified['status'] == 'complete' and not committed_state.next
         phase = 'session_index'
-        if session.repository is not None:
+        if session.repository is not None and resumable:
             with span('session.index'):
                 await session.repository.complete(state_config, input_id=input_id,
                     title=update.get('conversation_title') or state.values.get('conversation_title') or request_preview(user_source))
-        state = await latest_state(session.agent, session._thread)
-        observation_event('result.committed', status=unified['status'], result_commit_seconds=monotonic() - commit_started)
-        session._complete = state.config
-        session._failed = False
-        session._maintenance = (input_id, turn_context, config, observer)
+        elif session.repository is not None:
+            await session.repository.interrupted()
+        state = committed_state
+        effects = unified.get('items') or []
+        observation_event('result.committed', status=unified['status'], result_commit_seconds=monotonic() - commit_started,
+                          effect_count=len(effects),
+                          confirmed_effects=sum(1 for item in effects if item.get('status') in SUCCESS),
+                          write_tools=csv_ids(sorted({item.get('tool') for item in effects
+                                                      if item.get('kind') == 'local_file' and item.get('tool')})))
+        if resumable:
+            session._complete = state_config
+            session._failed = False
+            session._maintenance = (input_id, turn_context, config, observer)
+        else:
+            session._failed = True
+            session._maintenance = None
         return AgentTurn(result['messages'], observer.sources, observer.usage,
             sorted(activated_skills | {s.id for s in session.context.services.get('skills').active(result.get('active_skills', {}))}) if session.context.services.get('skills') else [],
             input_id, operations, unified)

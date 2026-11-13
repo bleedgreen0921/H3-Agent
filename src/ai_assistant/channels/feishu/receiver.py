@@ -74,9 +74,10 @@ async def _serve(config):
         raise ConfigError('Deploy the pinned Feishu Node project with npm ci.')
     async with AsyncExitStack() as stack:
         store = await stack.enter_async_context(operation_storage(config.sessions))
-        leader = await (await store.conn.execute('SELECT pg_try_advisory_lock(714160004) AS locked')).fetchone()
-        if not leader['locked']:
-            raise ConfigError('Another Feishu executor is already running.')
+        from ai_assistant.storage.locks import try_advisory_lock
+        locked = await try_advisory_lock(store.conn, 714160004, wait_seconds=5)
+        if not locked:
+            raise ConfigError('Another Feishu executor is already running; wait for the previous service to exit or check stale database connections.')
         delivery_store = await stack.enter_async_context(operation_storage(config.sessions))
         # Fail before starting reception if migration has not been explicitly run.
         await store.conn.execute('SELECT last_input_id FROM assistant_sessions LIMIT 0')

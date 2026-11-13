@@ -47,6 +47,10 @@ class TurnObserver(AsyncCallbackHandler):
         self._tool_seen = set()
         self._parents = {}
         self._tool_scopes = set()
+        self._model_calls = {}
+        self._model_call_index = 0
+        self._tool_names = {}
+        self._last_tool = None
 
     async def _record(self, *args):
         if self.store is None:
@@ -81,9 +85,10 @@ class TurnObserver(AsyncCallbackHandler):
         from ai_assistant.agents.context import count_tokens
         self.usage.max_input_tokens = max(self.usage.max_input_tokens, *(count_tokens(m) for m in messages))
         profile = metadata.get('assistant_model_profile', self.model_profile)
-        self._models[run_id] = (profile,
-            'summary' if metadata.get('lc_source') == 'summarization' else 'main',
-            datetime.now(timezone.utc))
+        role = 'summary' if metadata.get('lc_source') == 'summarization' else 'main'
+        self._models[run_id] = (profile, role, datetime.now(timezone.utc))
+        self._model_call_index += 1
+        self._model_calls[run_id] = (self._model_call_index, role, self._last_tool)
 
     async def on_llm_end(self, response, *, run_id, **kwargs):
         if run_id in self._completed:
@@ -131,9 +136,15 @@ class TurnObserver(AsyncCallbackHandler):
 
     def _model_finished(self, run_id, status, category=None):
         started = self._model_times.pop(run_id, None)
+        elapsed = monotonic() - started if started is not None else None
         self._event("model.end", run_id=run_id, parent_run_id=self._model_parents.get(run_id),
-                    status=status, category=category,
-                    elapsed_seconds=monotonic() - started if started is not None else None)
+                    status=status, category=category, elapsed_seconds=elapsed)
+        call = self._model_calls.pop(run_id, None)
+        if call is not None:
+            index, role, after_tool = call
+            self._event('boundary.model_call', call_index=index, role=role,
+                        after_tool=after_tool, status=status, category=category,
+                        elapsed_seconds=elapsed)
 
     async def on_chain_start(self, serialized, inputs, *, run_id, parent_run_id=None, **kwargs):
         self._parents[run_id] = parent_run_id
@@ -158,10 +169,14 @@ class TurnObserver(AsyncCallbackHandler):
             self._parents[run_id] = parent_run_id
         self.usage.tool_calls += 1
         self._tool_started[run_id] = monotonic()
+        self._tool_names[run_id] = (serialized or {}).get("name")
         self._event("tool.start", run_id=run_id, parent_run_id=parent_run_id, tool=(serialized or {}).get("name"))
 
     def _finish_tool(self, run_id, status="succeeded", category=None):
         started = self._tool_started.pop(run_id, None)
+        name = self._tool_names.pop(run_id, None)
+        if name:
+            self._last_tool = name
         if started is not None:
             elapsed = monotonic() - started
             self.usage.tool_seconds += elapsed

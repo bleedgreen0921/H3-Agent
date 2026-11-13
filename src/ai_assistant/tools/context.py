@@ -28,6 +28,8 @@ class KnowledgeService:
 class FeishuService:
     owner_open_id: str | None = None
     default_task_assignee: str = 'none'
+    task_members: str = 'model'
+    default_calendar_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,7 @@ class ToolContext:
     project_rules: str = ''
     input_id: str | None = None
     session_id: str | None = None
+    execution_thread_id: str | None = None
     skills_directory_tokens: int = 6000
     timezone: str = 'Asia/Shanghai'
     resolved_datetimes: set[tuple[str, bool]] = field(default_factory=set, compare=False)

@@ -50,6 +50,7 @@ def turn_result(state, operations=(), *, interrupted=None, executed_tool_calls=N
             confirmed = True
             items.append({'kind': 'local_file', 'tool': message.name, 'status': 'saved',
                 'path': artifact.get('path'), 'sha256': artifact.get('sha256'),
+                'effect_id': artifact.get('effect_id'),
                 'summary': '本地文件已发布'})
         if fact.get('registered'):
             confirmed = True

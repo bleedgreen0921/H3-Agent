@@ -43,6 +43,8 @@ class MCPConfig(Settings):
 
 class FeishuConfig(Settings):
     default_task_assignee: Literal['none', 'owner'] = 'none'
+    task_members: Literal['model', 'owner_only'] = 'model'
+    default_calendar_id: str | None = None
     app_id: str = Field(pattern=r'^cli_[A-Za-z0-9]+$')
     app_secret: SecretStr
     owner_open_id: str = Field(min_length=1)

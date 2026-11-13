@@ -10,9 +10,59 @@ from ai_assistant.config import ConfigError
 class SessionError(RuntimeError):
     """Safe application errors; underlying database diagnostics stay private."""
 
+    code = 'session_error'
+    safe_message = '会话状态不可用，请稍后重试；本轮未执行。'
+    retryable = False
+
+    def __init__(self, message, *, code=None, safe_message=None, retryable=None):
+        super().__init__(message)
+        if code is not None:
+            self.code = code
+        if safe_message is not None:
+            self.safe_message = safe_message
+        if retryable is not None:
+            self.retryable = retryable
+
 
 class SessionStorageError(SessionError):
-    pass
+    code = 'session_storage'
+    safe_message = '会话存储暂不可用，请稍后重试；本轮未执行。'
+    retryable = True
+
+
+class SessionBusyError(SessionError):
+    code = 'session_busy'
+    safe_message = '会话正被另一个执行器占用，请稍后重试；本轮未执行。'
+    retryable = True
+
+    def __init__(self, message='Session is already in use.'):
+        super().__init__(message)
+
+
+class SessionNotFoundError(SessionError):
+    code = 'session_not_found'
+    safe_message = '目标会话不存在；本轮未执行。'
+
+
+class SessionBindingError(SessionError):
+    code = 'session_binding_mismatch'
+    safe_message = '目标会话不属于当前聊天；本轮未执行。'
+
+
+class SessionWorkspaceError(SessionError):
+    code = 'session_workspace_mismatch'
+    safe_message = '目标会话属于其他工作区；本轮未执行。'
+
+
+class SessionFormatError(SessionError):
+    code = 'session_format_unsupported'
+    safe_message = '会话记录格式不兼容；请使用 /new 或按文档检查存储结构。'
+
+
+class SessionDeletingError(SessionError):
+    code = 'session_deleting'
+    safe_message = '会话正在删除，尚未完成；本轮未执行。'
+
 
 
 DDL = '''CREATE TABLE IF NOT EXISTS assistant_sessions (
@@ -31,7 +81,7 @@ def session_uuid(value):
     try:
         return str(UUID(str(value)))
     except (ValueError, TypeError, AttributeError):
-        raise SessionError('Invalid session ID.') from None
+        raise SessionFormatError('Invalid session ID.') from None
 
 
 def lock_key(value):
@@ -40,10 +90,11 @@ def lock_key(value):
 
 
 class SessionRepository:
-    def __init__(self, conn, saver):
+    def __init__(self, conn, saver, *, lock_timeout_seconds=0.0):
         self.conn, self.saver = conn, saver
         self.current = None
         self.broken = False
+        self.lock_timeout_seconds = max(0.0, float(lock_timeout_seconds))
 
     async def execute(self, sql, params=()):
         if self.broken:
@@ -61,18 +112,24 @@ class SessionRepository:
         row = await (await self.execute(
             'SELECT version FROM assistant_session_schema WHERE singleton = true')).fetchone()
         if not row or row['version'] != 5:
-            raise SessionError('Unsupported session schema; run init with a compatible application.')
+            raise SessionFormatError('Unsupported session schema; run init with a compatible application.')
         await self.execute('SELECT binding,title,last_input_id FROM assistant_sessions LIMIT 0')
         # Also fail before any model calls if native Saver initialization is missing.
         for table in ('checkpoints', 'checkpoint_blobs', 'checkpoint_writes', 'checkpoint_migrations'):
             await self.execute(f'SELECT 1 FROM {table} LIMIT 0')
 
-    async def acquire(self, ident):
+    async def acquire(self, ident, *, wait_seconds=None):
         ident = session_uuid(ident)
-        row = await (await self.execute('SELECT pg_try_advisory_lock(%s) AS locked',
-                                       (lock_key(ident),))).fetchone()
-        if not row['locked']:
-            raise SessionError('Session is already in use.')
+        from ai_assistant.storage.locks import try_advisory_lock
+        try:
+            locked = await try_advisory_lock(
+                self.conn, lock_key(ident),
+                wait_seconds=self.lock_timeout_seconds if wait_seconds is None else wait_seconds)
+        except Exception:
+            self.broken = True
+            raise SessionStorageError('Session database unavailable; check connection and run init.') from None
+        if not locked:
+            raise SessionBusyError()
         self.current = ident
         return ident
 
@@ -93,15 +150,15 @@ class SessionRepository:
                 (ident, str(workspace), thread, [thread], binding))
         row = await (await self.execute('SELECT * FROM assistant_sessions WHERE id=%s', (ident,))).fetchone()
         if not row:
-            raise SessionError('Session not found.')
+            raise SessionNotFoundError('Session not found.')
         if binding is not None and row['binding'] != binding:
-            raise SessionError('会话不属于当前聊天。')
+            raise SessionBindingError('会话不属于当前聊天。')
         if row['format_version'] != 1:
-            raise SessionError('Unsupported session format.')
+            raise SessionFormatError('Unsupported session format.')
         if row['status'] == 'deleting':
-            raise SessionError('Session deletion is incomplete; retry session delete.')
+            raise SessionDeletingError('Session deletion is incomplete; retry session delete.')
         if row['workspace'] != str(Path(workspace).resolve()):
-            raise SessionError('Session belongs to a different workspace.')
+            raise SessionWorkspaceError('Session belongs to a different workspace.')
         return row
 
     async def binding_session(self, binding):
@@ -144,7 +201,7 @@ class SessionRepository:
         cursor = await self.execute('''UPDATE assistant_sessions SET binding=%s
             WHERE id=%s AND (binding IS NULL OR binding=%s)''', (binding, session_id, binding))
         if cursor.rowcount != 1:
-            raise SessionError('会话不属于当前聊天。')
+            raise SessionBindingError('会话不属于当前聊天。')
         await self.execute('''INSERT INTO assistant_channel_sessions(binding,session_id) VALUES(%s,%s)
             ON CONFLICT(binding) DO UPDATE SET session_id=EXCLUDED.session_id''', (binding, session_id))
 
@@ -192,9 +249,9 @@ class SessionRepository:
             ident = await self.acquire(ident)
         row = await (await self.execute('SELECT thread_ids,status,binding FROM assistant_sessions WHERE id=%s', (ident,))).fetchone()
         if not row or (binding is not None and row['binding'] != binding):
-            raise SessionError('未找到可删除的会话。')
+            raise SessionNotFoundError('未找到可删除的会话。')
         if binding is not None and row['status'] == 'running':
-            raise SessionError('会话正在执行，请先 /cancel 并等待清理结束。')
+            raise SessionBusyError('会话正在执行，请先 /cancel 并等待清理结束。')
         await self.execute("UPDATE assistant_sessions SET status='deleting' WHERE id=%s", (ident,))
         try:
             for thread in row['thread_ids']:
@@ -228,7 +285,9 @@ async def postgres_session_storage(settings, *, initialize=False):
     async with conn:
         try:
             async with AsyncPostgresSaver.from_conn_string(url) as saver:
-                repo = SessionRepository(conn, saver)
+                repo = SessionRepository(
+                    conn, saver,
+                    lock_timeout_seconds=getattr(settings, 'open_lock_timeout_seconds', 0.0))
                 try:
                     if initialize:
                         await repo.execute('SELECT pg_advisory_lock(%s)', (SCHEMA_LOCK,))
@@ -243,7 +302,7 @@ async def postgres_session_storage(settings, *, initialize=False):
                                     singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), version integer NOT NULL)''')
                                 row = await (await repo.execute('SELECT version FROM assistant_session_schema')).fetchone()
                                 if row and row['version'] != 5:
-                                    raise SessionError('Unsupported session schema version.')
+                                    raise SessionFormatError('Unsupported session schema version.')
                                 await repo.execute(DDL)
                                 await repo.execute('CREATE INDEX IF NOT EXISTS assistant_sessions_binding ON assistant_sessions(binding,updated_at DESC,id)')
                                 await repo.execute('INSERT INTO assistant_session_schema VALUES(true,5) ON CONFLICT(singleton) DO NOTHING')

@@ -97,6 +97,12 @@ async def handle(worker, row, caller, value, *, recover=False):
                                     raise KnowledgeError('来源不存在或未启用。')
                             result = await apply(store, principal, row['id'], action, target, submission=submission)
                         message = render_result(action, result)
+                        from ai_assistant.observability import event
+                        event('knowledge.management', action=action, status='succeeded',
+                              target_id=(result.get('document_id') if action == 'remove'
+                                         else result.get('source_id') or (target if action == 'sync' else None)),
+                              source_id=result.get('source_id'), sync_id=result.get('sync_id'),
+                              document_id=result.get('document_id'))
                 elif action in {'documents', 'sources'}:
                     rows = await store.document_list() if action == 'documents' else await sources(worker.config, store)
                     page = rows[(target - 1) * 10:target * 10]
