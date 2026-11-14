@@ -20,6 +20,7 @@ async def maintain_session_memory(session):
         observation_event('maintenance.skipped', status='skipped')
         return
     async with session._turn_lock:
+        # 回复处理后在会话锁内检查更新间隔和摘要调用预算。
         input_id, context, config, observer = pending
         session._active_task = asyncio.current_task()
         try:

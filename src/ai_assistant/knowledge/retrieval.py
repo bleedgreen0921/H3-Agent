@@ -12,6 +12,7 @@ from ai_assistant.knowledge.boundary import knowledge_operation
 
 
 class SnapshotRetriever(BaseRetriever):
+    """在允许访问的已发布构建中执行向量与关键词混合召回。"""
     model_config = ConfigDict(arbitrary_types_allowed=True)
     settings: Any
     filters: dict = Field(default_factory=dict)
@@ -30,11 +31,14 @@ class SnapshotRetriever(BaseRetriever):
         store = RagStore(self.settings)
         engine = None
         try:
+            # 显式构建列表仍需经过当前访问范围筛选；未指定时使用活动构建。
             builds = await store.eligible_builds(self.builds, self.filters) if self.builds is not None else await store.active(self.filters)
             if not builds:
                 return []
             async with embedding(self.settings) as model:
                 engine, vectors = await vector_store(self.settings, model)
+
+                # 使用 RRF 合并向量和关键词候选，并限制知识库与构建版本。
                 hybrid = HybridSearchConfig(tsv_column='content_tsv', tsv_lang='pg_catalog.simple',
                     fts_query=await asyncio.to_thread(terms, query), fusion_function=reciprocal_rank_fusion,
                     fusion_function_parameters={'rrf_k': 60}, primary_top_k=self.settings.vector_k,
@@ -69,6 +73,7 @@ class KnowledgeRetriever(BaseRetriever):
 
     @knowledge_operation
     async def _aget_relevant_documents(self, query, *, run_manager):
+        # 首轮召回为空时直接返回，否则调用重排器选择最终结果。
         from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
         docs = await SnapshotRetriever(settings=self.settings, filters=self.filters,
             builds=self.builds).ainvoke(query, config={'callbacks': run_manager.get_child()})
@@ -81,4 +86,5 @@ class KnowledgeRetriever(BaseRetriever):
 
 
 def create_knowledge_retriever(settings, *, filters=None, builds=None) -> BaseRetriever:
+    """校验筛选条件并创建混合检索加重排的 Retriever。"""
     return KnowledgeRetriever(settings=settings, filters=validate_filters(filters), builds=builds)

@@ -5,9 +5,12 @@ from ai_assistant.config import ConfigError
 
 
 async def execute(config):
+    """显式初始化已配置存储，分别汇总成功和失败项。"""
     completed, failed = [], []
     if config.sessions is None and config.knowledge is None:
         raise ConfigError('没有可初始化的存储，请配置 [sessions] 或 [knowledge]。')
+
+    # 渠道操作存储依赖会话存储，只有会话初始化成功后才尝试。
     if config.sessions is not None:
         try:
             from ai_assistant.storage.sessions import session_storage
@@ -26,6 +29,8 @@ async def execute(config):
                 failed.append('渠道操作')
         else:
             failed.append('渠道操作（依赖会话）')
+
+    # 知识库独立初始化；无论成功失败都关闭已创建的存储对象。
     if config.knowledge is not None:
         store = None
         try:
@@ -39,6 +44,8 @@ async def execute(config):
         finally:
             if store is not None:
                 await store.close()
+
+    # 各存储独立提交；部分失败时报告完成范围，允许后续重跑。
     print('已完成：' + ('、'.join(completed) or '无'))
     if failed:
         print('未完成：' + '、'.join(failed) + '；请检查依赖和连接后重跑 init。', file=sys.stderr)

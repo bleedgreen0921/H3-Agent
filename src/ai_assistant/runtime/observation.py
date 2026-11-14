@@ -14,6 +14,7 @@ from ai_assistant.llm.requests import response_usage
 
 @dataclass
 class TurnUsage:
+    """当前轮的调用次数、服务用量和耗时指标。"""
     main_model_calls: int = 0
     summary_model_calls: int = 0
     tool_calls: int = 0
@@ -27,6 +28,7 @@ class TurnUsage:
 
 
 class TurnObserver(AsyncCallbackHandler):
+    """从原生回调收集调用指标及工具返回的证据，不复制事件流。"""
     raise_error = True
     run_inline = True
 
@@ -56,6 +58,7 @@ class TurnObserver(AsyncCallbackHandler):
         self._record_lock = asyncio.Lock()
 
     async def _record(self, *args):
+        """串行写入服务报告用量；统计故障不阻断业务。"""
         if self.store is None:
             return
         try:
@@ -71,6 +74,7 @@ class TurnObserver(AsyncCallbackHandler):
                 self.input_id, self.session_id, 'record', type(error).__name__)
 
     async def on_chat_model_start(self, serialized, messages, *, run_id, metadata=None, **kwargs):
+        # 按 run ID 去重，并区分普通模型调用与摘要调用。
         if run_id in self._model_started or run_id in self._completed:
             return
         self._model_started.add(run_id)
@@ -95,6 +99,7 @@ class TurnObserver(AsyncCallbackHandler):
         self._model_calls[run_id] = (self._model_call_index, role, self._last_tool)
 
     async def on_llm_end(self, response, *, run_id, **kwargs):
+        # 只累计服务实际报告的用量；缺失单独计数。
         if run_id in self._completed:
             return
         self._completed.add(run_id)
@@ -154,6 +159,7 @@ class TurnObserver(AsyncCallbackHandler):
         self._parents[run_id] = parent_run_id
 
     async def on_tool_start(self, serialized, input_str, *, run_id=None, parent_run_id=None, **kwargs):
+        # 避免将嵌套适配器调用重复计为 Agent 的工具调用。
         if run_id is not None and run_id in self._tool_seen:
             return
         from ai_assistant.runtime.execution import tool_scope
@@ -191,6 +197,7 @@ class TurnObserver(AsyncCallbackHandler):
         self._finish_tool(kwargs.get('run_id'), 'failed', type(error).__name__)
 
     async def on_tool_end(self, output, **kwargs):
+        # 提取 artifact 中的 Document 证据，并按 ID 去重。
         failed = isinstance(output, ToolMessage) and output.status == 'error'
         self._finish_tool(kwargs.get('run_id'), 'failed' if failed else 'succeeded',
                           'tool_result_error' if failed else None)

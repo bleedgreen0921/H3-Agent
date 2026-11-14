@@ -1,6 +1,7 @@
 """飞书文档/云空间读取与移动规则；失败只读取回执，不重放。"""
 from ai_assistant.integrations.tool_policy import PreflightIssue, ToolPreflightError
 
+# 将内部工具原名映射为可展示的中文业务名称。
 _DOC_LABELS = {
     'docx_append_markdown': '追加文档内容',
     'docx_v1_document_create': '创建文档',
@@ -28,6 +29,7 @@ def display_name(original_name):
 
 
 def guidance(entries):
+    """根据已装配的文档工具生成使用提示，不改变工具权限。"""
     names = {entry.original_name for entry in entries if entry.settings.transport == 'feishu'}
     text = ''
     if any(name.startswith(('docx_', 'wiki_')) for name in names):
@@ -52,6 +54,8 @@ def preflight(entry, arguments, context):
     if name not in {'docx_v1_documentBlockChildren_create',
                     'docx_v1_documentBlockDescendant_create'}:
         return
+
+    # 块写入必须包含非空 children 或 descendants，避免发送空写入。
     data = arguments.get('data') if isinstance(arguments, dict) else None
     blocks = data.get('children') if isinstance(data, dict) else None
     if not isinstance(blocks, list) or not blocks:
@@ -70,6 +74,8 @@ def references(entry, result):
     name = getattr(entry, 'original_name', '')
     if name not in {'docx_v1_document_create', 'docx_append_markdown'}:
         return {}
+
+    # 只有成功返回的创建或追加结果才提取文档引用。
     remote = payload(result)
     if not isinstance(remote, dict) or remote.get('code', 0) != 0:
         return {}
@@ -98,6 +104,8 @@ async def unfinished_document_notice(context):
     if not any(entry.settings.transport == 'feishu' and entry.original_name == 'docx_v1_document_create'
                for entry in entries.values()):
         return ''
+
+    # 只读取本轮已成功创建的回执，不重新创建或写入文档。
     links = []
     for row in await context.operations.list(context.input_id):
         entry = entries.get(row.get('tool'))

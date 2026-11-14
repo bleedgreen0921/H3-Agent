@@ -14,7 +14,10 @@ from ai_assistant.knowledge.models import embedding
 
 
 def snapshot(workspace, relative, directory):
+    """读取工作区普通文件，按内容摘要保存只读快照。"""
     target = workspace._path(relative)
+
+    # 不跟随最终路径的符号链接；非阻塞打开后再检查是否为普通文件。
     descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -31,6 +34,8 @@ def snapshot(workspace, relative, directory):
                 dest.write(data)
             dest.flush()
             os.fsync(dest.fileno())
+
+        # 按内容摘要命名并只读保存；已有同名快照时核对其摘要。
         # Keep suffix only as a loader hint, never to select a custom parser.
         final = directory / (digest.hexdigest() + target.suffix.lower())
         os.chmod(temporary, 0o400)
@@ -46,12 +51,14 @@ def snapshot(workspace, relative, directory):
 
 
 async def submit(store, workspace, relative, *, tags=()):
+    """在线程中生成快照，然后登记异步索引任务。"""
     uri, digest, path, name = await asyncio.to_thread(snapshot, workspace, relative, store.config.materials_dir)
     return await store.submit(source_uri=uri, digest=digest, snapshot=path, metadata=dict(
         source_name=name, media_type=mimetypes.guess_type(name)[0] or 'application/octet-stream', tags=list(tags)))
 
 
 async def pgvector_store(config, embeddings):
+    """创建本次操作独占的向量存储引擎，不初始化数据库结构。"""
     from langchain_postgres import PGEngine, PGVectorStore
     from langchain_postgres.v2.hybrid_search_config import HybridSearchConfig
     # A separate engine owned by this operation; no schema initialization here.
@@ -66,13 +73,18 @@ async def pgvector_store(config, embeddings):
 
 
 async def prepare_chunks(store, job):
+    """校验快照和配置，解析正文并生成带来源元数据的片段。"""
     c = store.config
+
+    # 不允许不同索引配置的 worker 接手任务，也不处理摘要不一致的快照。
     if job['config_hash'] != c.fingerprint():
         raise KnowledgeError('任务索引配置与 Worker 不一致；请显式重新提交。')
     path = Path(job['snapshot'])
     digest = await asyncio.to_thread(lambda: hashlib.sha256(path.read_bytes()).hexdigest())
     if digest != job['digest']:
         raise KnowledgeError('资料快照摘要不匹配。')
+
+    # 飞书结构化快照直接恢复 Document，其余格式交给解析器。
     if path.suffix == '.ragjson':
         import json
         from langchain_core.documents import Document
@@ -80,6 +92,8 @@ async def prepare_chunks(store, job):
     else:
         docs = await parse_snapshot(path, timeout=c.parse_timeout)
     docs = require_content(docs, 'empty_document', '未提取到有效正文。')
+
+    # 将知识库、文档版本、来源和构建 ID 写入统一元数据。
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     identity = job['metadata'] | dict(knowledge_base_id=job['kb'], document_id=job['document_id'],
         document_version_id=job['version_id'], source_uri=job['source_uri'],
@@ -90,6 +104,8 @@ async def prepare_chunks(store, job):
     if path.suffix in ('.ragjson','.csv','.xlsx'):
         for doc, original in zip(normalized, docs):
             doc.metadata.update(original.metadata)
+
+    # 递归分块保留原始空白和起始位置，便于后续定位证据。
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=c.chunk_size, chunk_overlap=c.chunk_overlap, length_function=len,
         add_start_index=True, strip_whitespace=False,
@@ -102,9 +118,12 @@ async def prepare_chunks(store, job):
 
 
 async def build(store, job):
+    """完成解析、向量索引、关键词索引并最终发布构建。"""
     c = store.config
     limiter = getattr(store, 'parse_limiter', None)
     from ai_assistant.observability import span
+
+    # 按需受解析并发限制；解析成功后才进入向量化。
     with span('knowledge.index.parse', job_id=job.get('id')):
         if limiter is None:
             chunks = await prepare_chunks(store, job)
@@ -130,10 +149,12 @@ async def build(store, job):
             finally:
                 await engine.close()
     with span('knowledge.index.publish', job_id=job.get('id')):
+        # 只有有效片段和关键词索引准备完成后才发布供检索的构建。
         await store.publish(job)
 
 
 async def run_once(store):
+    """领取并执行一个索引任务；没有任务时返回 False。"""
     job = await store.claim()
     if job is None:
         return False
@@ -145,6 +166,7 @@ async def run_once(store):
 
 
 async def _run_claimed(store, job):
+    """在租约、心跳和截止时间约束下执行已领取任务。"""
     async def heartbeat():
         while True:
             await asyncio.sleep(store.config.heartbeat_seconds)
@@ -155,6 +177,7 @@ async def _run_claimed(store, job):
     task = asyncio.create_task(build(store, job))
     pulse = asyncio.create_task(heartbeat())
     try:
+        # 并发监督构建和心跳；任一异常或任务截止都会进入失败处理。
         # A database lease is authoritative, including after event-loop stalls.
         remaining = max(0, (job['deadline'] - __import__('datetime').datetime.now(__import__('datetime').timezone.utc)).total_seconds())
         async with asyncio.timeout(remaining):
@@ -169,6 +192,7 @@ async def _run_claimed(store, job):
         # Resolve an unknown commit outcome before marking/retrying anything.
         status = await store.status(job['id'])
         if status and status['state'] != 'succeeded':
+            # 仅将识别出的数据库连接故障标为临时错误，交给存储层处理。
             transient = isinstance(exc, (OperationalError, ConnectionError)) or (
                 isinstance(exc, DBAPIError) and exc.connection_invalidated)
             code = exc.code if isinstance(exc, IngestionError) else ('transient_database' if transient else 'ingestion_failed')
@@ -176,6 +200,7 @@ async def _run_claimed(store, job):
             message = 'transient_database' if transient else (str(exc) if isinstance(exc, KnowledgeError) else type(exc).__name__)
             diagnostic_path = None
             if isinstance(exc, IngestionError):
+                # 详细诊断单独写入本地文件，失败不覆盖原始任务错误。
                 try:
                     diagnostic_path = await asyncio.to_thread(write_diagnostic, store.config, job,
                                                              code, message, exc.diagnostic_text)
@@ -189,6 +214,7 @@ async def _run_claimed(store, job):
         event('knowledge.index.published', job_id=job.get('id'), document_id=job.get('document_id'),
               build_id=job.get('build_id'), status='succeeded')
     finally:
+        # 构建或心跳结束后取消另一方，并等待全部清理完成。
         for running in (task, pulse):
             if not running.done():
                 running.cancel()
@@ -197,6 +223,7 @@ async def _run_claimed(store, job):
 
 
 async def worker(store, *, once=False, app_config=None):
+    """运行同步扫描、并发索引与同步汇总；once 只检查一轮。"""
     if once:
         if app_config is not None:
             from ai_assistant.knowledge.sync import sync_once
@@ -204,9 +231,13 @@ async def worker(store, *, once=False, app_config=None):
         await run_once(store)
         await store.finish_syncs()
         return
+
+    # 分别限制解析和向量化并发；索引循环数量由配置控制。
     store.parse_limiter = asyncio.Semaphore(store.config.parse_concurrency)
     from ai_assistant.knowledge.models import embedding_limiter
     limiter_token = embedding_limiter.set(asyncio.Semaphore(store.config.embedding_concurrency))
+
+    # 三类循环分别处理索引任务、来源同步和同步状态汇总。
     async def indices():
         while True:
             if not await run_once(store):
@@ -225,6 +256,7 @@ async def worker(store, *, once=False, app_config=None):
     try:
         await asyncio.gather(*tasks)
     finally:
+        # 退出时等待所有子任务清理，再恢复上下文中的向量化限制器。
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -232,5 +264,6 @@ async def worker(store, *, once=False, app_config=None):
 
 
 async def vector_store(config, embeddings):
+    """按配置的存储后端创建向量存储。"""
     from ai_assistant.storage.backends import backend_factory
     return await backend_factory('vectors', config.backend)(config, embeddings)

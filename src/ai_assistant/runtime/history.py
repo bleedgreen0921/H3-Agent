@@ -12,6 +12,7 @@ class CheckpointReader:
         self.pages = {}
 
     async def snapshots(self, config, *, before=None, limit=100):
+        """校验线程归属后读取并缓存本次请求的 checkpoint 页。"""
         values = config.get('configurable', {})
         if values.get('thread_id') not in self.threads:
             raise SessionStorageError('历史定位不属于当前会话。')
@@ -29,6 +30,7 @@ class CheckpointReader:
             yield snapshot
 
     async def walk(self, config, *, before=None, limit=100):
+        """依靠原生 checkpoint 定位逐页遍历历史。"""
         while True:
             count = 0
             async for snapshot in self.snapshots(config, before=before, limit=limit):
@@ -60,6 +62,8 @@ def recovery_values(values):
         i > last_user and isinstance(m, AIMessage) and not m.tool_calls and (not body_id or m.id != body_id))]
     results = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
     paired = []
+
+    # 无结果的已派发工具补充未知占位，避免新分支自动续跑。
     for message in messages:
         paired.append(message)
         if isinstance(message, AIMessage):

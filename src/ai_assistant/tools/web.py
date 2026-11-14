@@ -14,6 +14,7 @@ FETCH_TEXT_LIMIT = 32000
 
 
 def bounded_text(content, limit):
+    """按字符预算截断模型可见内容，并保留截断提示。"""
     marker = '\n[内容已截断；仅展示部分结果]'
     return content if len(content) <= limit else content[:limit - len(marker)] + marker
 
@@ -27,6 +28,7 @@ class WebLimitError(WebError):
 
 
 class SearchItem(BaseModel):
+    """搜索服务返回的单条结果，忽略未使用的额外字段。"""
     model_config = ConfigDict(extra='ignore', strict=True)
     title: str | None = None
     url: str
@@ -38,16 +40,19 @@ class SearchItem(BaseModel):
 
 
 class SearchResponse(BaseModel):
+    """搜索响应的数据结构。"""
     results: list[SearchItem]
 
 
 class FetchResponse(BaseModel):
+    """网页读取响应的标题和正文结构。"""
     model_config = ConfigDict(strict=True)
     title: str
     content: str
 
 
 def validate_url(url: str) -> str:
+    """检查 URL 形式及字面 IP 范围；此函数不解析域名。"""
     try:
         parsed = urlsplit(url)
         host = parsed.hostname
@@ -60,6 +65,7 @@ def validate_url(url: str) -> str:
         try:
             address = ipaddress.ip_address(host)
         except ValueError:
+            # 域名拒绝明显的本地、内部及非标准数字地址形式。
             if ('.' not in host or host.endswith(('.localhost', '.local', '.internal'))
                     or host == 'localhost' or all(c.isdigit() or c == '.' for c in host)
                     or host.startswith('0x')):
@@ -73,6 +79,7 @@ def validate_url(url: str) -> str:
 
 
 def page_is_unavailable(title, content):
+    """根据标题或首行识别常见登录、地区限制和拒绝访问页面。"""
     markers = ('access denied', 'not available in your region', 'app unavailable in region',
                '地区限制', '请先登录', 'sign in to continue')
     heading = content.strip().splitlines()[0].strip('# *').lower() if content.strip() else ''
@@ -93,6 +100,7 @@ class DeepSeekWeb:
         self._timeout = timeout
 
     async def _post(self, endpoint: str, payload: dict) -> dict:
+        """请求固定的 DeepSeek 工具端点，限制响应体并映射安全错误。"""
         try:
             async with self._client.stream(
                 'POST', f'https://api.deepseek.com/v1/tools/{endpoint}',
@@ -107,6 +115,7 @@ class DeepSeekWeb:
                     raise error(messages.get(response.status_code, '联网服务请求失败。'))
                 chunks = bytearray()
                 async for chunk in response.aiter_bytes():
+                    # 流式读取时限制累计大小，不先把无限响应读入内存。
                     if len(chunks) + len(chunk) > 2 * 1024 * 1024:
                         raise WebError('联网响应超过 2 MiB 限制。')
                     chunks.extend(chunk)
@@ -124,6 +133,7 @@ class DeepSeekWeb:
             raise WebError('联网服务响应格式无效。') from None
 
     async def search(self, query: str, count=5) -> tuple[str, dict]:
+        """调用搜索服务并返回受限摘要与结构化原始响应。"""
         if not query.strip() or not 1 <= len(query) <= 128 or not 1 <= count <= 10:
             raise WebError('搜索词或结果数量无效。')
         data = await self._post('search', {'query': query, 'count': count, 'need_content': False})
@@ -142,6 +152,7 @@ class DeepSeekWeb:
         return bounded_text(content, self.search_chars), artifact
 
     async def fetch(self, url: str) -> tuple[str, dict]:
+        """请求服务读取网页；限制页面不能作为正文证据。"""
         data = await self._post('fetch', {'url': validate_url(url)})
         try:
             page = FetchResponse.model_validate(data)

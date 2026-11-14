@@ -5,14 +5,18 @@ from zoneinfo import ZoneInfo
 from ai_assistant.knowledge import KnowledgeError
 from ai_assistant.storage.commands import CommandRepository
 
+# 飞书聊天入口支持的知识库管理命令及参数格式。
 USAGE = '/rag documents [页码] | sources [页码] | status <任务ID> | sync [来源ID] | add <飞书文档链接> | remove <文档ID>'
 
 
 def parse(parts):
+    """将拆分后的 /rag 命令转换为动作和参数，非法输入抛出 ValueError。"""
     if len(parts) < 2:
         raise ValueError
     action = parts[1]
     values = parts[2].split() if len(parts) == 3 else []
+
+    # 列表命令接受可选正整数页码；其他命令按动作检查参数数量。
     if action in {'documents', 'sources'}:
         if len(values) > 1:
             raise ValueError
@@ -45,10 +49,12 @@ def parse(parts):
 
 
 def stamp(config, value):
+    """按助手配置时区展示同步时间，没有记录时返回提示。"""
     return value.astimezone(ZoneInfo(config.agent.timezone)).strftime('%Y-%m-%d %H:%M') if value else '未同步'
 
 
 def render_result(action, result):
+    """将管理操作回执转换为简短回复，明确提交不等于可检索。"""
     if action == 'add':
         return f"已登记来源：{result['source_id']}\n同步任务：{result['sync_id']}\n已提交后台处理，尚未确认可检索，可用 /rag status 查询。"
     if action == 'sync':
@@ -57,6 +63,7 @@ def render_result(action, result):
 
 
 async def handle(worker, row, caller, value, *, recover=False):
+    """处理知识库命令，并将结果持久化后登记到飞书回复队列。"""
     from ai_assistant.interfaces.chat_commands import reply
     from ai_assistant.storage.integrations import operation_storage
     from ai_assistant.storage.rag import RagStore
@@ -66,6 +73,8 @@ async def handle(worker, row, caller, value, *, recover=False):
     action, target = value
     async with operation_storage(worker.config.sessions) as channel:
         commands = CommandRepository(channel.conn)
+
+        # 已有渠道命令结果时直接复用，避免重复执行业务。
         stored = await commands.get(row['id'])
         if stored and stored['result']:
             async with channel.conn.transaction():
@@ -73,6 +82,8 @@ async def handle(worker, row, caller, value, *, recover=False):
             return
         await commands.begin(row['id'], row['binding'], '/rag ' + action,
                             str(target) if target is not None else None)
+
+        # 私人知识库只允许可信主人私聊管理，并要求显式配置知识库。
         if caller.channel != 'feishu_private' or not caller.owner:
             message = '群聊不支持私人知识库管理。请使用主人私聊。'
         elif worker.config.knowledge is None:
@@ -80,8 +91,10 @@ async def handle(worker, row, caller, value, *, recover=False):
         else:
             store = RagStore(settings(worker.config))
             try:
+                # 用应用、主人和聊天绑定构造业务主体，关联本次输入的管理回执。
                 principal = 'feishu_private:' + worker.config.integrations.feishu.app_id + ':' + worker.config.integrations.feishu.owner_open_id + ':' + row['binding']
                 if action in {'add', 'sync', 'remove'}:
+                    # 先读取已有业务回执；恢复模式缺少回执时不自动重做。
                     result = await receipt(store, principal, row['id'], action=action, target=target)
                     if result is None and recover:
                         message = '管理操作未完成，未自动重做；已提交的知识库任务继续执行。请核实状态后再发起新指令。'
@@ -93,6 +106,7 @@ async def handle(worker, row, caller, value, *, recover=False):
                                 async with asyncio.timeout(worker.config.agent.turn_timeout_seconds):
                                     submission = await resolve_submission(worker.config, target, identity='user')
                             elif action == 'sync' and target:
+                                # 指定来源必须存在且已启用，才能提交同步。
                                 if not any(s['id'] == target and s['enabled'] for s in await sources(worker.config, store)):
                                     raise KnowledgeError('来源不存在或未启用。')
                             result = await apply(store, principal, row['id'], action, target, submission=submission)
@@ -104,6 +118,7 @@ async def handle(worker, row, caller, value, *, recover=False):
                               source_id=result.get('source_id'), sync_id=result.get('sync_id'),
                               document_id=result.get('document_id'))
                 elif action in {'documents', 'sources'}:
+                    # 列表在内存中分页，每页最多展示 10 条。
                     rows = await store.document_list() if action == 'documents' else await sources(worker.config, store)
                     page = rows[(target - 1) * 10:target * 10]
                     lines = [f'知识库{ "文档" if action == "documents" else "来源"}（第 {target} 页）：']
@@ -125,6 +140,7 @@ async def handle(worker, row, caller, value, *, recover=False):
                         lines.append(f'下一页：/rag {action} {target + 1}')
                     message = '\n\n'.join(lines)
                 else:
+                    # 同步任务展示进度和覆盖情况；索引错误仅提示本地查看诊断。
                     result = await status(store, target)
                     message = f"任务：{result['id']}\n类型：{result['kind']}｜阶段：{result['state']}"
                     if result['kind'] == 'sync':
@@ -137,9 +153,11 @@ async def handle(worker, row, caller, value, *, recover=False):
                     if result.get('document_deleted'):
                         message += '\n文档已移除，历史索引状态不代表当前可检索。'
             except KnowledgeError:
+                # 对外返回简短错误，不暴露底层路径或原始异常详情。
                 message = '知识库请求无效或目标不存在，请检查参数、来源权限与任务 ID。'
             finally:
                 await store.close()
+
         # 渠道与知识库不共享事务。崩溃恢复只查询业务回执并补交回复。
         async with channel.conn.transaction():
             await commands.upsert_result(row['id'], row['binding'], '/rag ' + action,

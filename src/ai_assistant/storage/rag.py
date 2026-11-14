@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from ai_assistant.knowledge import IngestionError, LeaseLost
 from ai_assistant.storage.knowledge import SourceStore, transaction, DDL as SOURCE_DDL
 
+# 文档、不可变版本、索引任务、构建与向量片段的当前数据库结构。
 DDL = (
     'CREATE EXTENSION IF NOT EXISTS vector',
     '''CREATE TABLE IF NOT EXISTS rag_documents (
@@ -37,6 +38,7 @@ DDL = (
 
 
 class PgvectorStore(SourceStore):
+    """PostgreSQL/pgvector 知识库存储及构建发布状态。"""
     def __init__(self, config):
         self.config = config
         self.engine = create_async_engine(config.database_url.get_secret_value(), hide_parameters=True)
@@ -49,6 +51,7 @@ class PgvectorStore(SourceStore):
                 dict(b=build_id))).all()
 
     async def update_chunk_tsv(self, values):
+        """为已写入片段准备关键词检索向量。"""
         if not values:
             return
         async with self.engine.begin() as conn:
@@ -60,6 +63,7 @@ class PgvectorStore(SourceStore):
         await self.engine.dispose()
 
     async def check_schema(self):
+        """检查当前运行必需的结构，不执行迁移。"""
         from ai_assistant.knowledge import KnowledgeError
         async with self.engine.connect() as conn:
             for name in ('rag_documents','rag_source_documents','rag_sync_runs','rag_management_operations'):
@@ -96,8 +100,10 @@ class PgvectorStore(SourceStore):
         await manager.acreate_schema()
 
     async def submit(self, *, source_uri, digest, snapshot, metadata, force=False, sync_run=None, restore=True, source_id=None):
+        """登记文档版本与索引任务；一致的有效任务可复用。"""
         c = self.config
         async with self.engine.begin() as conn:
+            # 同步任务提交索引前必须仍持有有效租约。
             if sync_run:
                 current = (await conn.execute(text('''SELECT id FROM rag_sync_runs WHERE id=:id AND token=:token
                     AND state='running' AND lease_until>clock_timestamp() AND deadline>clock_timestamp() FOR UPDATE'''),
@@ -112,6 +118,8 @@ class PgvectorStore(SourceStore):
             if row['deleted'] and (sync_run or not restore):
                 raise IngestionError('document_removed', '文档已移除，请显式添加后重试。')
             doc = row['id']
+
+            # 相同内容摘要、配置指纹和元数据复用文档版本。
             version = (await conn.execute(text('''SELECT id FROM rag_versions WHERE document_id=:doc
                 AND digest=:digest AND config_hash=:hash AND metadata=CAST(:metadata AS jsonb)'''),
                 dict(doc=doc, digest=digest, hash=c.fingerprint(), metadata=json.dumps(metadata)))).scalar_one_or_none()
@@ -128,6 +136,8 @@ class PgvectorStore(SourceStore):
                     return job
             job = str(uuid4())
             await conn.execute(text('''UPDATE rag_documents SET desired_version=:v,desired_job=:job,deleted=false WHERE id=:id'''), dict(v=version, job=job, id=doc))
+
+            # 新目标取代同一文档未完成的旧任务，旧活动构建暂时保留。
             await conn.execute(text('''UPDATE rag_jobs SET state='superseded',lease_until=NULL
                 WHERE version_id IN (SELECT id FROM rag_versions WHERE document_id=:doc)
                 AND state IN ('queued','running')'''), dict(doc=doc))
@@ -147,6 +157,7 @@ class PgvectorStore(SourceStore):
              dict(source=source, uri=uri, item=json.dumps([item]), id=run['id']))
 
     async def claim(self):
+        """领取符合期限和次数限制的任务，为本次尝试创建独立构建。"""
         c = self.config
         async with self.engine.begin() as conn:
             await conn.execute(text('''UPDATE rag_jobs SET state='failed',error='deadline_or_attempt_limit'
@@ -171,6 +182,7 @@ class PgvectorStore(SourceStore):
             return dict(job) | dict(version) | {'id': job['id'], 'build_id': build, 'version_id': job['version_id']}
 
     async def heartbeat(self, job):
+        """只有 token、状态和期限仍有效的任务才能续租。"""
         async with self.engine.begin() as conn:
             result = await conn.execute(text('''UPDATE rag_jobs SET lease_until=clock_timestamp()+make_interval(secs=>:lease)
                 WHERE id=:id AND token=:token AND state='running' AND lease_until>clock_timestamp() AND deadline>clock_timestamp()'''),
@@ -179,6 +191,7 @@ class PgvectorStore(SourceStore):
                 raise LeaseLost('入库任务已失去执行权。')
 
     async def publish(self, job):
+        """复核租约、目标版本和有效片段后原子发布构建。"""
         async with self.engine.begin() as conn:
             # Lock document before checking desired version; submit/delete use the same row lock.
             await conn.execute(text('SELECT id FROM rag_documents WHERE id=:d FOR UPDATE'), dict(d=job['document_id']))
@@ -213,6 +226,7 @@ class PgvectorStore(SourceStore):
 
     async def fail(self, job, *, transient=False, error='ingestion_failed',
                    error_code=None, diagnostic_path=None):
+        """在有效租约内记录失败；允许的临时故障可重新排队。"""
         async with self.engine.begin() as conn:
             result = await conn.execute(text('''UPDATE rag_jobs SET
                 state=CASE WHEN :retry AND attempts<:max AND deadline>clock_timestamp() THEN 'queued' ELSE 'failed' END,
@@ -227,6 +241,7 @@ class PgvectorStore(SourceStore):
                          job=job['id'], token=job['token']))
 
     async def status(self, job_id):
+        """查询当前知识库任务及最近构建、发布和诊断状态。"""
         async with self.engine.connect() as conn:
             row = (await conn.execute(text('''SELECT j.id,j.state,j.attempts,j.error,j.deadline,j.lease_until,
                 v.document_id,v.id AS document_version_id,v.metadata->>'source_name' AS source_name,
@@ -242,6 +257,7 @@ class PgvectorStore(SourceStore):
             return dict(row) if row else None
 
     async def active(self, filters=None):
+        """按筛选条件获取活动构建，并再次复核来源访问状态。"""
         from ai_assistant.knowledge.metadata import validate_filters
         filters = validate_filters(filters)
         clauses = ['d.kb=:kb', 'NOT d.deleted', 'd.active_build IS NOT NULL']
@@ -269,6 +285,7 @@ class PgvectorStore(SourceStore):
         return await self.eligible_builds(builds, filters)
 
     async def delete(self, document_id, *, conn=None):
+        """将文档标记为已移除并取消未完成索引任务。"""
         async with transaction(self.engine, conn) as conn:
             count = (await conn.execute(text("""UPDATE rag_documents SET deleted=true WHERE id=:id AND kb=:kb"""),
                 dict(id=document_id, kb=self.config.knowledge_base_id))).rowcount
@@ -279,6 +296,7 @@ class PgvectorStore(SourceStore):
             return count
 
     async def version_for_rebuild(self, document_id):
+        """读取未移除文档的目标版本，供显式重建使用。"""
         async with self.engine.connect() as conn:
             row = (await conn.execute(text('''SELECT v.*,d.source_uri FROM rag_documents d JOIN rag_versions v
                 ON v.id=d.desired_version WHERE d.id=:id AND d.kb=:kb AND NOT d.deleted'''),

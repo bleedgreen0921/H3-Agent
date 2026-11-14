@@ -10,6 +10,7 @@ from ai_assistant.observability import event, span
 
 
 class AssistantSession:
+    """持有会话身份、线程、单轮互斥和存储连接状态。"""
     def __init__(self, agent, context, settings, *, model_name='', repository=None):
         self.agent, self.context, self.settings = agent, context, settings
         self.model_name = model_name
@@ -26,6 +27,7 @@ class AssistantSession:
         return self._session_id
 
     def _reset(self):
+        # 新建临时身份及线程；持久会话打开后会替换为存储中的值。
         self._session_id = str(uuid4())
         self._thread = str(uuid4())
         self._threads = [self._thread]
@@ -34,6 +36,7 @@ class AssistantSession:
         self._maintenance = None
 
     async def open(self, session_id=None):
+        """创建或恢复会话，并验证已保存的完成点。"""
         if self._closed:
             raise RuntimeError('Session is closed.')
         if self.repository is None:
@@ -55,6 +58,7 @@ class AssistantSession:
         self._threads = row.get('thread_ids') or [self._thread]
         self._failed = row['status'] in {'running', 'interrupted'}
         if self._complete is not None:
+            # 完成点必须是可读取的终态正文，不能静默恢复不兼容状态。
             state = await self.agent.aget_state(self._complete)
             from ai_assistant.runtime.history import saved_turn
             if not state.values or state.next or saved_turn(state.values, threads=self._threads) is None:
@@ -63,6 +67,7 @@ class AssistantSession:
                 raise SessionError('不支持的 checkpoint 格式或正文缺失；未恢复或重新执行。')
 
     async def new_conversation(self):
+        """没有活动轮次时创建新会话。"""
         if self._running or self._turn_lock.locked():
             raise RuntimeError('A turn is already running.')
         await self.open()
@@ -80,6 +85,7 @@ class AssistantSession:
             await asyncio.sleep(1)
 
     async def run_turn(self, text, **kwargs):
+        """为请求分配输入 ID，记录观测作用域并执行单轮。"""
         kwargs["input_id"] = kwargs.get("input_id") or str(uuid4())
         with span("agent.turn", input_id=kwargs["input_id"], session_id=self.session_id, execution_thread_id=self._thread):
             return await self._locked_turn(text, **kwargs)

@@ -3,6 +3,7 @@ import json
 from collections.abc import Mapping
 from langchain_core.documents import Document
 
+# 可定位范围及允许用于知识检索的元数据筛选字段。
 RANGES = ('page', 'line', 'block')
 FILTERS = {'source_id', 'document_id', 'media_type', 'tags', 'source_name'}
 
@@ -16,6 +17,8 @@ def normalize(document: Document, *, identity: dict, parser: str,
     """
     raw = json.loads(json.dumps(document.metadata, ensure_ascii=False, default=str))
     metadata = dict(identity)
+
+    # 原始解析器元数据单独保存；只有显式映射才提升为通用位置字段。
     metadata.update(metadata_schema_version=1, parser_name=parser, parser_metadata=raw)
     mapped = {'page_start': 'page_number', 'page_end': 'page_number'} if parser == 'unstructured' else {}
     mapped.update(mapping or {})
@@ -26,6 +29,7 @@ def normalize(document: Document, *, identity: dict, parser: str,
             continue
         value = raw[source]
         if target in {f'{r}_{s}' for r in RANGES for s in ('start', 'end')} or target == 'csv_record':
+            # 位置信息统一转为从 1 开始的整数。
             if type(value) is not int:
                 raise ValueError(f'{target} must be an integer')
             value += int(source in zero_based)
@@ -40,6 +44,8 @@ def normalize(document: Document, *, identity: dict, parser: str,
         else:
             raise ValueError(f'Unsupported semantic field: {target}')
         metadata[target] = value
+
+    # 范围使用包含式起止值；倒置的范围直接拒绝。
     for name in RANGES:
         start, end = metadata.get(f'{name}_start'), metadata.get(f'{name}_end')
         if start is not None and end is not None and end < start:
@@ -48,6 +54,8 @@ def normalize(document: Document, *, identity: dict, parser: str,
                 'source_name', 'media_type', 'parse_config_fingerprint', 'index_version'):
         if not isinstance(metadata.get(key), str):
             raise ValueError(f'{key} must be a string')
+
+    # 标签和标题路径默认是空列表，并严格检查元素类型。
     for key in ('tags', 'heading_path'):
         value = metadata.setdefault(key, [])
         if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
@@ -56,6 +64,7 @@ def normalize(document: Document, *, identity: dict, parser: str,
 
 
 def validate_filters(filters: dict | None) -> dict:
+    """只接受受支持的筛选字段，并校验字符串或标签列表。"""
     filters = dict(filters or {})
     if filters.keys() - FILTERS:
         raise ValueError('Unsupported knowledge filter')
@@ -69,6 +78,7 @@ def validate_filters(filters: dict | None) -> dict:
 
 
 def location(metadata: dict) -> str:
+    """把表格、页码、行号等定位信息整理为展示文本。"""
     parts = []
     for key, label in (('sheet_name','工作表'),('cell_range','单元格'),('table_name','数据表'),('record_id','记录')):
         if metadata.get(key):
@@ -84,10 +94,12 @@ def location(metadata: dict) -> str:
 
 
 def terms(text: str) -> str:
+    """提取英文、数字和中文词项，供关键词索引使用。"""
     import jieba
     import re
     pieces = re.findall(r'[A-Za-z_][A-Za-z_0-9]*|[0-9]+|[^\x00-\x7f]+', text)
     tokens = []
     for piece in pieces:
+        # 含中文的片段交给 jieba 分词，其余片段直接保留。
         tokens.extend(jieba.cut(piece) if re.search(r'[\u3400-\u9fff]', piece) else [piece])
     return ' '.join(word.lower() for word in tokens if re.search(r'\w', word))

@@ -18,6 +18,7 @@ class TurnIncompleteError(SessionError):
 
 @dataclass(frozen=True)
 class AgentTurn:
+    """一次 Agent 轮次的消息、证据、用量及统一业务结果。"""
     messages: list[BaseMessage]
     sources: list[Document]
     usage: TurnUsage = field(default_factory=TurnUsage)
@@ -39,6 +40,7 @@ def request_preview(text):
 
 
 def final_text(messages):
+    """只接受末尾无待执行工具调用的 AI 消息作为最终正文。"""
     if not messages or not isinstance(messages[-1], AIMessage) or messages[-1].tool_calls:
         return ''
     return messages[-1].text.strip()

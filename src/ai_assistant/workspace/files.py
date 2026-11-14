@@ -11,6 +11,7 @@ class WorkspaceError(ValueError):
     """Safe, expected file-access failure."""
 
 
+# 默认排除隐藏路径、常见依赖目录及凭据文件；还可追加配置中的排除模式。
 MAX_FILE_BYTES = 1024 * 1024
 EXCLUDED = {
     'venv', '__pycache__', 'node_modules', 'build', 'dist',
@@ -22,6 +23,7 @@ EXCLUDED = {
 
 
 def is_config_file(path, sources):
+    """识别已加载配置文件及其指向同一文件的别名。"""
     for source in sources:
         if path == source:
             return True
@@ -52,6 +54,7 @@ class ReadOnlyWorkspace:
             [Path(path).resolve() for path in config_files] + ([self.config_path] if self.config_path else [])))
 
     def _excluded(self, relative: Path) -> bool:
+        """按路径分量和用户配置的模式判断是否禁止访问。"""
         return any(
             part.startswith('.') or part.lower() in EXCLUDED
             or part.lower().endswith(('.pem', '.key', '.p12', '.pfx', '.egg-info'))
@@ -66,6 +69,7 @@ class ReadOnlyWorkspace:
         return is_config_file(path, self.config_files)
 
     def _relative(self, value: str) -> Path:
+        """拒绝绝对路径、上级路径、排除项和受保护配置。"""
         relative = Path(value)
         if relative.is_absolute() or '..' in relative.parts:
             raise WorkspaceError('仅允许工作区内不含 .. 的相对路径。')
@@ -76,6 +80,7 @@ class ReadOnlyWorkspace:
         return relative
 
     def _path(self, value: str) -> Path:
+        """检查已有路径的每个分量、实际位置及文件类型。"""
         relative = self._relative(value)
         current = self.root
         try:
@@ -94,6 +99,7 @@ class ReadOnlyWorkspace:
         return current
 
     def _raw(self, path: Path) -> bytes:
+        """以有限大小读取普通 UTF-8 文本，并拒绝末级符号链接。"""
         try:
             # O_NOFOLLOW also prevents a final-component symlink swap before open.
             fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
@@ -119,6 +125,7 @@ class ReadOnlyWorkspace:
         return self._raw(path).decode('utf-8-sig')
 
     def list_directory(self, path='.', limit=100) -> dict:
+        """列出允许访问的直接子项，并标记数量或扫描截断。"""
         target = self._path(path)
         if not target.is_dir():
             raise WorkspaceError('路径必须是目录。')
@@ -143,6 +150,7 @@ class ReadOnlyWorkspace:
         return {'entries': entries[:limit], 'truncated': len(entries) > limit or examined > self.scan_entries}
 
     def read_text(self, path, start_line=1, max_lines=200, start_char=0, char_budget=None) -> dict:
+        """按行及行内字符偏移读取文本，返回文件摘要和续读位置。"""
         if not 1 <= max_lines <= 2000 or start_line < 1:
             raise WorkspaceError("行范围无效，每次最多读取 2000 行。")
         if start_char < 0:
@@ -151,6 +159,8 @@ class ReadOnlyWorkspace:
         if not target.is_file():
             raise WorkspaceError('路径必须是普通文件。')
         raw = self._raw(target)
+
+        # 摘要基于完整原始字节，分页展示使用去除 BOM 的文本。
         lines = raw.decode('utf-8-sig').splitlines()
         window = lines[start_line - 1:start_line - 1 + max_lines]
         if window and start_char:
@@ -184,12 +194,14 @@ class ReadOnlyWorkspace:
                 **({'next': next_pos} if next_pos else {})}
 
     def search_text(self, query, path='.', max_results=50) -> dict:
+        """在允许的工作区路径中递归搜索字面量，并限制扫描资源。"""
         start = self._path(path)
         matches, skipped = [], 0
         scanned = total_bytes = content_size = 0
         truncated = False
 
         def files(target):
+            # 深度遍历时重新应用路径策略，跳过不可访问项。
             nonlocal scanned, skipped, truncated
             pending = [target]
             while pending:
@@ -219,6 +231,7 @@ class ReadOnlyWorkspace:
         iterator = files(start)
         try:
             for item in iterator:
+                # 文件大小、累计字节和结果预算分别设置上限。
                 try:
                     size = item.stat().st_size
                     if size > self.max_file_bytes:

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def validate_context_config(config, selected):
+    """启用上下文管理时要求模型显式声明输入预算。"""
     if config.context is None:
         return
     if config.models[selected].max_input_tokens is None:
@@ -30,6 +31,7 @@ def validate_context_config(config, selected):
 
 @asynccontextmanager
 async def assistant_session(config, model_name=None, *, retriever=None, session_id=None, caller=None, resources=None):
+    """按配置创建会话及其资源，在退出时等待清理。"""
     from ai_assistant.integrations.policy import Caller
     caller = caller or Caller()
     persona = load_persona(config) if caller.personal else ''
@@ -47,6 +49,7 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         if config.models[selected].max_input_tokens is None:
             raise ConfigError('启用 MCP 工具的模型必须显式配置 max_input_tokens。')
     async with AsyncExitStack() as stack:
+        # 复用已有观测服务；持久会话可选连接独立用量存储。
         if current_service() is None:
             from ai_assistant.observability import configuration_secrets
             await stack.enter_async_context(ObservationService(config.observability, configuration_secrets(config)))
@@ -59,6 +62,8 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             except Exception as error:
                 logger.warning('Usage unavailable: phase=connect category=%s', type(error).__name__)
         saver = repository.saver if repository else InMemorySaver()
+
+        # 统一托管工具上下文、操作回执和模型客户端。
         context = await stack.enter_async_context(tool_context(config, retriever=retriever,
             skill_snapshot=getattr(resources, "skills", None) if caller.personal else None))
         from ai_assistant.tools.context import FeishuService
@@ -88,6 +93,8 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             operations=operations, context=context,
             max_input_tokens=config.models[selected].max_input_tokens)
         tools, prompt_sections, component_middleware, failure_notices, services = [], [], [], [], {}
+
+        # 启用的组件各自贡献工具、提示、中间件和服务。
         for component in build_components(config, caller, retriever=retriever):
             await component.open(component_context)
             contribution = component.contribute(component_context)
@@ -110,6 +117,8 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
                repr(config.tools.selection), str(log_path))
         cache = getattr(resources, 'capability_cache', None) if resources is not None else None
         registry = cache.get(key) if cache is not None else None
+
+        # 按调用范围和已装配能力复用注册表；每轮状态仍单独创建。
         if registry is None:
             registry = CapabilityRegistry.from_sources(
                 tools, mcp=context.services.get('mcp'), skills=skills,
@@ -121,6 +130,7 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         result_tokens = config.context.tool_result_tokens if config.context else None
         planning_enabled = bool(getattr(config, 'planning', None) and config.planning.enabled)
         if planning_enabled:
+            # 规划父图组合普通 Agent 与任务 Agent，共享原生 checkpointer。
             from ai_assistant.agents.planning import PlanState, create_planning_agent
             normal_agent = create_assistant_agent(model, tools, checkpointer=None,
                 settings=config.agent, persona=persona,
@@ -166,6 +176,7 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         try:
             yield session
         finally:
+            # 先取消并等待当前任务，再关闭监听器及退出资源栈。
             if session._active_task is not None:
                 task = session._active_task
                 if not task.cancelling():

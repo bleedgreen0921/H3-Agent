@@ -1,7 +1,6 @@
 """Endpoint presets; model IDs and provider-specific options stay explicit."""
 
-# name -> (LangChain integration, default public endpoint)
-# These are ordinary API endpoints, not subscription-specific coding endpoints.
+# 预设名称映射到 LangChain 集成和默认公开 API 地址。
 PROVIDER_PRESETS = {
     "deepseek": ("deepseek", "https://api.deepseek.com"),
     "glm": ("openai", "https://open.bigmodel.cn/api/paas/v4/"),
@@ -14,6 +13,7 @@ API_KEY_PROVIDERS = frozenset({"openai", "anthropic", "google_genai", *PROVIDER_
 
 
 def is_deepseek(provider: str, model: str) -> bool:
+    """识别原生 DeepSeek 或使用 OpenAI 接口的 DeepSeek 模型。"""
     return provider == "deepseek" or (
         provider == "openai" and model.lower().startswith("deepseek-")
     )
@@ -24,6 +24,8 @@ def validate_deepseek_parameters(parameters: dict) -> None:
     responses = parameters.get("use_responses_api", False)
     if type(responses) is not bool:
         raise ValueError("use_responses_api must be boolean")
+
+    # Responses 必须回放完整历史，且不能开启推理或服务端会话存储。
     if responses:
         for container in (parameters, parameters.get("extra_body", {}), parameters.get("model_kwargs", {})):
             if not isinstance(container, dict):
@@ -37,6 +39,8 @@ def validate_deepseek_parameters(parameters: dict) -> None:
                 raise ValueError("DeepSeek reasoning must be disabled")
             if "reasoning_effort" in container and container["reasoning_effort"] != "none":
                 raise ValueError("DeepSeek reasoning must be disabled")
+
+    # 禁止在多个参数层重复或矛盾地设置协议和思考选项。
     if "thinking" in parameters:
         raise ValueError("Configure thinking only in extra_body")
     model_kwargs = parameters.get("model_kwargs", {})
@@ -54,4 +58,5 @@ def validate_deepseek_parameters(parameters: dict) -> None:
 
 
 def uses_openai_client(provider: str) -> bool:
+    """判断模型方案是否需要由会话层管理 OpenAI 兼容 HTTP 客户端。"""
     return provider in {'openai', 'deepseek'} or PROVIDER_PRESETS.get(provider, (None,))[0] == 'openai'

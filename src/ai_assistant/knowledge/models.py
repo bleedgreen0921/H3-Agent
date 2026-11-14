@@ -13,12 +13,14 @@ from ai_assistant.knowledge import KnowledgeError, IngestionError
 
 
 class ServiceEmbeddings(Embeddings):
+    """包装原生 Embedding 客户端并统一校验向量和错误。"""
     def __init__(self, native, instruction=""):
         self.native = native
         self.instruction = instruction
 
     @staticmethod
     def validate(vector):
+        # 只接受 1024 维、有限且非零的向量，避免无效结果进入索引。
         if (
             len(vector) != 1024
             or not all(type(v) in (int, float) and math.isfinite(v) for v in vector)
@@ -31,11 +33,13 @@ class ServiceEmbeddings(Embeddings):
         return vector
 
     def _documents(self, vectors, count):
+        # 批量向量必须与输入数量一致。
         if len(vectors) != count:
             raise KnowledgeError("Embedding 返回数量与输入不一致。")
         return [self.validate(v) for v in vectors]
 
     def _query(self, text):
+        # 查询可带检索指令；文档向量化不添加该前缀。
         return (
             f"Instruct: {self.instruction}\nQuery: {text}" if self.instruction else text
         )
@@ -126,6 +130,7 @@ async def embedding(config):
             )
             sync_api, async_api = native.client, native.async_client
 
+            # 校验并按服务端 index 排序，异步请求还受上下文并发限制。
             def create(**kwargs):
                 return _ordered_embeddings(sync_api.create(**kwargs), kwargs["input"])
 
@@ -144,6 +149,7 @@ async def embedding(config):
 
 
 def reranker(config):
+    """构造兼容 LangChain 的 HTTP 重排器，校验分数和输入顺序。"""
     from langchain_community.cross_encoders.base import BaseCrossEncoder
 
     class ServiceCrossEncoder(BaseCrossEncoder):
@@ -179,6 +185,8 @@ def reranker(config):
                                 raise ValueError("Invalid rerank response")
                             rows = payload["results"]
                             ordered = [None] * len(batch)
+
+                            # 要求每个输入有唯一索引和有限分数，再恢复原顺序。
                             if len(rows) != len(batch):
                                 raise ValueError("Missing scores")
                             for row in rows:

@@ -15,6 +15,8 @@ class PublishedWorkspaceError(WorkspaceError):
 
     def __init__(self, path, data):
         super().__init__('本地文件已发布，但持久确认或清理失败；请核实，不要重写。')
+
+        # 已发生发布与持久性未知同时记录，供上层避免盲目重试。
         self.receipt = {'path': path, 'sha256': sha256(data).hexdigest(),
                         'receipt_version': 1, 'published': True, 'durability': 'unknown'}
 
@@ -23,10 +25,12 @@ class WritableWorkspace:
     """Uses the read workspace's policy; never grants access to excluded paths."""
 
     def __init__(self, workspace: ReadOnlyWorkspace):
+        # 写入复用读取层的工作区范围和排除策略。
         self.workspace = workspace
 
     @contextmanager
     def _parent(self, path: str, *, create: bool = False):
+        """按目录文件描述符逐层打开父目录，不跟随符号链接。"""
         relative = self.workspace._relative(path)
         if not relative.name:
             raise WorkspaceError('必须指定文件路径。')
@@ -34,6 +38,7 @@ class WritableWorkspace:
         try:
             for part in relative.parts[:-1]:
                 if create:
+                    # 创建文件时可显式补齐父目录；已有目录继续验证。
                     try:
                         os.mkdir(part, mode=0o700, dir_fd=fd)
                     except FileExistsError:
@@ -47,6 +52,7 @@ class WritableWorkspace:
 
     @staticmethod
     def _encode(content: str) -> bytes:
+        """编码 UTF-8 并限制 NUL 和写入大小。"""
         try:
             data = content.encode('utf-8')
         except UnicodeError:
@@ -57,6 +63,7 @@ class WritableWorkspace:
 
     @staticmethod
     def _read(parent: int, name: str) -> tuple[bytes, os.stat_result]:
+        """读取待编辑的普通文本文件，拒绝硬链接和末级符号链接。"""
         fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=parent)
         with os.fdopen(fd, 'rb') as stream:
             info = os.fstat(stream.fileno())
@@ -75,6 +82,7 @@ class WritableWorkspace:
 
     @staticmethod
     def _stage(parent: int, data: bytes, mode: int = 0o600) -> str:
+        """在目标目录创建随机临时文件并同步内容。"""
         name = f'.assistant-write-{secrets.token_hex(16)}'
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                      0o600, dir_fd=parent)
@@ -90,13 +98,14 @@ class WritableWorkspace:
         return name
 
     def create_file(self, path: str, content: str) -> dict:
+        """仅创建新文件；发布后失败时返回可识别的未知持久性错误。"""
         data = self._encode(content)
         published = False
         try:
             with self._parent(path, create=True) as (parent, relative):
                 temp = self._stage(parent, data)
                 try:
-                    # Atomic publication that never replaces an existing name.
+                    # 通过硬链接原子发布新名称，不覆盖已存在的目标。
                     os.link(temp, relative.name, src_dir_fd=parent, dst_dir_fd=parent,
                             follow_symlinks=False)
                     published = True
@@ -114,6 +123,7 @@ class WritableWorkspace:
         return {'path': relative.as_posix(), 'bytes': len(data), 'sha256': sha256(data).hexdigest()}
 
     def edit_file(self, path: str, edits: list[dict], expected_sha256: str) -> dict:
+        """按读取时摘要执行一组精确替换，并原子替换目标文件。"""
         if not 1 <= len(edits) <= 20:
             raise WorkspaceError('每次编辑需要 1～20 项替换。')
         published = False
@@ -124,6 +134,8 @@ class WritableWorkspace:
                 if before_hash != expected_sha256:
                     raise WorkspaceError('文件摘要不匹配，请重新读取后编辑。')
                 text = raw.decode('utf-8-sig')
+
+                # 每段原文必须唯一匹配；重叠区间不能放在同一批编辑。
                 matches = []
                 for edit in edits:
                     old, new = edit['old_text'], edit['new_text']
@@ -136,11 +148,14 @@ class WritableWorkspace:
                 if any(left[1] > right[0] for left, right in zip(matches, matches[1:])):
                     raise WorkspaceError('编辑的原文区间不能重叠。')
                 after = text
+
+                # 从后向前替换，避免前面的修改改变后续原始偏移。
                 for begin, end, replacement in reversed(matches):
                     after = after[:begin] + replacement + after[end:]
                 data = self._encode(('\ufeff' if raw.startswith(b'\xef\xbb\xbf') else '') + after)
                 temp = self._stage(parent, data, stat.S_IMODE(info.st_mode) & 0o777)
                 try:
+                    # 发布前复核文件身份与摘要，降低覆盖并发修改的风险。
                     current, current_info = self._read(parent, relative.name)
                     if ((info.st_dev, info.st_ino) != (current_info.st_dev, current_info.st_ino)
                             or sha256(current).hexdigest() != before_hash):
@@ -157,6 +172,8 @@ class WritableWorkspace:
             if published:
                 raise PublishedWorkspaceError(relative.as_posix(), data) from None
             raise WorkspaceError('文件无法编辑；请检查路径和访问权限。') from None
+
+        # 回执包含前后摘要和有限长度的统一 diff。
         diff = ''.join(difflib.unified_diff(text.splitlines(keepends=True),
                                           after.splitlines(keepends=True),
                                           fromfile=relative.as_posix(), tofile=relative.as_posix()))

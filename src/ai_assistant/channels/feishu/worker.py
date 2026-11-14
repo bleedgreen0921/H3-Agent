@@ -327,7 +327,11 @@ class BotWorker:
                          row['id'], type(exc).__name__)
 
     async def run(self):
-        """循环消费 inbox，同时监督已派发的后台执行。"""
+        """循环消费 inbox，同时监督已派发的后台执行。
+
+        普通消息和 turn 命令都作为 active business turn 派发，使 /cancel、
+        /new 和 /usage 能在业务轮执行期间被处理；管理命令和解析错误仍内联。
+        """
         try:
             while True:
                 # 先回收已结束任务；异常或取消后优先只读恢复已保存结果。
@@ -359,12 +363,19 @@ class BotWorker:
                         continue
                     text = row['body']['text'].strip()
                     spec, value = self.commands.parse(text)
-                    turn_command = bool(spec and (spec.turn or (
-                        spec.turn_check is not None and spec.turn_check(value))))
+                    # 普通消息没有 command spec；未知命令和解析错误虽然也是
+                    # spec=None，但 value 是错误提示，必须内联回复，不能占用
+                    # 业务轮。只有普通文本和 turn 命令进入 active task。
+                    ordinary_message = spec is None and value is None
+                    business_turn = ordinary_message or bool(
+                        spec and (spec.turn or (
+                            spec.turn_check is not None and spec.turn_check(value))))
 
-                    # 抢占命令先完成取消清理，再执行命令并登记回执。
+                    # 抢占命令先领取，避免取消/新会话回执被下一轮重复处理；
+                    # 再完成取消清理，最后执行命令并登记回执。
                     if spec is not None and spec.preempt:
                         try:
+                            await self.inbox.claim(row['id'])
                             caller_for(self.config, row)
                             await self.stop_for_command(row)
                             await self.execute(row)
@@ -372,8 +383,9 @@ class BotWorker:
                             await self.enqueue_reply(row, failure_message(exc))
                         continue
 
-                    # 不需后台派发的输入先领取，再直接执行处理流程。
-                    if not turn_command:
+                    # 管理命令、未知命令和解析错误不需要后台派发，先领取
+                    # 后直接执行；它们可以在 active business turn 期间运行。
+                    if not business_turn:
                         try:
                             await self.inbox.claim(row['id'])
                             await self.execute(row)
@@ -384,7 +396,8 @@ class BotWorker:
                                 await self.enqueue_reply(row, failure_message(exc))
                         continue
 
-                    # 需后台执行的命令仅在当前没有活动任务时派发。
+                    # 普通消息和 turn 命令都进入 active task；同一时刻只允许
+                    # 一个业务轮，后续消息留在 inbox 等待下一轮。
                     if self.active is None:
                         await self.inbox.claim(row['id'])
                         self.active_row = row

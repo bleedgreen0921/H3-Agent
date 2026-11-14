@@ -1,1 +1,1 @@
-"""Model access, structured generation and diagnostics."""
+"""模型创建与资源管理、响应校验、结构化输出和显式诊断。"""

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class InboxRepository:
+    """管理渠道输入的领取、处理完成和投递完成状态。"""
     conn: object
 
     async def received(self, limit=100):
@@ -12,6 +13,7 @@ class InboxRepository:
             (limit,))).fetchall()
 
     async def recoverable(self):
+        # 只恢复当前支持格式的处理中输入，不自动重跑业务。
         return await (await self.conn.execute(
             "SELECT i.* FROM assistant_inbox i WHERE i.status='running' AND "
             "(i.body->>'delivery_version'='1' OR EXISTS(SELECT 1 FROM assistant_outbox o "
@@ -23,6 +25,7 @@ class InboxRepository:
             'SELECT * FROM assistant_inbox WHERE id=%s', (input_id,))).fetchone()
 
     async def claim(self, input_id):
+        # 标记当前投递格式及运行状态；调度并发由上层控制。
         await self.conn.execute(
             "UPDATE assistant_inbox SET status='running',body=jsonb_set(body,'{delivery_version}','1'::jsonb) WHERE id=%s",
             (input_id,))
@@ -41,6 +44,7 @@ class InboxRepository:
             (input_id, binding))
 
     async def deliver_completed(self):
+        # 已登记回复全部送达后清除输入正文，标记投递完成。
         await self.conn.execute('''UPDATE assistant_inbox i SET body=NULL,status='delivered'
             WHERE i.status='completed' AND EXISTS(SELECT 1 FROM assistant_outbox o WHERE o.input_id=i.id)
             AND NOT EXISTS(SELECT 1 FROM assistant_outbox o WHERE o.input_id=i.id AND o.status!='delivered')''')
@@ -54,6 +58,7 @@ class InboxRepository:
 
 @dataclass(frozen=True)
 class OutboxRepository:
+    """管理有序回复分段和单段投递状态。"""
     conn: object
 
     async def parts(self, input_id):
@@ -66,6 +71,7 @@ class OutboxRepository:
             (input_id,))).fetchone()
 
     async def lock_inbox(self, input_id):
+        # 调用方事务持有输入行锁，协调同一输入的批次登记。
         await self.conn.execute('SELECT id FROM assistant_inbox WHERE id=%s FOR UPDATE', (input_id,))
 
     async def enqueue_parts(self, input_id, parts):
@@ -77,6 +83,7 @@ class OutboxRepository:
                 (outbox_id, input_id, Jsonb(body), part))
 
     async def pending_for_delivery(self):
+        # 仅返回到达重试时间、且之前分段均已送达的私聊候选。
         return await (await self.conn.execute(
             "SELECT o.* FROM assistant_outbox o WHERE o.status='pending' "
             "AND COALESCE(o.body->>'group','false')!='true' "
@@ -86,10 +93,12 @@ class OutboxRepository:
             "ORDER BY o.created_at,o.input_id,o.part,o.id")).fetchall()
 
     async def recover_sending(self):
+        # 重启后无法确认远端效果，发送中记录转 unknown 而非重发。
         await self.conn.execute(
             "UPDATE assistant_outbox SET status='unknown' WHERE status='sending' AND body->'delivery'->>'version'='1'")
 
     async def block_unknown_dependents(self):
+        # 前序分段结果未知或失败时阻止依赖它的后续分段。
         await self.conn.execute(
             "UPDATE assistant_outbox o SET status='blocked' WHERE o.status='pending' AND o.part>=0 "
             "AND o.body->'delivery'->>'version'='1' AND EXISTS(SELECT 1 FROM assistant_outbox p "
@@ -109,6 +118,7 @@ class OutboxRepository:
             (input_id, part))
 
     async def claim_for_send(self, outbox_id, patch):
+        # 仅从 pending 原子切换到 sending，同时记录本次尝试信息。
         from psycopg.types.json import Jsonb
         return await (await self.conn.execute(
             "UPDATE assistant_outbox SET status='sending',body=jsonb_set(body,'{delivery}',body->'delivery' || %s) "
@@ -122,6 +132,7 @@ class OutboxRepository:
             (status, Jsonb(patch), delay, outbox_id))
 
     async def mark_delivered(self, outbox_id, remote_id, delivery):
+        # 保留远端消息 ID 和投递元数据，清除已投递正文。
         from psycopg.types.json import Jsonb
         await self.conn.execute(
             "UPDATE assistant_outbox SET status='delivered',remote_id=%s,body=%s WHERE id=%s",

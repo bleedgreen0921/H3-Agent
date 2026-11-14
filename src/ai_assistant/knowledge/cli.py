@@ -7,8 +7,11 @@ from ai_assistant.knowledge import KnowledgeError
 
 
 def add_commands(commands):
+    """注册知识库管理、后台处理、检索和诊断命令。"""
     parser = commands.add_parser('rag', help='Local persistent knowledge retrieval')
     actions = parser.add_subparsers(dest='action', required=True)
+
+    # 各子命令共用配置入口，按功能声明各自的参数和筛选条件。
     for action in ('submit', 'status', 'worker', 'search', 'delete', 'rebuild', 'check', 'sources', 'sync', 'documents'):
         command = actions.add_parser(action)
         command.add_argument('--config', default='assistant.toml')
@@ -40,9 +43,12 @@ def add_commands(commands):
 
 
 async def execute(config, args):
+    """按配置为指定知识库操作创建观测上下文，再执行命令。"""
     from ai_assistant.observability import (ObservationService, configuration_secrets,
                                             current_service, span)
     watched = {'worker', 'search', 'submit', 'sync', 'delete', 'rebuild'}
+
+    # 仅在显式启用且当前没有观测服务时创建独立观测作用域。
     if (args.action in watched and config.observability.enabled
             and current_service() is None):
         async with ObservationService(config.observability, configuration_secrets(config)):
@@ -52,6 +58,7 @@ async def execute(config, args):
 
 
 async def _execute(config, args):
+    """解析知识库配置并分派具体管理操作。"""
     c = config.knowledge
     if c is None:
         raise ConfigError('未配置 [knowledge]。')
@@ -59,6 +66,8 @@ async def _execute(config, args):
     # All configured relative paths resolve against the TOML, not worker cwd.
     from ai_assistant.knowledge.config import resolve_knowledge_paths
     c = resolve_knowledge_paths(c, base)
+
+    # check 未指定范围时同时检查模型服务和数据库；服务检查会发出真实请求。
     if args.action == 'check':
         if not args.database and not args.services:
             args.database = args.services = True
@@ -70,16 +79,20 @@ async def _execute(config, args):
             print(f'模型服务检查通过：维数={len(vector)}，重排数={len(scores)}。')
         if not args.database:
             return 0
+
+    # 以下操作使用知识库存储；无论成功失败都在 finally 中关闭。
     from ai_assistant.storage.rag import RagStore
     store = RagStore(c)
     try:
         if args.action in ('sources', 'documents'):
+            # 展示来源或文档列表，每页截取 10 条。
             from ai_assistant.knowledge.management import sources
             if args.page < 1:
                 raise KnowledgeError('页码必须大于 0。')
             rows = await sources(config, store) if args.action == 'sources' else await store.document_list()
             print(json.dumps(rows[(args.page - 1) * 10:args.page * 10], ensure_ascii=False, default=str))
         elif args.action == 'sync':
+            # 登记同步请求并返回 ID；提交不代表同步已经完成。
             from ai_assistant.knowledge.sync import configure
             await configure(config,store)
             ident = await store.request_sync({'source_id': args.source} if args.source else {})
@@ -88,6 +101,7 @@ async def _execute(config, args):
                   target_id=args.source)
             print(ident, flush=True)
         elif args.action == 'submit':
+            # 显式登记资料及标签，返回来源和后台任务等提交结果。
             from ai_assistant.knowledge.sync import register
             result = await register(config, args.path, tags=args.tag)
             from ai_assistant.observability import event
@@ -95,6 +109,7 @@ async def _execute(config, args):
                   source_id=result.get('source_id'), sync_id=result.get('sync_id'))
             print(json.dumps(result, ensure_ascii=False))
         elif args.action == 'status':
+            # 按任务类型展示同步进度或 JSON；索引诊断仅按需输出。
             from ai_assistant.knowledge.management import status
             result = await status(store, args.job_id)
             if result is None:
@@ -110,9 +125,11 @@ async def _execute(config, args):
                 detail = await asyncio.to_thread(read_diagnostic, c, result)
                 print(detail, file=sys.stderr)
         elif args.action == 'worker':
+            # 处理后台入库任务；--once 控制是否只运行一次。
             from ai_assistant.knowledge.ingestion import worker
             await worker(store, once=args.once, app_config=config)
         elif args.action == 'search':
+            # 检索只使用当前允许访问的已发布快照，不触发同步。
             from ai_assistant.knowledge.retrieval import create_knowledge_retriever
             from ai_assistant.knowledge.evidence import render_evidence
             filters = {key: getattr(args, key) for key in ('document_id', 'source_id', 'media_type', 'source_name') if getattr(args, key)}
@@ -126,12 +143,14 @@ async def _execute(config, args):
             if not docs:
                 print('暂无可检索内容或相关证据；可提交入库、主动同步或查询任务状态。')
         elif args.action == 'delete':
+            # 将目标文档移出查询范围，并报告受影响数量。
             removed = await store.delete(args.document_id)
             from ai_assistant.observability import event
             event('knowledge.management', action='delete', status='succeeded',
                   document_id=args.document_id, target_id=args.document_id, item_count=removed)
             print(f'退出查询范围的文档数：{removed}')
         elif args.action == 'rebuild':
+            # 使用已保存版本提交强制重建任务；不自动恢复已移除文档。
             version = await store.version_for_rebuild(args.document_id)
             if version is None:
                 raise KnowledgeError('文档不存在或已移除；请先显式添加恢复。')
@@ -143,6 +162,7 @@ async def _execute(config, args):
             print(job)
         elif args.action == 'check':
             if args.database:
+                # 仅检查已要求的表结构，不在启动或诊断时自动迁移。
                 await store.check_tables(('rag_documents', 'rag_versions', 'rag_jobs', 'rag_builds',
                     'rag_chunks', 'upsertion_record', 'rag_sources', 'rag_sync_runs',
                     'rag_management_operations'))

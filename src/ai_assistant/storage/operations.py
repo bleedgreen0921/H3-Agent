@@ -8,6 +8,7 @@ from ai_assistant.observability import observed, event
 
 
 class OperationRepository:
+    """记录外部写入的去重键、状态和回执。"""
     def __init__(self, conn):
         self.conn = conn
         # psycopg AsyncConnection 不支持无保护并发 execute；写任务本身串行，
@@ -17,6 +18,8 @@ class OperationRepository:
     @observed("operation.claim",
         lambda self, input_id, principal, tool, arguments, source_key=None: {"input_id": input_id, "tool": tool})
     async def begin(self, input_id, principal, tool, arguments, source_key=None):
+        """尝试登记一次操作；重复时返回现有记录，不重新派发。"""
+        # 对规范化参数计算摘要，不把参数原文写入操作表。
         digest = hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False,
                                           separators=(',', ':'), allow_nan=False).encode()).hexdigest()
         ident = str(uuid4())
@@ -29,6 +32,8 @@ class OperationRepository:
                 event("operation.claimed", operation_id=row["id"], input_id=input_id,
                       tool=tool, status=row["status"])
                 return True, row
+
+            # 来源键和输入/主体/工具/参数摘要分别支持去重。
             if source_key:
                 existing = await self._by_source(source_key)
                 if existing:
@@ -49,6 +54,7 @@ class OperationRepository:
     @observed("operation.finish",
         lambda self, ident, status, result=None: {"operation_id": ident, "status": status})
     async def finish(self, ident, status, result=None):
+        """推进 pending 或补充同一终态回执，不跨终态改判。"""
         from psycopg.types.json import Jsonb
         payload = Jsonb(result) if result is not None else None
         async with self.lock:
@@ -58,6 +64,7 @@ class OperationRepository:
                 (status, payload, payload, ident, status))
 
     async def list(self, input_id=None):
+        """按输入查询操作，或读取最近的操作记录。"""
         if input_id:
             cursor = await self.conn.execute(
                 'SELECT * FROM assistant_operations WHERE input_id=%s ORDER BY created_at', (input_id,))

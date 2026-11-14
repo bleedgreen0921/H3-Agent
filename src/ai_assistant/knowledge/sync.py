@@ -23,6 +23,7 @@ from ai_assistant.workspace.files import ReadOnlyWorkspace
 
 
 def settings(config):
+    """按配置入口解析知识库本地路径。"""
     return resolve_knowledge_paths(
         config.knowledge,
         config.config_path.parent if config.config_path else Path.cwd(),
@@ -57,6 +58,7 @@ async def resolve_submission(config, reference, *, identity="user", tags=None):
 
 
 async def register(config, reference, *, identity="user", restore=True, tags=None):
+    """显式解析并登记单个来源，随后关闭知识库存储。"""
     uri, descriptor = await resolve_submission(config, reference, identity=identity, tags=tags)
     store = RagStore(settings(config))
     try:
@@ -68,6 +70,7 @@ async def register(config, reference, *, identity="user", restore=True, tags=Non
 
 
 async def configure(config, store):
+    """将显式配置的来源及其解析后的本地路径同步到存储。"""
     base = config.config_path.parent if config.config_path else Path.cwd()
     sources = {}
     for name, source in config.knowledge.sources.items():
@@ -82,6 +85,7 @@ async def configure(config, store):
 
 
 async def synchronize(config, store, run):
+    """扫描目标来源，保存资料快照并提交索引任务。"""
     from ai_assistant.observability import event
     jobs = []
     errors = []
@@ -89,6 +93,8 @@ async def synchronize(config, store, run):
     await configure(config, store)
     sources = await store.source_list()
     target_uri = None
+
+    # 先确认指定文档或来源存在，避免扩大本次扫描范围。
     if filters.get("document_id"):
         target_uri = await store.document_uri(filters["document_id"])
         if target_uri is None:
@@ -119,6 +125,7 @@ async def synchronize(config, store, run):
                 continue
         descriptors = []
         try:
+            # 已提交来源复用成员清单；目录和云空间按其配置枚举。
             if target_uri or definition["kind"] == "submitted":
                 descriptors = [(r["uri"], r["descriptor"]) for r in previous]
             elif definition["kind"] == "local_directory":
@@ -168,6 +175,8 @@ async def synchronize(config, store, run):
             continue
         for uri, descriptor in descriptors:
             previous_document = await store.document_for_uri(uri)
+
+            # 用户移除的文档不会因普通来源同步被自动恢复。
             if previous_document and previous_document["deleted"]:
                 continue
             if filters.get("document_id"):
@@ -177,6 +186,7 @@ async def synchronize(config, store, run):
             try:
                 await store.sync_heartbeat(run)
                 if descriptor["kind"] == "local":
+                    # 本地文件经只读工作区约束后创建内容快照。
                     path = Path(descriptor["path"])
                     if path.suffix.lower() not in EXTENSIONS:
                         raise SourceFailure("unsupported_file_type")
@@ -200,6 +210,7 @@ async def synchronize(config, store, run):
                         "tags": descriptor.get("tags", []),
                     }
                 else:
+                    # 云文档优先复用可靠版本对应的快照；否则读取并核对版本。
                     async with cloud_reader(config, descriptor["identity"]) as reader:
                         descriptor = await reader.resolve(descriptor)
                         current, title = await reader.revision(descriptor)
@@ -237,6 +248,8 @@ async def synchronize(config, store, run):
                 if previous_document and previous_document["metadata"]:
                     metadata["tags"] = descriptor.get("tags", previous_document["metadata"].get("tags", []))
                 await store.sync_heartbeat(run)
+
+                # 记录索引任务和来源观察状态；完成索引仍需后台 worker。
                 job = await store.submit(
                     source_uri=uri,
                     digest=digest,
@@ -284,6 +297,7 @@ async def synchronize(config, store, run):
 
 
 async def sync_once(config, store):
+    """领取并执行一次来源同步；无任务时尝试汇总已有同步状态。"""
     run = await store.claim_sync()
     if run is None:
         await store.finish_syncs()
@@ -295,6 +309,7 @@ async def sync_once(config, store):
 
 
 async def _sync_claimed(config, store, run):
+    """在同步租约、心跳和截止时间约束下运行扫描。"""
     async def heartbeat():
         while True:
             await asyncio.sleep(10)
@@ -327,6 +342,7 @@ async def _sync_claimed(config, store, run):
         event('knowledge.sync.failed', sync_id=run.get("id"), status='failed',
               category=type(exc).__name__)
     finally:
+        # 同步结束或取消时等待扫描与心跳清理完成。
         task.cancel()
         pulse.cancel()
         await asyncio.gather(task, pulse, return_exceptions=True)

@@ -1,1 +1,1 @@
-"""User-facing entrypoints; business logic lives in capability modules."""
+"""用户入口及通用命令、会话管理和投递登记；业务实现由各模块负责。"""

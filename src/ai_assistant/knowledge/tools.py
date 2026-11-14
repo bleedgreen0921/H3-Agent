@@ -12,6 +12,7 @@ from ai_assistant.knowledge.evidence import render_evidence
 
 
 def knowledge_call(function):
+    """将知识库错误转换为模型可处理的工具错误。"""
     operation = knowledge_operation(function)
 
     @wraps(function)
@@ -24,6 +25,7 @@ def knowledge_call(function):
 
 
 def require_config(runtime):
+    """要求启用知识库且调用者属于允许使用私人能力的范围。"""
     c = runtime.context.service('knowledge').config
     if c is None or (
         runtime.context.caller and not runtime.context.caller.personal
@@ -44,6 +46,8 @@ async def search_knowledge(
     context = runtime.context
     if context.caller and not context.caller.personal:
         raise ToolException("当前入口未启用私人知识库。")
+
+    # 优先复用运行时提供的 Retriever，否则按本次筛选条件创建。
     config = context.service('knowledge').config
     retriever = context.service('knowledge').retriever
     if retriever is None:
@@ -87,6 +91,8 @@ async def ingest_document(
     """仅在用户明确要求长期入库时登记文档。返回来源和后台任务 ID；尚未确认可检索，普通阅读不调用。"""
     if identity not in ("user", "bot"):
         raise ToolException("identity 必须为 user 或 bot。")
+
+    # 登记请求关联可信输入和主体，返回提交回执而非已可检索结论。
     from ai_assistant.knowledge.registration import register_document
     result = await register_document(require_config(runtime), reference, identity=identity,
         input_id=runtime.context.input_id, principal=getattr(runtime.context.caller, 'binding', 'local'))
@@ -109,6 +115,7 @@ async def knowledge_status(
     from ai_assistant.knowledge.sync import settings
     store = RagStore(settings(require_config(runtime)))
     try:
+        # 指定任务时返回同步状态；否则返回来源状态摘要。
         if sync_id:
             row = await store.sync_status(sync_id)
             from ai_assistant.knowledge.management import sync_facts
@@ -131,6 +138,7 @@ async def knowledge_status(
 
 
 def knowledge_tools(*, include_management=True):
+    """按权限范围选择仅检索或包含管理操作的工具集合。"""
     return [
         t.model_copy(update={"handle_tool_error": True})
         for t in ((search_knowledge, ingest_document, knowledge_status)
@@ -139,6 +147,7 @@ def knowledge_tools(*, include_management=True):
 
 
 def knowledge_middleware(*, run_limit=15):
+    """限制每轮知识检索调用次数并转换预期错误。"""
     from langchain.agents.middleware import ToolCallLimitMiddleware, ToolErrorMiddleware
 
     def expected_error(error, request):

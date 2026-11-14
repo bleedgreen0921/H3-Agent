@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class EffectReceipt:
+    """供轮次结果汇总的效果状态、核验和资源引用。"""
     kind: str
     status: str
     accepted: bool = False
@@ -17,6 +18,7 @@ class EffectReceipt:
 
 
 def operation_receipt(operation):
+    """把外部操作记录转换为统一回执，不把接受等同于字段核验。"""
     result = operation.get('result') or {}
     terminal = operation.get('tool') == 'run_command'
     accepted = operation.get('status') == 'succeeded' and not terminal

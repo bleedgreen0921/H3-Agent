@@ -17,6 +17,7 @@ async def transaction(engine, conn=None):
             yield connection
 
 
+# 管理回执、来源及成员观察、同步任务与同范围活动任务的唯一约束。
 DDL = (
     """CREATE TABLE IF NOT EXISTS rag_management_operations (
         kb text NOT NULL,principal text NOT NULL,input_id text NOT NULL,
@@ -41,11 +42,15 @@ DDL = (
 
 
 def packed(value):
+    """将值规范化为 JSON 文本，供参数传递及同步范围摘要使用。"""
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
 class SourceStore:
+    """管理知识来源、同步租约、业务回执和查询可用构建。"""
+
     async def configure_sources(self, sources):
+        """更新配置来源，停用不再配置的非提交来源。"""
         kb = self.config.knowledge_base_id
         async with self.engine.begin() as conn:
             await conn.execute(
@@ -62,6 +67,7 @@ class SourceStore:
                 )
 
     async def add_submission(self, uri, descriptor, *, restore=True, conn=None):
+        """登记显式提交来源，并按 restore 决定是否恢复已移除文档。"""
         source = "submitted:" + hashlib.sha256(uri.encode()).hexdigest()[:24]
         kb = self.config.knowledge_base_id
         async with transaction(self.engine, conn) as conn:
@@ -91,6 +97,7 @@ class SourceStore:
         return source
 
     async def source_list(self):
+        """列出当前知识库的来源记录。"""
         async with self.engine.connect() as conn:
             return [
                 dict(r)
@@ -129,6 +136,7 @@ class SourceStore:
                 dict(kb=self.config.knowledge_base_id, id=source, error=error))
 
     async def sync_status_counts(self, ident):
+        """按状态统计同步任务关联的去重索引任务。"""
         async with self.engine.connect() as conn:
             return [dict(row) for row in (await conn.execute(text(
                 "SELECT j.state,count(*) AS n FROM rag_jobs j "
@@ -143,9 +151,11 @@ class SourceStore:
                 dict(kb=self.config.knowledge_base_id, id=source))
 
     async def management_lock(self, conn, key):
+        """在当前事务内串行化同一管理操作键。"""
         await conn.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:key,0))'), dict(key=key))
 
     async def record_management(self, conn, principal, input_id, action, target, result):
+        """在业务事务中保存操作回执。"""
         await conn.execute(text(
             "INSERT INTO rag_management_operations(kb,principal,input_id,action,target,result) "
             "VALUES(:kb,:p,:i,:a,:t,CAST(:r AS jsonb))"),
@@ -153,6 +163,7 @@ class SourceStore:
                  a=action, t=target, r=packed(result)))
 
     async def management_receipt(self, principal, input_id, conn=None):
+        """按知识库、主体和输入 ID 查询管理回执。"""
         if conn is None:
             async with self.engine.connect() as connection:
                 return await self.management_receipt(principal, input_id, conn=connection)
@@ -170,6 +181,7 @@ class SourceStore:
                 dict(kb=self.config.knowledge_base_id, id=ident))).mappings()]
 
     async def members(self, source=None, *, include_disabled=False):
+        """读取来源成员，默认只包含启用来源。"""
         async with self.engine.connect() as conn:
             return [
                 dict(r)
@@ -190,6 +202,7 @@ class SourceStore:
     async def observe(
         self, source, uri, descriptor, state, error=None, *, sync_run=None
     ):
+        """记录来源成员的观察状态；同步任务必须仍持有有效租约。"""
         async with self.engine.begin() as conn:
             if sync_run:
                 from ai_assistant.knowledge import LeaseLost
@@ -219,10 +232,12 @@ class SourceStore:
             )
 
     async def request_sync(self, filters=None, *, conn=None):
+        """按知识库和筛选范围合并正在进行的同步请求。"""
         filters = filters or {}
         scope = hashlib.sha256(packed(filters).encode()).hexdigest()
         kb = self.config.knowledge_base_id
         async with transaction(self.engine, conn) as conn:
+            # 事务锁与唯一索引共同限制同范围并发提交。
             await conn.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:k,0))"),
                 dict(k=kb + scope),
@@ -250,6 +265,7 @@ class SourceStore:
             return ident
 
     async def sync_status(self, ident):
+        """仅查询当前知识库中的同步任务。"""
         async with self.engine.connect() as conn:
             row = (
                 (
@@ -264,6 +280,7 @@ class SourceStore:
             return dict(row) if row else None
 
     async def claim_sync(self):
+        """领取排队或租约过期的同步任务，并签发新的执行 token。"""
         async with self.engine.begin() as conn:
             row = (
                 (
@@ -289,6 +306,7 @@ class SourceStore:
             return dict(row) | {"token": token}
 
     async def sync_heartbeat(self, run):
+        """仅允许仍持有有效租约的任务续期。"""
         from ai_assistant.knowledge import LeaseLost
 
         async with self.engine.begin() as conn:
@@ -301,6 +319,7 @@ class SourceStore:
                 raise LeaseLost("同步任务执行权已过期。")
 
     async def record_scan_errors(self, run, errors):
+        """在租约有效时保存扫描错误快照。"""
         async with self.engine.begin() as conn:
             await conn.execute(text("""UPDATE rag_sync_runs SET errors=CAST(:errors AS jsonb)
                 WHERE id=:id AND token=:token AND state='running'
@@ -308,6 +327,7 @@ class SourceStore:
                 dict(id=run['id'], token=run['token'], errors=packed(errors)))
 
     async def settle_scan(self, run, jobs, errors):
+        """扫描结束后保存关联索引任务并进入 indexing 状态。"""
         async with self.engine.begin() as conn:
             await conn.execute(
                 text("""UPDATE rag_sync_runs SET state='indexing',jobs=CASE WHEN jobs='[]'::jsonb THEN CAST(:jobs AS jsonb) ELSE jobs END,
@@ -322,6 +342,7 @@ class SourceStore:
             )
 
     async def finish_syncs(self):
+        """汇总索引结果或截止时间，将同步任务推进到 ready。"""
         async with self.engine.begin() as conn:
             rows = (
                 (
@@ -336,6 +357,7 @@ class SourceStore:
                 .all()
             )
             for row in rows:
+                # 分别累计仍在处理的任务、可用构建和覆盖错误。
                 builds, errors, pending = [], list(row["errors"]), False
                 for item in row["jobs"]:
                     job = (
@@ -376,6 +398,8 @@ class SourceStore:
                     continue
                 if expired:
                     errors.append({"source": "sync", "reason": "deadline_exceeded"})
+
+                # ready 表示汇总结束，不代表每个文档都已可检索。
                 await conn.execute(
                     text("""UPDATE rag_sync_runs SET state='ready',builds=CAST(:b AS jsonb),
                     errors=CAST(:e AS jsonb),finished_at=now(),lease_until=NULL WHERE id=:id"""),
@@ -387,6 +411,7 @@ class SourceStore:
                 )
 
     async def document_list(self):
+        """列出文档、期望版本、索引状态和所属来源。"""
         async with self.engine.connect() as conn:
             return [
                 dict(r)
@@ -408,6 +433,8 @@ class SourceStore:
         from ai_assistant.knowledge.metadata import validate_filters
 
         filters = validate_filters(filters)
+
+        # 冻结构建仍需复核文档删除、来源状态和用户筛选范围。
         clauses = [
             "d.kb=:kb",
             "NOT d.deleted",
@@ -450,6 +477,7 @@ class SourceStore:
             )
 
     async def cached_revision(self, uri, revision):
+        """查找指定远端版本关联的既有快照摘要和路径。"""
         async with self.engine.connect() as conn:
             row = (
                 (

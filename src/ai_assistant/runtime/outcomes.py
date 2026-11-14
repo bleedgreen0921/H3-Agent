@@ -7,6 +7,7 @@ SUCCESS = frozenset({'saved', 'unchanged', 'found', 'deleted', 'not_found', 'suc
 
 @dataclass(frozen=True)
 class TurnResult:
+    """统一轮次状态、效果明细、执行诊断和正文定位。"""
     status: str
     items: list[dict] = field(default_factory=list)
 
@@ -28,6 +29,7 @@ class TurnResult:
 
 
 def turn_result(state, operations=(), *, interrupted=None, executed_tool_calls=None):
+    """结合本轮真实工具事实和操作回执，计算整体终态。"""
     items = list(state.get('effect_facts') or [])
     confirmed = any(item.get('kind') == 'local_file' and item.get('status') == 'saved' for item in items)
     from ai_assistant.runtime.effects import operation_receipt
@@ -35,6 +37,8 @@ def turn_result(state, operations=(), *, interrupted=None, executed_tool_calls=N
         receipt = operation_receipt(operation)
         confirmed |= receipt.accepted
         items.append(receipt.to_item())
+
+    # 只汇总最近用户输入之后实际执行的工具结果。
     from langchain_core.messages import HumanMessage, ToolMessage
     messages = []
     for message in reversed(state.get('messages', [])):
@@ -92,6 +96,8 @@ def turn_result(state, operations=(), *, interrupted=None, executed_tool_calls=N
     execution = state.get('execution')
     unknown = any(value in {'unknown', 'pending', 'sending'} for value in bad)
     execution_status = (execution or {}).get('status')
+
+    # 已确认效果与失败、取消或未知并存时使用 partial。
     if interrupted == 'cancelled' or execution_status == 'cancelled':
         status = 'partial' if confirmed else 'cancelled'
     elif unknown or interrupted == 'unknown' or execution_status == 'unknown':

@@ -8,6 +8,7 @@ from ai_assistant.storage.knowledge import packed, transaction
 async def register_submission(store, uri, descriptor, *, restore=True, conn=None):
     """显式提交和渠道 add 共用；恢复必须请求新一轮扫描，不能复用已扫描的批次。"""
     async with transaction(store.engine, conn) as conn:
+        # 来源登记和同步请求共用事务；提交不等于已经可检索。
         source = await store.add_submission(uri, descriptor, restore=restore, conn=conn)
         if source is None:
             return {'status': 'removed', 'message': '已移除，需显式添加。'}
@@ -20,6 +21,7 @@ async def register_submission(store, uri, descriptor, *, restore=True, conn=None
 
 
 async def sources(config, store):
+    """合并数据库来源和配置来源，返回按 ID 排序的展示结果。"""
     rows = {row['id']: row for row in await store.source_list()}
     # 配置来源尚未同步时也可展示，查询不登记来源。
     for name, row in rows.items():
@@ -32,6 +34,7 @@ async def sources(config, store):
 
 
 async def status(store, ident):
+    """先查询同步任务，再查询索引任务，并补充同步覆盖信息。"""
     row = await store.sync_status(ident)
     if row is not None:
         counts = await store.sync_status_counts(ident)
@@ -47,6 +50,7 @@ async def status(store, ident):
 
 
 async def receipt(store, principal, input_id, *, conn=None, action=None, target=None):
+    """读取管理回执；同一输入不能改成其他动作或目标。"""
     row = await store.management_receipt(principal, input_id, conn=conn)
     if row is not None and action is not None and (row['action'] != action or row['target'] != target):
         raise KnowledgeError('同一输入已有不同的登记目标，拒绝覆盖或重放。')
@@ -56,11 +60,14 @@ async def receipt(store, principal, input_id, *, conn=None, action=None, target=
 async def apply(store, principal, input_id, action, target=None, *, submission=None):
     """解析在外，登记/恢复/同步/移除和回执在同一事务内；重复输入只读回执。"""
     async with store.engine.begin() as conn:
+        # 以知识库、主体和输入为粒度加锁，重复请求复用已有回执。
         key = packed([store.config.knowledge_base_id, principal, input_id])
         await store.management_lock(conn, key)
         previous = await receipt(store, principal, input_id, conn=conn, action=action, target=target)
         if previous is not None:
             return previous
+
+        # 业务变更与回执写入同一事务，避免恢复时盲目重复操作。
         if action == 'add':
             uri, descriptor = submission
             result = await register_submission(store, uri, descriptor, conn=conn)
@@ -87,6 +94,7 @@ def sync_facts(row):
 
 
 def progress_text(result):
+    """将同步状态计数和耗时整理为用户可读文本。"""
     p = result.get('progress', {})
     label = '已发现' if result['state'] in ('queued', 'running') else '总文档数'
     message = (f"{label} {result.get('total', 0)}，已成功 {p.get('succeeded', 0)}，"

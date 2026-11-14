@@ -16,11 +16,15 @@ BASE = 'https://open.feishu.cn'
 
 
 class TokenStore:
+    """本地保存和刷新飞书主人用户令牌，不向模型暴露凭据。"""
+
     def __init__(self, config, workspace):
         if config.mcp is None or config.integrations.feishu is None:
             raise ConfigError('Configure [mcp] and [integrations.feishu] first.')
         self.settings = config.integrations.feishu
         self.root = Path(config.mcp.state_dir).expanduser().absolute()
+
+        # 授权状态必须位于工作区外，并限制目录所有者与访问权限。
         if self.root.resolve().is_relative_to(workspace.resolve()):
             raise ConfigError('OAuth state directory must be outside the workspace.')
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -32,6 +36,7 @@ class TokenStore:
 
     @contextmanager
     def lock(self):
+        """跨进程串行化令牌读取、更新和刷新。"""
         fd = os.open(self.root / 'oauth.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
             # Blocking flock runs only in the worker thread, including HTTP refresh.
@@ -41,6 +46,7 @@ class TokenStore:
             os.close(fd)
 
     def read(self):
+        """拒绝符号链接和权限过宽的令牌文件。"""
         try:
             fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
         except FileNotFoundError:
@@ -51,6 +57,7 @@ class TokenStore:
             return json.load(stream)
 
     def save(self, value):
+        """写入私有临时文件并原子替换令牌文件。"""
         path = self.root / ('.token-' + secrets.token_hex(16))
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
@@ -61,6 +68,7 @@ class TokenStore:
             path.unlink(missing_ok=True)
 
     def request_token(self, grant):
+        """请求或刷新令牌，并验证授权账号与配置的主人一致。"""
         payload = dict(client_id=self.settings.app_id,
             client_secret=self.settings.app_secret.get_secret_value(), **grant)
         with httpx.Client(timeout=30, trust_env=False) as client:
@@ -99,6 +107,7 @@ class TokenStore:
                     status='ready')
 
     def _access(self):
+        """在进程锁内返回有效令牌，必要时执行一次刷新。"""
         with self.lock():
             data = self.read()
             if data.get('status') != 'ready':
@@ -119,6 +128,7 @@ class TokenStore:
             return updated['access_token']
 
     async def access(self):
+        """在线程中运行阻塞刷新；取消时等待线程结束后再传播取消。"""
         async with self.async_lock:
             worker = asyncio.create_task(asyncio.to_thread(self._access))
             try:
@@ -128,6 +138,7 @@ class TokenStore:
                 raise
 
     async def login(self):
+        """启动本地回调，校验 state 并用授权码换取令牌。"""
         url = urlsplit(self.settings.redirect_uri)
         if url.scheme != 'http' or url.hostname not in {'127.0.0.1', 'localhost'} or not url.port:
             raise ConfigError('OAuth callback must use an explicit loopback HTTP port.')
@@ -135,6 +146,7 @@ class TokenStore:
         future = asyncio.get_running_loop().create_future()
 
         async def callback(reader, writer):
+            # 只接受指定回调路径、匹配的随机 state 和单个授权码。
             try:
                 first = await asyncio.wait_for(reader.readline(), 5)
                 parts = first.decode('ascii').split(' ')
@@ -156,6 +168,8 @@ class TokenStore:
                 client_id=self.settings.app_id, redirect_uri=self.settings.redirect_uri,
                 response_type='code', scope=' '.join(self.settings.scopes), state=state)), flush=True)
             code = await asyncio.wait_for(future, 180)
+
+        # 本地回调结束后在线程中换取并保存令牌，避免阻塞事件循环。
         def exchange():
             with self.lock():
                 data = self.request_token(dict(grant_type='authorization_code', code=code,
@@ -164,6 +178,7 @@ class TokenStore:
         await asyncio.to_thread(exchange)
 
     def status(self):
+        """返回本地授权状态摘要，不返回令牌值。"""
         with self.lock():
             try:
                 data = self.read()
@@ -172,6 +187,7 @@ class TokenStore:
             return {key: data.get(key) for key in ['status', 'owner_open_id', 'expires_at', 'refresh_expires_at', 'scope']}
 
     def logout(self):
+        """删除本地令牌；远端撤销需在飞书完成。"""
         with self.lock():
             self.path.unlink(missing_ok=True)
         return {'logged_in': False, 'remote_revocation': 'Revoke application authorization in Feishu to invalidate remote tokens.'}

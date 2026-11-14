@@ -14,6 +14,7 @@ from langchain_core.documents import Document
 from ai_assistant.knowledge import KnowledgeError
 from ai_assistant.workspace.files import ReadOnlyWorkspace, WorkspaceError
 
+# 显式支持提交的本地文件扩展名及飞书只读接口地址。
 EXTENSIONS = {".txt", ".md", ".pdf", ".docx", ".xlsx", ".pptx", ".csv"}
 BASE = "https://open.feishu.cn/open-apis"
 
@@ -25,10 +26,12 @@ class SourceFailure(KnowledgeError):
 
 
 def cloud_uri(app, identity, kind, token):
+    """构造包含应用和身份的飞书来源标识。"""
     return f"feishu://{app}/{identity}/{kind}/{token}"
 
 
 def cloud_reference(config, value, identity="user"):
+    """校验受支持的飞书 HTTPS 链接并提取资源类型和 token。"""
     url = urlsplit(value)
     if (
         url.scheme != "https"
@@ -49,6 +52,7 @@ def cloud_reference(config, value, identity="user"):
 
 
 def local_descriptor(path, root):
+    """构造本地文件来源描述。"""
     path, root = Path(path), Path(root)
     return {
         "kind": "local",
@@ -59,6 +63,7 @@ def local_descriptor(path, root):
 
 
 def local_inventory(config, source):
+    """在显式来源目录内枚举允许的文件，排除链接和受保护路径。"""
     base = config.config_path.parent if config.config_path else Path.cwd()
     root = Path(source["path"]).expanduser()
     root = (root if root.is_absolute() else base / root).absolute()
@@ -79,6 +84,7 @@ def local_inventory(config, source):
     def fail(error):
         raise SourceFailure("local_enumeration_failed")
 
+    # 不跟随目录符号链接，也不扫描隐藏目录和知识库内部资料目录。
     for directory, dirs, names in os.walk(root, followlinks=False, onerror=fail):
         dirs[:] = [
             d
@@ -129,6 +135,7 @@ class FeishuReader:
             self.api = FeishuAPI(config.integrations.feishu, client)
 
     async def request(self, method, path, **kwargs):
+        """使用选定身份请求飞书，转换常见错误并有限重试限流。"""
         for attempt in range(3):
             token = (
                 await self.tokens.access() if self.tokens else await self.api.access()
@@ -162,6 +169,7 @@ class FeishuReader:
         raise SourceFailure("cloud_rate_limited")
 
     async def pages(self, path, params=None, method="GET", body=None):
+        """读取全部分页，并拒绝缺失或重复的分页游标。"""
         params = dict(params or {})
         result = []
         seen = set()
@@ -182,6 +190,7 @@ class FeishuReader:
             params["page_token"] = token
 
     async def resolve(self, descriptor):
+        """解析 Wiki 到实际对象，并尽力补充标题和链接。"""
         result = dict(descriptor)
         if result["kind"] == "wiki":
             node = (
@@ -217,6 +226,7 @@ class FeishuReader:
         return result
 
     async def inventory(self, source):
+        """递归枚举显式配置的知识空间或文件夹，避免重复访问节点。"""
         result = []
         visited = set()
 
@@ -277,6 +287,7 @@ class FeishuReader:
         return result
 
     async def revision(self, d):
+        """获取可用的文档版本；其他类型不假定存在可靠版本。"""
         token = quote(d["token"], safe="")
         if d["kind"] == "docx":
             doc = (await self.request("GET", f"/docx/v1/documents/{token}"))["document"]
@@ -285,6 +296,7 @@ class FeishuReader:
         return None, d.get("name", "")
 
     async def read(self, d):
+        """按飞书资源类型读取正文并生成带位置的 Document。"""
         token = quote(d["token"], safe="")
         kind = d["kind"]
         docs = []

@@ -15,12 +15,15 @@ def create_model(config: AppConfig, name: str | None = None) -> BaseChatModel:
     Provider packages control their own non-key defaults and client lifecycle.
     Other providers may use native SDK authentication when api_key is omitted.
     """
+    # 只创建本次选定的模型配置，不改变其他方案。
     selected = config.default_model if name is None else name
     if selected not in config.models:
         raise ValueError("Unknown model profile.")
     profile = config.models[selected]
     options = dict(profile.parameters)
     options.setdefault("timeout", 180)
+
+    # DeepSeek 统一关闭思考；Responses 模式要求完整历史回放。
     if is_deepseek(profile.provider, profile.model):
         try:
             validate_deepseek_parameters(options)
@@ -44,6 +47,8 @@ def create_model(config: AppConfig, name: str | None = None) -> BaseChatModel:
             body["thinking"] = {"type": "disabled"}
             options["use_responses_api"] = False
         options["extra_body"] = body
+
+    # 将兼容服务映射到原生集成及默认地址；显式配置优先。
     provider = profile.provider
     preset = PROVIDER_PRESETS.get(provider)
     base_url = profile.base_url
@@ -62,6 +67,8 @@ def create_model(config: AppConfig, name: str | None = None) -> BaseChatModel:
         options["base_url"] = base_url
     if profile.api_key is not None:
         options["api_key"] = profile.api_key.get_secret_value()
+
+    # 使用 LangChain 原生工厂，错误只输出固定摘要，避免暴露构造参数。
     try:
         return init_chat_model(profile.model, model_provider=provider, **options)
     except ImportError:

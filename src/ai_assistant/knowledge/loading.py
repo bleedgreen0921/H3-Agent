@@ -10,6 +10,7 @@ from ai_assistant.knowledge.diagnostics import MAX_BYTES, bounded
 
 
 def require_content(documents, code, message):
+    """过滤空白文档；没有有效正文时返回可诊断的入库错误。"""
     docs = list(documents)
     valid = [doc for doc in docs if doc.page_content.strip()]
     if not valid:
@@ -19,6 +20,7 @@ def require_content(documents, code, message):
 
 
 
+# 子进程错误码对应的用户可读摘要，详细信息单独进入诊断。
 MESSAGES = {
     'parser_dependency_error': '本地解析依赖缺失或不兼容，请查看诊断并安装对应依赖。',
     'parser_resource_missing': '本地解析资源缺失，请准备 NLTK、OCR 或其他所需离线资源。',
@@ -44,6 +46,7 @@ class ParserNetworkBlocked(RuntimeError):
 
 
 def classify_parser_error(error):
+    """将常见解析异常归类，其他异常统一视为解析失败。"""
     if isinstance(error, ParserResourceMissing) or type(error) is LookupError:
         return 'parser_resource_missing'
     if isinstance(error, ParserNetworkBlocked):
@@ -54,6 +57,7 @@ def classify_parser_error(error):
 
 
 def parser_diagnostic(detail, stderr):
+    """限制异常详情与标准错误的总长度，避免诊断无限增长。"""
     # Keep the exception tail even when a parser floods stderr.
     detail = bounded(detail, MAX_BYTES // 2)
     prefix = detail + '\nstderr:\n'
@@ -61,6 +65,7 @@ def parser_diagnostic(detail, stderr):
 
 
 async def _stderr_tail(stream):
+    """并发读取并保留受限长度的标准错误尾部。"""
     tail = bytearray()
     truncated = False
     while data := await stream.read(8192):
@@ -73,6 +78,7 @@ async def _stderr_tail(stream):
 
 
 async def _stop_parser(process):
+    """终止解析进程组并等待子进程退出。"""
     import signal
     # Kill the group even if its leader exited, so descendants cannot hold stderr open.
     try:
@@ -83,6 +89,7 @@ async def _stop_parser(process):
 
 
 async def parse_snapshot(path: Path, *, timeout: float, attachment=False):
+    """启动解析子进程并读取结果；超时或取消时等待进程组清理。"""
     # 独立解释器隔离解析资源，并允许超时终止。
     with tempfile.TemporaryDirectory(prefix='rag-parse-') as directory:
         output = Path(directory) / 'documents.json'
@@ -92,6 +99,8 @@ async def parse_snapshot(path: Path, *, timeout: float, attachment=False):
             __import__('sys').executable, '-m', 'ai_assistant.knowledge.loading', str(path), str(output), *(['attachment'] if attachment else []),
             env=env, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
             start_new_session=True)
+
+        # 同时消费 stderr，避免管道写满造成子进程阻塞。
         stderr_task = asyncio.create_task(_stderr_tail(process.stderr))
         try:
             try:
@@ -113,6 +122,8 @@ async def parse_snapshot(path: Path, *, timeout: float, attachment=False):
                 except (OSError, ValueError, AttributeError):
                     pass
                 raise IngestionError(error_code, MESSAGES[error_code], parser_diagnostic(detail, stderr))
+
+            # 只接受约定的结果信封，再恢复为 LangChain Document。
             try:
                 payload = json.loads(output.read_text(encoding='utf-8'))
                 if payload['status'] != 'ok' or not isinstance(payload['documents'], list):
@@ -128,6 +139,7 @@ async def parse_snapshot(path: Path, *, timeout: float, attachment=False):
 
 
 def _run_local_loader(path):
+    """在子进程中按扩展名选择本地加载器，并保留可定位信息。"""
     # 原生文本/PDF Loader 同样运行在可终止的解析子进程中。
     suffix = Path(path).suffix.lower()
     if suffix in ('.txt', '.md'):
@@ -140,6 +152,8 @@ def _run_local_loader(path):
             if isinstance(doc.metadata.get('page'), int):
                 doc.metadata['page_number'] = doc.metadata['page'] + 1
         return docs
+
+    # CSV 每条非空记录单独生成文档，保留记录序号。
     if suffix == '.csv':
         import csv
         from langchain_core.documents import Document
@@ -149,6 +163,7 @@ def _run_local_loader(path):
             return [Document(page_content=' | '.join(
                 f'{header[i] if i<len(header) else i+1}: {value}' for i,value in enumerate(row)),
                 metadata={'csv_record':index}) for index,row in enumerate(rows,1) if any(v.strip() for v in row)]
+    # XLSX 同时读取公式和缓存值，按行保存工作表及单元格范围。
     if suffix == '.xlsx':
         from openpyxl import load_workbook
         from openpyxl.utils import get_column_letter
@@ -177,6 +192,8 @@ def _run_local_loader(path):
             return docs
         finally:
             book.close(); values.close()
+
+    # 其他格式使用本地 Unstructured；阻止此路径主动联网和下载资源。
     import socket
     def deny_network(*args, **kwargs):
         raise ParserNetworkBlocked('Parser network access is disabled')
@@ -195,9 +212,11 @@ def _run_local_loader(path):
 
 
 def _main():
+    """子进程入口：解析后将成功或失败信封写入结果文件。"""
     import sys
     import traceback
     try:
+        # 附件解析采用单独路径；PDF 保留每页文本及提取缺口。
         if len(sys.argv) > 3 and sys.argv[3] == 'attachment' and Path(sys.argv[1]).suffix != '.pdf':
             from ai_assistant.tools.attachment_parsing import parse_text_attachment
             docs = parse_text_attachment(sys.argv[1])
@@ -220,6 +239,8 @@ def _main():
                 raise IngestionError('pdf_invalid', MESSAGES['pdf_invalid']) from None
         else:
             docs = _run_local_loader(sys.argv[1])
+
+        # 使用结构化结果和退出码供父进程判断，不输出文档正文到日志。
         payload = dict(status='ok', documents=[
             dict(page_content=d.page_content, metadata=d.metadata) for d in docs])
         code = 0

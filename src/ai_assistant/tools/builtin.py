@@ -16,6 +16,7 @@ from ai_assistant.cancellation import _drain_worker
 
 
 async def _file_call(runtime, method, *args):
+    """在线程中调用工作区只读方法，并生成模型文本和完整结果 artifact。"""
     try:
         workspace = runtime.context.workspace
         if method == 'read_text':
@@ -26,6 +27,8 @@ async def _file_call(runtime, method, *args):
                 workspace.read_text, *args, char_budget=budget))
         else:
             worker = asyncio.create_task(asyncio.to_thread(getattr(workspace, method), *args))
+
+        # 线程无法直接中断；外层取消时等待文件读取清理结束。
         try:
             result = await asyncio.shield(worker)
         except asyncio.CancelledError:
@@ -33,6 +36,8 @@ async def _file_call(runtime, method, *args):
             raise
     except WorkspaceError as exc:
         raise ToolException(str(exc)) from None
+
+    # 将不同只读操作的结构化结果整理为可读文本。
     if method == 'read_text':
         content = f"文件：{result['path']}\nSHA-256：{result['sha256']}\n{result['content']}"
     elif method == 'list_directory':
@@ -42,6 +47,8 @@ async def _file_call(runtime, method, *args):
                             + (f":{item['line_start_char']}" if item['line_start_char'] else '')
                             + f": {item['text']}" for item in result['matches']) or '没有匹配结果。'
         content += f"\n跳过：{result['skipped']}"
+
+    # artifact 保存完整工具文本，模型可见正文按配置预算截断。
     result['full_tool_content'] = content
     result['truncated'] = result['truncated'] or len(content) > workspace.result_chars
     content = content[:workspace.result_chars]
@@ -80,6 +87,7 @@ async def search_text(query: Annotated[str, Field(min_length=1, max_length=1000)
 
 
 async def _web_call(runtime, method, *args):
+    """委托已配置的联网服务，并将预期错误转换为工具结果。"""
     if runtime.context.web is None:
         raise ToolException('联网工具尚未配置。')
     try:
@@ -87,6 +95,7 @@ async def _web_call(runtime, method, *args):
     except WebError as exc:
         from ai_assistant.tools.web import WebLimitError
         if isinstance(exc, WebLimitError):
+            # 配额耗尽是停止事实，避免模型继续反复调用。
             return str(exc), {'execution_fact': {'version': 1, 'nature': 'read',
                 'control': 'stop', 'error_category': 'quota'}}
         raise ToolException(str(exc)) from None
@@ -109,16 +118,20 @@ async def web_fetch(url: Annotated[str, Field(min_length=1, max_length=8192)],
 
 
 class TextEdit(BaseModel):
+    """一次精确文本替换的原文和目标文本。"""
     model_config = ConfigDict(extra='forbid')
     old_text: str = Field(min_length=1, max_length=1048576)
     new_text: str = Field(max_length=1048576)
 
 
 async def _write_call(runtime, method, *args):
+    """串行执行本地写入，保留取消或发布异常时的效果事实。"""
     context = runtime.context
     if context.writes is None:
         raise ToolException('文件写入工具尚未启用。')
     effect_id = uuid4().hex
+
+    # 同一上下文的写操作互斥；线程运行期间取消也要等待结果。
     async with context.operation_lock:
         worker = asyncio.create_task(asyncio.to_thread(getattr(context.writes, method), *args))
         try:
@@ -139,12 +152,15 @@ async def _write_call(runtime, method, *args):
         except WorkspaceError as exc:
             from ai_assistant.workspace.writes import PublishedWorkspaceError
             if isinstance(exc, PublishedWorkspaceError):
+                # 文件已发布但后续状态未知时返回效果事实，停止继续操作。
                 from ai_assistant.observability import event
                 event('file.published', effect_id=effect_id, tool=method, status='unknown')
                 return str(exc), {**exc.receipt, 'effect_id': effect_id,
                         'execution_fact': {'version': 1, 'nature': 'effect',
                         'published': True, 'control': 'stop', 'error_category': 'unknown'}}
             raise ToolException(str(exc)) from None
+
+    # 正常写入返回路径、摘要及创建或差异信息，附带可追踪回执。
     content = f"文件：{result['path']}\nSHA-256：{result['sha256']}"
     if method == 'create_file':
         content += f"\n已创建，{result['bytes']} 字节。"
@@ -176,10 +192,14 @@ async def edit_file(path: str, edits: Annotated[list[TextEdit], Field(min_length
 def create_builtin_tools(*, include_web: bool = False, include_write: bool = False) -> list[BaseTool]:
     """Return fresh native tool instances with safe expected-error handling."""
     from ai_assistant.tools.results import read_tool_result
+
+    # 默认只提供工作区只读工具；联网和写入必须显式启用。
     selected = [list_directory, read_text, search_text, read_tool_result]
     if include_web:
         selected += [web_search, web_fetch]
     if include_write:
         selected += [create_file, edit_file]
+
+    # 复制工具实例并启用预期工具错误处理，避免修改共享定义。
     result = [item.model_copy(update={'handle_tool_error': True}) for item in selected]
     return result

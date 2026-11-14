@@ -17,6 +17,7 @@ from ai_assistant.integrations.tool_policy import redact_text
 
 
 class ObservabilityConfig(BaseModel):
+    """显式配置观测开关、内容采集和 LangSmith 连接参数。"""
     model_config = ConfigDict(extra="forbid", frozen=True)
     enabled: bool = False
     capture_content: bool = False
@@ -27,8 +28,11 @@ class ObservabilityConfig(BaseModel):
     flush_timeout_seconds: float = Field(default=5, gt=0, le=30)
 
 
+# 使用上下文变量隔离异步任务的关联字段和当前观测服务。
 _context = ContextVar("assistant_observation_context", default={})
 _service = ContextVar("assistant_observation_service", default=None)
+
+# 事件和上传元数据仅接受列出的标识、状态及指标字段。
 _ALLOWED = frozenset({"input_id", "session_id", "thread_id", "execution_thread_id",
     "operation_id", "outbox_id", "attempt", "part", "status", "phase", "category",
     "elapsed_seconds", "queue_wait_seconds", "preparation_seconds", "agent_seconds",
@@ -63,6 +67,7 @@ def csv_ids(values, limit=2000):
 
 @contextmanager
 def bind(**values):
+    """在当前作用域合并允许的标量字段，退出时恢复原上下文。"""
     token = _context.set({**_context.get(), **{k: str(v) if k.endswith("_id") and v is not None else v
                                             for k, v in values.items() if k in _ALLOWED and isinstance(v, (str, int, float, bool, type(None)))}})
     try:
@@ -94,6 +99,7 @@ def event(name, **values):
 
 
 class JsonFormatter(logging.Formatter):
+    """把标准日志事件和当前关联字段格式化为 JSON。"""
     def format(self, record):
         # 不格式化异常堆栈；业务日志仅使用安全摘要。
         return json.dumps({"time": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
@@ -102,6 +108,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging():
+    """为应用日志安装 JSON 格式并阻止重复向上级传播。"""
     logger = logging.getLogger("ai_assistant")
     logger.setLevel(logging.INFO)
     if not logger.handlers:
@@ -112,6 +119,7 @@ def configure_logging():
 
 
 def _sanitize(value, secrets=()):
+    """递归替换敏感键、已知凭据和部分常见账号文本模式。"""
     if isinstance(value, dict):
         return {str(k): ("[redacted]" if re.search(r"secret|password|authorization|api.key|access.token|refresh.token", str(k), re.I)
                         else _sanitize(v, secrets)) for k, v in value.items()}
@@ -131,6 +139,7 @@ def safe_payload(payload, capture_content=False, secrets=()):
     result = {k: v for k, v in payload.items() if k in {
         "id", "trace_id", "parent_run_id", "dotted_order", "name", "run_type",
         "start_time", "end_time", "session_name", "session_id", "reference_example_id"}}
+    # 模型提供方的用量可能嵌套在不同层级，递归查找常见字段。
     def usage_counts(value):
         if isinstance(value, dict):
             usage = value.get("usage_metadata") or value.get("token_usage")
@@ -150,6 +159,7 @@ def safe_payload(payload, capture_content=False, secrets=()):
     outputs = payload.get("outputs")
     is_model = payload.get("run_type") == "llm" or (isinstance(outputs, dict) and "generations" in outputs)
     if is_model:
+        # 只保留非负整数 token 计数，不把缺失用量当作零。
         usage = usage_counts(outputs)
         for target, names in {"prompt_tokens": ("input_tokens", "prompt_tokens"),
                               "completion_tokens": ("output_tokens", "completion_tokens"),
@@ -166,6 +176,8 @@ def safe_payload(payload, capture_content=False, secrets=()):
     # 错误可能含工具正文和凭据，始终只保留发生错误这一事实。
     if payload.get("error"):
         result["error"] = "execution_error"
+
+    # 默认不上传输入输出正文；显式启用时仍执行已知规则脱敏。
     if capture_content:
         for key in ("inputs", "outputs"):
             if key in payload:
@@ -178,10 +190,13 @@ def safe_payload(payload, capture_content=False, secrets=()):
 
 
 def current_service():
+    """返回当前异步上下文中的观测服务。"""
     return _service.get()
 
 
 class ObservationService:
+    """拥有本作用域的可选 LangSmith 客户端及追踪上下文。"""
+
     def __init__(self, settings, secrets=()):
         self.settings = settings
         self.client = None
@@ -191,11 +206,13 @@ class ObservationService:
         self._tracing = None
 
     def warning(self, error):
+        # 同一服务实例的上传问题只记录一次安全错误类别。
         if not self._warned:
             self._warned = True
             event("trace.upload_failed", category=type(error).__name__)
 
     async def __aenter__(self):
+        # 默认关闭；启用时必须从指定环境变量获取 API Key。
         if self.settings.enabled:
             from ai_assistant.config import ConfigError
             key = os.environ.get(self.settings.api_key_env)
@@ -221,18 +238,22 @@ class ObservationService:
                         owner.warning(error)
 
                 def _insert_runtime_env(self, runs):
+                    # 不附带 SDK 自动采集的运行时环境信息。
                     return None
 
             self.client = SafeClient(api_key=key, api_url=self.settings.endpoint,
                 workspace_id=self.settings.workspace_id, timeout_ms=2000,
                 omit_traced_runtime_info=True, tracing_error_callback=self.warning, tracing_sampling_rate=1.0)
         from langsmith import tracing_context
+
+        # 先关闭环境变量可能隐式启用的追踪，再由显式 span 控制上传。
         self._tracing = tracing_context(enabled=False)
         self._tracing.__enter__()
         self._token = _service.set(self)
         return self
 
     async def __aexit__(self, *exc):
+        # 恢复上下文并限时关闭客户端；上传失败不替代业务异常。
         _service.reset(self._token)
         self._tracing.__exit__(None, None, None)
         if self.client:
@@ -253,6 +274,8 @@ def span(name, **values):
         if metadata.get("session_id"):
             metadata["thread_id"] = metadata["session_id"]
         enabled = bool(service and service.client)
+
+        # 本地事件始终记录；仅显式启用时创建 LangSmith run。
         with tracing_context(enabled=enabled, client=service.client if enabled else None,
                              project_name=service.settings.project if enabled else None,
                              metadata=metadata):
@@ -274,6 +297,7 @@ def span(name, **values):
                 category = type(error).__name__
                 raise
             finally:
+                # 不记录原始异常正文，只记录错误类别和执行耗时。
                 event(name + ".end", elapsed_seconds=monotonic() - started,
                       execution_status="failed" if category else "complete", category=category, **identity)
                 if run is not None:
@@ -286,6 +310,7 @@ def span(name, **values):
 
 
 def observed(name, identity=None, *, root=False):
+    """为异步函数创建观测 span；root 可切断继承的父 trace。"""
     def decorate(fn):
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
@@ -303,12 +328,14 @@ def observed(name, identity=None, *, root=False):
 
 
 def add_commands(commands):
+    """注册显式观测存储初始化和连接检查命令。"""
     actions = commands.add_parser("observability", help="观测存储初始化与模拟连接检查").add_subparsers(dest="action", required=True)
     for name in ("init", "check"):
         actions.add_parser(name).add_argument("--config", default="assistant.toml")
 
 
 async def execute(config, args):
+    """初始化关联字段，或上传并读取一条模拟 trace 验证连接。"""
     from ai_assistant.config import ConfigError
     if args.action == "init":
         if config.sessions is None:
@@ -322,6 +349,7 @@ async def execute(config, args):
     if not config.observability.enabled:
         raise ConfigError("请先启用 observability。")
     try:
+        # 模拟检查不调用模型或飞书，但会连接配置的观测服务。
         async with ObservationService(config.observability, configuration_secrets(config)) as service:
             from langsmith import trace, tracing_context
             identity = uuid4()
@@ -344,6 +372,7 @@ async def execute(config, args):
         return 2
 
 def configuration_secrets(config):
+    """收集配置中的 SecretStr 及 URL 密码，供上传边界替换。"""
     from pydantic import BaseModel, SecretStr
     def collect(value):
         if isinstance(value, SecretStr):

@@ -11,6 +11,7 @@ LABELS = {'partial': '部分完成', 'failed': '未完成', 'unknown': '状态�
 
 @dataclass(frozen=True)
 class Presentation:
+    """已保存结果的渠道展示视图，不重新推断业务状态。"""
     state: str
     label: str
     body: str
@@ -39,6 +40,7 @@ def project(result, body):
 
 
 def saved_body(result, messages):
+    """按持久结果中的消息 ID 定位正文；找不到时返回 None。"""
     locator = result.get('body_locator') or {}
     if not locator.get('message_id'):
         return None

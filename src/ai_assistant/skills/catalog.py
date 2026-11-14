@@ -14,6 +14,7 @@ class SkillError(ValueError):
 
 
 def parse_skill(path):
+    """解析 SKILL.md 的 YAML 头部和正文，校验元数据结构。"""
     try:
         import yaml
     except ImportError:
@@ -22,6 +23,7 @@ def parse_skill(path):
     class Loader(yaml.SafeLoader):
         pass
 
+    # 拒绝重复或非字符串键，避免配置解释出现歧义。
     def mapping(loader, node, deep=False):
         result = {}
         for key, value in node.value:
@@ -33,6 +35,7 @@ def parse_skill(path):
 
     Loader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
     try:
+        # 限制文件大小，并要求用 --- 明确界定 YAML 头部。
         text = Path(path).read_text(encoding='utf-8')
         if len(text.encode()) > 1048576:
             raise SkillError('SKILL.md exceeds 1 MiB.')
@@ -47,6 +50,8 @@ def parse_skill(path):
         raise SkillError('Invalid YAML structure or unsupported YAML tag.') from None
     if not isinstance(data, dict):
         raise SkillError('Frontmatter must be a mapping.')
+
+    # 对节点数、嵌套深度、递归引用和支持的数据类型设上限。
     remaining = 10000
     def validate_structure(value, ancestors=frozenset(), depth=0):
         nonlocal remaining
@@ -64,6 +69,8 @@ def parse_skill(path):
         elif not isinstance(value, (str, int, float, bool, type(None))):
             raise SkillError('YAML metadata must contain plain scalar values, lists or mappings.')
     validate_structure(data)
+
+    # 校验发现与展示所需的名称、描述和可选兼容性声明。
     name, description = data.get('name'), data.get('description')
     if not isinstance(name, str) or not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', name) or len(name) > 64:
         raise SkillError('name must be 1–64 lowercase letters, numbers and single hyphens.')
@@ -86,6 +93,8 @@ def copy_package(source, target, *, config_files=()):
         count += 1
         if count > 100000:
             raise SkillError('Package contains too many entries.')
+
+        # 解析后的路径必须留在包内，且不能包含受保护配置文件。
         resolved = path.resolve(strict=True)
         if not resolved.is_relative_to(source):
             raise SkillError('Package link escapes its root.')
@@ -94,6 +103,7 @@ def copy_package(source, target, *, config_files=()):
             raise SkillError('Skill package contains a protected configuration file.')
         mode = resolved.stat().st_mode
         if stat.S_ISDIR(mode):
+            # 递归遍历时检查祖先集合，避免内部链接形成循环。
             if resolved in ancestors:
                 raise SkillError('Cyclic package link.')
             destination.mkdir(parents=True, exist_ok=True)
@@ -107,6 +117,8 @@ def copy_package(source, target, *, config_files=()):
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(resolved, destination)
             destination.chmod(0o755 if mode & 0o111 else 0o644)
+
+            # 摘要覆盖相对路径、可执行位和文件内容，用于识别包版本。
             digest.update(destination.relative_to(target).as_posix().encode() + b'\0' + str(mode & 0o111).encode() + b'\0')
             with destination.open('rb') as stream:
                 for chunk in iter(lambda: stream.read(65536), b''):
@@ -119,6 +131,7 @@ def copy_package(source, target, *, config_files=()):
 
 
 def configured_roots(config):
+    """按配置入口解析显式 Skill 根目录，并按顺序去重。"""
     base = config.config_path.parent if config.config_path else Path.cwd()
     roots = config.skills.roots if config.skills else []
     return list(dict.fromkeys((base / Path(p).expanduser()).absolute() for p in roots))
@@ -126,6 +139,7 @@ def configured_roots(config):
 
 @dataclass(frozen=True)
 class Skill:
+    """记录发现或准备后的 Skill 元数据、正文、路径和摘要。"""
     id: str
     metadata: dict
     body: str
@@ -143,6 +157,8 @@ class Skill:
 
 
 class SkillCatalog:
+    """发现本地 Skills，按需准备会话生命周期内的包快照。"""
+
     def __init__(self, roots, *, disabled=(), config_files=()):
         self.config_files = tuple(config_files)
         self._temporary = TemporaryDirectory(prefix='assistant-skills-')
@@ -153,6 +169,7 @@ class SkillCatalog:
         self.diagnostics = []
         disabled = frozenset(disabled)
         try:
+            # 发现阶段只读取 SKILL.md；单个目录失败记入诊断并继续。
             for root in roots:
                 root = Path(root).absolute()
                 if not root.exists():
@@ -186,6 +203,8 @@ class SkillCatalog:
                         warnings = []
                         if metadata['name'] != entry.name:
                             warnings.append('Directory name differs from skill name.')
+
+                        # 这些声明仅供参考，不会因此授予工具、MCP 或 fork 权限。
                         for key in ('allowed-tools', 'context', 'agent', 'mcp', 'fork', 'model'):
                             if key in metadata:
                                 warnings.append(f'{key} is advisory; client/MCP/fork permissions are not implemented.')
@@ -198,9 +217,11 @@ class SkillCatalog:
             raise
 
     def close(self):
+        """释放目录持有的临时快照。"""
         self._temporary.cleanup()
 
     def resolve(self, identity):
+        """优先按完整 ID 查找；名称必须唯一才能用于解析。"""
         if identity in self.skills:
             return self.skills[identity]
         matches = [s for s in self.skills.values() if s.metadata['name'] == identity]
@@ -209,6 +230,7 @@ class SkillCatalog:
         return matches[0]
 
     def prepare(self, identity):
+        """按需复制并校验包，返回带摘要的会话快照。"""
         skill = self.resolve(identity)
         # 同一目录生命周期只准备一次；失败也不自动重试。
         with self._lock:
@@ -219,6 +241,8 @@ class SkillCatalog:
                 try:
                     digest = copy_package(skill.path, destination, config_files=self.config_files)
                     metadata, body = parse_skill(destination / 'SKILL.md')
+
+                    # 发现后元数据变化时拒绝沿用旧目录，要求重新打开会话。
                     if metadata != skill.metadata:
                         raise SkillError('Skill metadata changed; reopen the session.')
                     self._prepared[skill.id] = Skill(skill.id, metadata, body, digest, destination, skill.warnings)
@@ -230,6 +254,7 @@ class SkillCatalog:
             return self._prepared[skill.id]
 
     def search(self, query='', offset=0, limit=20):
+        """按名称和描述进行不区分大小写的子串搜索并分页。"""
         if offset < 0 or not 1 <= limit <= 100:
             raise SkillError('Invalid pagination.')
         matches = [dict(id=s.id, name=s.metadata['name'], description=s.metadata['description']) for s in self.skills.values()
@@ -237,6 +262,7 @@ class SkillCatalog:
         return dict(skills=matches[offset:offset + limit], total=len(matches), next_offset=offset + limit if offset + limit < len(matches) else None)
 
     def active(self, records):
+        """只恢复存在且包摘要与会话记录一致的激活 Skill。"""
         active = []
         for identity, digest in (records or {}).items():
             if digest is None or identity not in self.skills:
@@ -250,6 +276,7 @@ class SkillCatalog:
         return active
 
     def read(self, identity, resource, offset=0, limit=20000):
+        """从已准备的包中分页读取资源；二进制文件只返回标记。"""
         skill = self.prepare(identity)
         path = skill.path / resource
         if Path(resource).is_absolute() or not path.resolve().is_relative_to(skill.path) or not path.is_file():
@@ -260,6 +287,8 @@ class SkillCatalog:
         binary_suffixes = {'.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.zip', '.gz', '.woff', '.woff2', '.docx', '.xlsx', '.pptx'}
         if path.suffix.lower() in binary_suffixes:
             return dict(result, binary=True)
+
+        # 按字节分页，用增量解码器避免尾部不完整 UTF-8 字符被截断。
         import codecs
         with path.open('rb') as stream:
             stream.seek(offset)

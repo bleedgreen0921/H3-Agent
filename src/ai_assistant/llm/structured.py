@@ -25,6 +25,7 @@ class StructuredOutputError(RuntimeError):
 
 
 def _message_text(message):
+    """从原生消息中提取普通文本和文本内容块。"""
     if not isinstance(message, BaseMessage):
         return ''
     content = message.content
@@ -45,6 +46,8 @@ def _json_candidates(text):
     if not value:
         return
     fenced = re.sub(r'^```(?:json)?\s*|\s*```$', '', value, flags=re.IGNORECASE)
+
+    # 先尝试完整文本或代码围栏，再尝试提取其中的 JSON 对象。
     for candidate in (value, fenced):
         try:
             parsed = json.loads(candidate)
@@ -76,6 +79,8 @@ def parse_structured_result(schema: type[SchemaT], result: Any, *, responses=Fal
             result.get('raw'), result.get('parsed'), result.get('parsing_error'))
     if raw is not None:
         validate_completion(raw, responses=responses)
+
+    # 优先使用原生解析结果；无效时仍允许符合相同 schema 的 JSON 文本。
     if isinstance(parsed, schema):
         return parsed
     if parsed is not None:
@@ -107,6 +112,7 @@ def parse_structured_result(schema: type[SchemaT], result: Any, *, responses=Fal
 async def invoke_structured(model, schema: type[SchemaT], messages, *,
                             config=None, method='function_calling'):
     """Invoke native structured output and verify both transport forms."""
+    # 保留原始消息，以便检查完成状态并兼容文本形式的结构化输出。
     runnable = model.with_structured_output(schema, method=method, include_raw=True)
     result = await runnable.ainvoke(messages, config=config)
     return parse_structured_result(

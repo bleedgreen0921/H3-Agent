@@ -65,6 +65,7 @@ class SessionDeletingError(SessionError):
 
 
 
+# 会话索引只保存状态、绑定和 checkpoint 定位，不保存完整对话正文。
 DDL = '''CREATE TABLE IF NOT EXISTS assistant_sessions (
     id uuid PRIMARY KEY, workspace text NOT NULL, thread_id text NOT NULL,
     thread_ids text[] NOT NULL, complete jsonb,
@@ -78,6 +79,7 @@ SCHEMA_LOCK = 714160001
 
 
 def session_uuid(value):
+    """校验并规范化会话 UUID。"""
     try:
         return str(UUID(str(value)))
     except (ValueError, TypeError, AttributeError):
@@ -85,11 +87,13 @@ def session_uuid(value):
 
 
 def lock_key(value):
+    """将会话 ID 映射为 PostgreSQL advisory lock 的整数键。"""
     return int.from_bytes(sha256(('ai-assistant:session:' + value).encode()).digest()[:8],
                           'big', signed=True)
 
 
 class SessionRepository:
+    """管理会话索引、独占锁和原生 LangGraph Saver 定位。"""
     def __init__(self, conn, saver, *, lock_timeout_seconds=0.0):
         self.conn, self.saver = conn, saver
         self.current = None
@@ -97,6 +101,7 @@ class SessionRepository:
         self.lock_timeout_seconds = max(0.0, float(lock_timeout_seconds))
 
     async def execute(self, sql, params=()):
+        """统一执行 SQL；连接失败后标记仓储不可继续使用。"""
         if self.broken:
             raise SessionStorageError('Session connection lost; reopen the conversation.')
         try:
@@ -109,6 +114,7 @@ class SessionRepository:
         await self.execute('SELECT 1')
 
     async def check_schema(self):
+        """检查当前会话结构版本及原生 Saver 必需表。"""
         row = await (await self.execute(
             'SELECT version FROM assistant_session_schema WHERE singleton = true')).fetchone()
         if not row or row['version'] != 5:
@@ -119,6 +125,7 @@ class SessionRepository:
             await self.execute(f'SELECT 1 FROM {table} LIMIT 0')
 
     async def acquire(self, ident, *, wait_seconds=None):
+        """尝试获取指定会话的连接级独占锁。"""
         ident = session_uuid(ident)
         from ai_assistant.storage.locks import try_advisory_lock
         try:
@@ -134,12 +141,14 @@ class SessionRepository:
         return ident
 
     async def release(self):
+        """释放当前连接持有的会话锁。"""
         if self.current is not None:
             ident, self.current = self.current, None
             if not self.broken:
                 await self.execute('SELECT pg_advisory_unlock(%s)', (lock_key(ident),))
 
     async def open(self, workspace, ident=None, *, binding=None):
+        """创建或打开会话，并检查聊天归属、格式与工作区。"""
         await self.release()
         creating = ident is None
         ident = await self.acquire(str(uuid4()) if creating else ident)
@@ -198,6 +207,7 @@ class SessionRepository:
             'SELECT status FROM assistant_sessions WHERE id=%s', (str(ident),))).fetchone()
 
     async def bind(self, binding, session_id):
+        """绑定当前聊天与会话，拒绝覆盖不匹配的既有归属。"""
         cursor = await self.execute('''UPDATE assistant_sessions SET binding=%s
             WHERE id=%s AND (binding IS NULL OR binding=%s)''', (binding, session_id, binding))
         if cursor.rowcount != 1:
@@ -216,11 +226,13 @@ class SessionRepository:
             raise SessionStorageError('Session index disappeared; reopen the conversation.')
 
     async def start(self, thread):
+        """标记会话运行中并登记使用过的原生线程 ID。"""
         await self.update_current('''UPDATE assistant_sessions SET status='running', thread_id=%s,
             thread_ids=CASE WHEN %s=ANY(thread_ids) THEN thread_ids ELSE array_append(thread_ids,%s) END,
             updated_at=clock_timestamp() WHERE id=%s''', (thread, thread, thread, self.current))
 
     async def complete(self, config, *, input_id=None, title=None):
+        """将成功 checkpoint 的定位和可选标题提交到会话索引。"""
         from psycopg.types.json import Jsonb
         # Keep only the native state locator, never callbacks or runtime resources.
         c = config['configurable']
@@ -239,10 +251,12 @@ class SessionRepository:
                     updated_at=clock_timestamp() WHERE id=%s''', (Jsonb(locator), self.current))
 
     async def interrupted(self):
+        """标记当前会话执行中断。"""
         await self.update_current("UPDATE assistant_sessions SET status='interrupted', updated_at=clock_timestamp() WHERE id=%s",
                            (self.current,))
 
     async def delete(self, ident, *, binding=None):
+        """持锁标记删除，清理 Saver 线程后删除索引和聊天绑定。"""
         ident = session_uuid(ident)
         if self.current != ident:
             await self.release()
@@ -252,6 +266,8 @@ class SessionRepository:
             raise SessionNotFoundError('未找到可删除的会话。')
         if binding is not None and row['status'] == 'running':
             raise SessionBusyError('会话正在执行，请先 /cancel 并等待清理结束。')
+
+        # 先持久化 deleting；Saver 清理失败时保留状态供后续重试。
         await self.execute("UPDATE assistant_sessions SET status='deleting' WHERE id=%s", (ident,))
         try:
             for thread in row['thread_ids']:
@@ -266,6 +282,7 @@ class SessionRepository:
 
 @asynccontextmanager
 async def postgres_session_storage(settings, *, initialize=False):
+    """打开会话连接和原生 Saver；仅显式初始化时创建当前结构。"""
     try:
         from psycopg import AsyncConnection, Error as DatabaseError
         from psycopg.rows import dict_row
@@ -331,6 +348,7 @@ async def postgres_session_storage(settings, *, initialize=False):
 
 
 def session_storage(settings, *, initialize=False):
+    """按显式配置选择会话存储后端。"""
     from ai_assistant.storage.backends import backend_factory
     if settings is None:
         from ai_assistant.config import ConfigError

@@ -4,6 +4,7 @@ from contextvars import ContextVar
 
 from ai_assistant.storage.sessions import SessionStorageError
 
+# 关联同一次工具执行的回调，避免内部调用重复计数。
 tool_scope = ContextVar('assistant_tool_scope', default=None)
 
 
@@ -15,6 +16,8 @@ async def drain_tools(context):
     """异常离开工具节点时，等待所有已派发调用完成取消清理。"""
     from ai_assistant.cancellation import _drain_worker
     tasks = [task for task in context.inflight_tools if task is not asyncio.current_task()]
+
+    # 先发出取消，再统一等待；清理失败时阻止会话继续执行。
     for task in tasks:
         if not task.done() and not task.cancelling():
             task.cancel()

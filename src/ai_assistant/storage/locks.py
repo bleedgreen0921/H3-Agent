@@ -11,6 +11,7 @@ async def try_advisory_lock(conn, key, *, wait_seconds=0, interval=0.2):
     deadline = monotonic() + max(0.0, float(wait_seconds))
     interval = max(0.01, float(interval))
     while True:
+        # 会话级 advisory lock 绑定数据库连接；未成功时仅在窗口内轮询。
         row = await (await conn.execute(
             'SELECT pg_try_advisory_lock(%s) AS locked', (key,))).fetchone()
         locked = row.get('locked') if hasattr(row, 'get') else row['locked']

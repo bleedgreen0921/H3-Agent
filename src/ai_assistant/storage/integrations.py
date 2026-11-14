@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from ai_assistant.config import ConfigError
 
+# 显式初始化时创建操作、命令、聊天绑定及输入输出队列表。
 DDL = '''
 CREATE TABLE IF NOT EXISTS assistant_chat_commands (
  input_id text PRIMARY KEY, binding text NOT NULL, action text NOT NULL,
@@ -38,6 +39,8 @@ CREATE TABLE IF NOT EXISTS assistant_outbox (
 
 
 class OperationStore:
+    """在同一连接上组合外部操作、渠道队列和诊断仓储。"""
+
     def __init__(self, conn):
         self.conn = conn
         from ai_assistant.storage.commands import CommandRepository
@@ -51,6 +54,7 @@ class OperationStore:
         self.diagnostics = DiagnosticsRepository(conn)
 
     async def initialize(self):
+        """在事务锁保护下显式初始化存储结构。"""
         async with self.conn.transaction():
             await self.conn.execute('SELECT pg_advisory_xact_lock(714160002)')
             present = await (await self.conn.execute("SELECT to_regclass('assistant_outbox') AS name")).fetchone()
@@ -62,6 +66,7 @@ class OperationStore:
 
 @asynccontextmanager
 async def postgres_operation_storage(settings, *, initialize=False):
+    """打开 PostgreSQL 操作存储；仅在显式要求时初始化结构。"""
     if settings is None:
         raise ConfigError('External operations require [sessions]; run init first.')
     from psycopg import AsyncConnection
@@ -72,6 +77,8 @@ async def postgres_operation_storage(settings, *, initialize=False):
         store = OperationStore(conn)
         if initialize:
             await store.initialize()
+
+        # 连接后检查所需结构；缺失时失败，不自动迁移。
         await conn.execute('SELECT id,source_key FROM assistant_operations LIMIT 0')
         await conn.execute('SELECT last_input_id FROM assistant_sessions LIMIT 0')
         await conn.execute('SELECT input_id FROM assistant_chat_commands LIMIT 0')
@@ -89,12 +96,15 @@ class MemoryOperationStore:
         return self
 
     async def begin(self, input_id, principal, tool, arguments, source_key=None):
+        """根据规范化参数摘要或来源键复用已有操作。"""
         digest = hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False,
             separators=(',', ':'), allow_nan=False).encode()).hexdigest()
         if source_key:
             existing = await self.by_source(source_key)
             if existing:
                 return False, existing
+
+        # 内存版只记录参数摘要，不保存原始参数。
         key = (input_id, principal, tool, digest)
         if key in self.rows:
             return False, dict(self.rows[key])
@@ -104,9 +114,11 @@ class MemoryOperationStore:
         return True, dict(row)
 
     async def by_source(self, source_key):
+        """按来源键查找已登记操作。"""
         return next((dict(row) for row in self.rows.values() if row.get('source_key') == source_key), None)
 
     async def finish(self, ident, status, result=None):
+        """更新操作状态或为相同终态补充回执。"""
         row = next(row for row in self.rows.values() if row['id'] == ident)
         # 与数据库版同规则：终态只接受同状态补充回执并合并 result，跨终态改判直接忽略。
         if row['status'] != 'pending' and row['status'] != status:
@@ -118,10 +130,12 @@ class MemoryOperationStore:
             row['result'] = merged
 
     async def list(self, input_id=None):
+        """列出当前内存存储中的操作副本。"""
         return [dict(row) for row in self.rows.values() if input_id is None or row['input_id'] == input_id]
 
 
 def operation_storage(settings, *, initialize=False):
+    """根据显式配置选择操作存储后端。"""
     from ai_assistant.storage.backends import backend_factory
     if settings is None:
         from ai_assistant.config import ConfigError

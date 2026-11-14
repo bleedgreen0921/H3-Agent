@@ -57,6 +57,7 @@ FEISHU_REFERENCE_CONTEXT_POLICY = RedactionPolicy(
     preserve_keys=BUSINESS_KEYS,
 )
 
+# 日历上下文额外隐藏组织者和参与者的身份字段。
 FEISHU_CALENDAR_CONTEXT_POLICY = RedactionPolicy(
     keys=ACCOUNT_KEYS,
     paths=ACCOUNT_PATHS + (
@@ -84,6 +85,7 @@ def context_policy(entry):
 
 def project(entry, result, context=None, *, mode="context"):
     """投影工具结果；所有 MCP 结果都有默认兜底，文档族使用专门策略。"""
+    # 最终输出使用统一策略；模型上下文按工具族选择策略。
     policy = FEISHU_OUTPUT_POLICY if mode == "output" else context_policy(entry)
     if policy is None:
         return result

@@ -5,6 +5,7 @@ from typing import Callable
 
 @dataclass(frozen=True)
 class PromptSection:
+    """可按条件启用、排序的独立提示片段。"""
     key: str
     priority: int
     text: str
@@ -12,6 +13,7 @@ class PromptSection:
 
 
 def compose_prompt(base, sections=(), context=None):
+    """筛选已启用片段并按优先级与键稳定拼接。"""
     selected = [section for section in sections
                 if section.text and (section.when is None or section.when(context))]
     selected.sort(key=lambda section: (section.priority, section.key))

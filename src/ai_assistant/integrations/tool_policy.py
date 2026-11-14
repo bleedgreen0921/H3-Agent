@@ -125,6 +125,7 @@ def _path_matches(pattern: Sequence[str], path: Sequence[str]) -> bool:
 
 
 def _is_sensitive_path(path: Sequence[str], policy: RedactionPolicy) -> bool:
+    # 明确保留的业务字段优先于字段名与路径脱敏规则。
     if path and path[-1] in policy.preserve_keys:
         return False
     if path and path[-1] in policy.keys:
@@ -155,6 +156,8 @@ def redact_value(value: Any, policy: RedactionPolicy = DEFAULT_REDACTION_POLICY,
         result = {}
         for key, item in value.items():
             child = (*path, str(key))
+
+            # 省略规则优先，其次替换敏感字段，其余内容递归处理。
             if _should_omit(child, policy):
                 continue
             if _is_sensitive_path(child, policy):
@@ -173,6 +176,7 @@ def redact_value(value: Any, policy: RedactionPolicy = DEFAULT_REDACTION_POLICY,
 def project_content(value: Any, policy: RedactionPolicy = DEFAULT_REDACTION_POLICY) -> Any:
     """投影 ToolMessage 的 content；兼容 JSON 文本块和普通文本。"""
     if isinstance(value, str):
+        # 可解析的 JSON 对象或数组按结构脱敏，其余文本使用正则兜底。
         try:
             parsed = json.loads(value)
         except ValueError:
@@ -203,6 +207,8 @@ def project_artifact(value: Any, policy: RedactionPolicy = DEFAULT_REDACTION_POL
             child = (*path, str(key))
             if _should_omit(child, policy):
                 continue
+
+            # 特定内容字段按 JSON 或文本投影，其余 artifact 字段继续递归。
             if key in _JSON_ARTIFACT_KEYS:
                 result[key] = project_content(item, policy)
             else:
@@ -224,6 +230,8 @@ def project_tool_message(message: Any, policy: RedactionPolicy = DEFAULT_REDACTI
     update = {"content": content}
     if artifact is not None:
         update["artifact"] = projected_artifact
+
+    # 优先使用消息模型的复制接口，兼容普通测试对象的浅复制。
     model_copy = getattr(message, "model_copy", None)
     if model_copy is not None:
         return model_copy(update=update)

@@ -10,6 +10,7 @@ from ai_assistant.storage.sessions import SessionError
 
 
 def _positive_timeout(value: str) -> float:
+    """将命令行超时解析为有限正数。"""
     try:
         number = float(value)
         if math.isfinite(number) and number > 0:
@@ -20,6 +21,7 @@ def _positive_timeout(value: str) -> float:
 
 
 def _print_result(result) -> None:
+    """把单项模型检查结果转换为面向用户的安全摘要。"""
     status = {"passed": "通过", "failed": "失败", "skipped": "未检查"}[result.status]
     usage = "未提供" if result.usage is None else ", ".join(f"{k}={v}" for k, v in result.usage.items())
     descriptions = {
@@ -41,6 +43,7 @@ def _print_result(result) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """配置日志，在默认禁用追踪的上下文中运行命令入口。"""
     from langsmith import tracing_context
     from ai_assistant.observability import configure_logging
     configure_logging()

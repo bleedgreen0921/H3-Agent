@@ -10,6 +10,7 @@ from ai_assistant.integrations.feishu_tasks import payload
 from ai_assistant.integrations.feishu_temporal import calendar_timestamp_seconds, time_view
 from ai_assistant.integrations.tool_policy import PreflightIssue, ToolPreflightError
 
+# 只有这些事件操作需要日历写入预检和参数准备。
 EVENT_WRITES = {
     'calendar_v4_calendarEvent_create',
     'calendar_v4_calendarEvent_patch',
@@ -60,6 +61,7 @@ def _calendar_time(value):
 
 
 def preflight(entry, arguments, context):
+    """调用远端前校验日历 ID、时间来源和提醒结构。"""
     name = entry.original_name
     if name not in EVENT_WRITES:
         return
@@ -70,6 +72,8 @@ def preflight(entry, arguments, context):
             field='path.calendar_id'))
     if name == 'calendar_v4_calendarEvent_delete':
         return
+
+    # 创建事件必须提供起止时间；更新只检查本次传入的时间字段。
     data = event_data(arguments)
     if not isinstance(data, dict):
         return
@@ -85,6 +89,8 @@ def preflight(entry, arguments, context):
             continue
         if value.get('date') and not value.get('timestamp'):
             continue
+
+        # 时间戳必须匹配本轮可信时间转换；全天 date 单独处理。
         if value.get('timestamp') is None:
             raise ToolPreflightError(PreflightIssue(
                 code='calendar.time_required',
@@ -96,6 +102,7 @@ def preflight(entry, arguments, context):
                 message=f'{field} 未匹配本轮可信时间转换；请先调用 resolve_datetime。',
                 field=f'data.{field}'))
     if isinstance(start, dict) and isinstance(end, dict):
+        # 起止时间类型须一致；时间戳形式还要验证先后顺序。
         if bool(start.get('date')) != bool(end.get('date')):
             raise ToolPreflightError(PreflightIssue(
                 code='calendar.time_flags_mismatch',
@@ -119,6 +126,7 @@ def preflight(entry, arguments, context):
 
 
 def prepare(entry, arguments, context):
+    """填入默认日历并将可信时间戳转换为接口要求的秒数。"""
     if not is_calendar(entry):
         return {}
     name = entry.original_name
@@ -147,11 +155,14 @@ def _verify_time(expected, actual):
 
 
 def verify(entry, operation, arguments, expected, result, context, config=None):
+    """仅比较本次写入参数和接口返回，不发起写后回读。"""
     if entry.original_name not in EVENT_WRITES or entry.original_name == 'calendar_v4_calendarEvent_delete':
         return result, None
     event = event_payload(result)
     expected_data = event_data(arguments)
     checked, unchecked, issues = [], [], []
+
+    # 未返回的字段标为未核验；明确不一致才标记 mismatch。
     for key in ('summary', 'start_time', 'end_time', 'reminders'):
         if key not in expected_data:
             continue
@@ -186,6 +197,7 @@ def verify(entry, operation, arguments, expected, result, context, config=None):
 
 
 def after_read(entry, arguments, result, context):
+    """为事件写入结果附加本地时区说明，保留原始内容。"""
     if entry.original_name not in EVENT_WRITES or not isinstance(result, ToolMessage):
         return result
     event = event_payload(result)

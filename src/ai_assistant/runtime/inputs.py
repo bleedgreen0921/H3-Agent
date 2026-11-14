@@ -8,12 +8,14 @@ KEY = 'assistant_input'
 
 
 def metadata(message):
+    """仅读取当前版本的输入关联元数据。"""
     value = message.additional_kwargs.get(KEY, {})
     return value if isinstance(value, dict) and value.get('version') == 1 else {}
 
 
 def user_message(session_id, input_id, text, *, source=None):
     """身份来自可信 runtime；回答正文不包含路由命令。"""
+    # 根据会话和输入 ID 生成稳定消息 ID，便于识别重复输入。
     kind = 'request'
     return HumanMessage(
         content=text,

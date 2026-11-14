@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 async def execute_turn(session, text, *, skill_ids=None, on_event=None,
                    input_id=None, user_source=None, planning_action=None,
                    planning_goal=None):
+    """执行一轮输入，持久化统一结果并在异常时等待工具清理。"""
     if session._closed:
         raise RuntimeError('Session is closed.')
     if session._running:
@@ -28,6 +29,8 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
         raise SessionStorageError('Session connection lost; reopen the conversation.')
     input_id = input_id or str(uuid4())
     from ai_assistant.runtime.inputs import metadata, user_message, recorded_messages
+
+    # 在本会话相关线程中检查输入 ID，拒绝重复执行或覆盖原输入。
     by_id = {}
     for thread in session._threads:
         for message in await recorded_messages(session.agent, thread, input_id=input_id):
@@ -45,6 +48,8 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
     from ai_assistant.capabilities.model import CapabilityTurnState
     previous = getattr(session.context, 'capabilities', None)
     registry = getattr(previous, 'registry', None)
+
+    # 每轮重建可变运行状态，避免时间、效果和在途工具跨轮泄漏。
     turn_context = replace(session.context, project_rules=project_rules, input_id=input_id, session_id=session.session_id,
                            execution_thread_id=session._thread,
                            resolved_datetimes=set(), effect_facts=[], resource_bindings={},
@@ -104,6 +109,8 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
             inputs.append(SystemMessage(content=RECOVERY_NOTICE))
         inputs.append(user_message(session.session_id, input_id, business_text, source=user_source))
         activated_skills = set()
+
+        # 组装原生图输入；显式 Skill 先准备快照并记录摘要。
         graph_input.update(messages=inputs, turn_result=None,
                            execution=None, diagnostics=[], project_rules_snapshot=project_rules,
                            input_id=input_id, planning_action=planning_action,
@@ -172,6 +179,8 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
             raise RuntimeError('Agent returned no final answer.')
         if session._storage_lost:
             raise SessionStorageError('Session connection lost; completion was not confirmed.')
+
+        # 读取实际终态与外部操作回执，统一计算业务状态。
         # 会话锁保护最新状态；完成指针只表示已确认提交的位置。
         state = await session.agent.aget_state({'configurable': {'thread_id': session._thread}})
         operations = await session.context.operations.list(input_id) if session.context.operations else []
@@ -194,6 +203,8 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
             update.update(completed_turns=completed, last_counted_input_id=input_id)
         commit_started = monotonic()
         phase = 'result_commit'
+
+        # 先保存轮次结果，再根据可恢复性推进会话完成指针。
         with span('result.commit'):
             state_config = await session.agent.aupdate_state(state.config, update)
         saved_result = unified
@@ -224,6 +235,7 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
             sorted(activated_skills | {s.id for s in session.context.services.get('skills').active(result.get('active_skills', {}))}) if session.context.services.get('skills') else [],
             input_id, operations, unified)
     except BaseException as error:
+        # 所有异常路径先等待已派发工具清理，不假设已发生效果回滚。
         if isinstance(error, SessionStorageError):
             session._storage_lost = True
         from ai_assistant.runtime.execution import drain_tools, ToolCleanupError
@@ -258,6 +270,7 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
             raise SessionStorageError('Session connection lost; cleanup finished, reopen the conversation.') from None
         raise error
     finally:
+        # 无论结果如何，都清理轮次占用状态并记录安全指标。
         if observer is not None:
             observer.usage.total_seconds = monotonic() - started
             observer.usage.first_status_seconds = timings.get('first_status_seconds')

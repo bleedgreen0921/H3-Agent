@@ -25,6 +25,7 @@ CAPABILITIES = ("chat", "tools")
 
 @dataclass(frozen=True)
 class CheckResult:
+    """单项真实模型检查的状态、耗时、用量及安全错误摘要。"""
     capability: str
     status: Literal["passed", "failed", "skipped"]
     elapsed_seconds: float = 0
@@ -34,6 +35,7 @@ class CheckResult:
 
 
 class ProbeObject(BaseModel):
+    """工具调用探针期望返回的严格参数结构。"""
     model_config = ConfigDict(extra="forbid", strict=True)
     ok: bool
 
@@ -114,6 +116,7 @@ def _error(exc: Exception) -> tuple[str, int | None] | None:
 
 
 async def _probe(model, capability: str, record: dict):
+    """分别检查普通文本响应或一次指定工具调用。"""
     if capability == "tools":
         message = await model.bind_tools([TOOL], tool_choice="required").ainvoke(
             'Call connection_check exactly once with {"ok":true}. Do not answer with text.'
@@ -122,6 +125,8 @@ async def _probe(model, capability: str, record: dict):
         message = await model.ainvoke("Reply with the word OK.")
     record["usage"] = _usage(message)
     validate_completion(message, responses=getattr(model, "use_responses_api", False) is True)
+
+    # 工具检查必须返回指定调用及合法参数；聊天检查要求非空文本。
     if capability == "tools":
         calls = message.tool_calls
         if len(calls) != 1 or calls[0]["name"] != "connection_check":
@@ -151,6 +156,8 @@ async def check_model(
     if selected not in config.models:
         raise ConfigError("Unknown model profile.")
     results = []
+
+    # 显式诊断会发送真实请求；每项独立限时并沿用方案的 SDK 重试设置。
     async with model_session(config, selected, None, factory=create_model) as model:
         for item in CAPABILITIES:
             if capability not in ("all", item):
@@ -162,6 +169,7 @@ async def check_model(
                         await _probe(model, item, record)
                     result = CheckResult(item, "passed", monotonic() - start, record.get("usage"))
                 except Exception as exc:
+                    # 已知错误转换为固定分类；未知异常继续传播。
                     failure = _error(exc)
                     if failure is None:
                         raise

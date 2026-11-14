@@ -11,6 +11,7 @@ from ai_assistant.runtime.prompts import (
 
 @dataclass
 class ComponentContext:
+    """组件装配时共享的配置、调用者、资源栈和工具上下文。"""
     config: object
     caller: object
     stack: object
@@ -27,6 +28,7 @@ class ComponentContext:
 
 @dataclass
 class Contribution:
+    """组件向 Agent 提供的工具、提示、中间件和附加服务。"""
     tools: list = field(default_factory=list)
     prompt_sections: list[PromptSection] = field(default_factory=list)
     middleware: list = field(default_factory=list)
@@ -35,6 +37,7 @@ class Contribution:
 
 
 class Component:
+    """组件约定：判断启用、打开资源并贡献能力。"""
     name = 'component'
 
     def enabled(self, config, caller, retriever=None):
@@ -48,6 +51,7 @@ class Component:
 
 
 class CoreComponent(Component):
+    """贡献基础文件、可选联网、时间解析和能力搜索工具。"""
     name = 'core'
 
     def contribute(self, ctx):
@@ -61,6 +65,7 @@ class CoreComponent(Component):
 
 
 class SkillsComponent(Component):
+    """在配置 Skills 时贡献目录工具和指导中间件。"""
     name = 'skills'
 
     def enabled(self, config, caller, retriever=None):
@@ -79,6 +84,7 @@ class SkillsComponent(Component):
 
 
 class MCPComponent(Component):
+    """复用或打开 MCP 目录，并按调用者筛选工具。"""
     name = 'mcp'
 
     def enabled(self, config, caller, retriever=None):
@@ -100,6 +106,7 @@ class MCPComponent(Component):
 
 
 class KnowledgeComponent(Component):
+    """贡献知识检索、可选管理工具及其调用限制。"""
     name = 'knowledge'
 
     def enabled(self, config, caller, retriever=None):
@@ -119,6 +126,7 @@ class KnowledgeComponent(Component):
 
 
 class MailComponent(Component):
+    """按身份和配置启用邮件服务，并要求持久操作回执。"""
     name = 'mail'
 
     def enabled(self, config, caller, retriever=None):
@@ -145,6 +153,7 @@ class MailComponent(Component):
 
 
 class PDFComponent(Component):
+    """为符合条件的飞书主人私聊装配附件读取服务。"""
     name = 'pdf'
 
     def enabled(self, config, caller, retriever=None):
@@ -173,6 +182,7 @@ class PDFComponent(Component):
 
 
 class FeishuIdentityComponent(Component):
+    """装配飞书身份工具和未完成文档提示。"""
     name = 'feishu_identity'
 
     def enabled(self, config, caller, retriever=None):
@@ -188,6 +198,7 @@ class FeishuIdentityComponent(Component):
 
 
 def build_components(config, caller, *, retriever=None):
+    """按配置和可信调用者选择本次会话启用的组件。"""
     candidates = [CoreComponent(), SkillsComponent(), MCPComponent(), KnowledgeComponent(),
                   MailComponent(), PDFComponent(), FeishuIdentityComponent()]
     return [component for component in candidates if component.enabled(config, caller, retriever)]

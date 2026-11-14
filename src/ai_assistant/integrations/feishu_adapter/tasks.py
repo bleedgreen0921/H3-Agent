@@ -5,6 +5,7 @@ from ai_assistant.integrations.feishu_tasks import (
 
 
 def guidance(entries):
+    """存在任务工具时提供时间、负责人和回执处理提示。"""
     names = {entry.original_name for entry in entries if entry.settings.transport == 'feishu'}
     return ('任务时间先结合可信当前日期明确为 ISO，再调用 resolve_datetime；写入时间须来自本轮转换，日期不明确先澄清。'
             '飞书任务提醒 relative_fire_minute 只能按截止时间 due 解释；创建任务时设置 reminders 必须同时提供 due。'
@@ -19,6 +20,7 @@ def guidance(entries):
 
 
 def task_write(entry):
+    """判断当前条目是否为已识别的飞书任务写工具。"""
     return entry.settings.transport == 'feishu' and entry.original_name in TASK_WRITES
 
 
@@ -29,14 +31,18 @@ def preflight(entry, arguments, context):
 
 
 def prepare(context, entry, arguments):
+    """任务写入委托业务规则准备参数和预期字段。"""
     return prepare_task(context, entry, arguments) if task_write(entry) else {}
 
 
 async def verify(entry, operation, arguments, expected, result, context, config=None):
+    """根据本次接口返回核验任务字段，并保护核验回执。"""
     from langchain_core.messages import ToolMessage
     if not task_write(entry):
         return result, None
     detail = verification(expected, task_data(result), arguments.get('path', {}).get('task_guid'))
+
+    # 调用未成功时不能将字段比较视为成功验证。
     if operation['status'] != 'succeeded':
         detail['verification'] = 'unverified'
     if isinstance(result, ToolMessage):
@@ -48,6 +54,7 @@ async def verify(entry, operation, arguments, expected, result, context, config=
 
 
 async def after_read(entry, arguments, result, context):
+    """对任务工具消息附加业务所需的模型展示信息。"""
     from langchain_core.messages import ToolMessage
     if (entry.settings.transport == 'feishu' and entry.original_name.startswith('task_v2_task_')
             and isinstance(result, ToolMessage)):

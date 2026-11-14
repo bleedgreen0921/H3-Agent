@@ -16,6 +16,7 @@ class MCPCleanupError(RuntimeError):
 
 @asynccontextmanager
 async def owned_adapter(adapter):
+    """托管原生适配器，确保退出失败不会被当作普通服务故障忽略。"""
     import sys
     native = await adapter.__aenter__()
     try:
@@ -42,6 +43,7 @@ def schema_tokens(tools):
 
 @dataclass(frozen=True)
 class Entry:
+    """一个已登记工具及其服务、身份和原始名称。"""
     id: str
     server: str
     original_name: str
@@ -56,12 +58,14 @@ class Entry:
 
 
 class Catalog:
+    """保存成功装配的工具及不可用服务的安全摘要。"""
     def __init__(self, entries=(), *, timeout=60, unavailable=None):
         self.entries = {e.id: e for e in entries}
         self.timeout = timeout
         self.unavailable = unavailable or {}
 
     def for_caller(self, caller):
+        # 非主人调用者不继承工具目录。
         if not caller.owner:
             return Catalog(timeout=self.timeout)
         return self
@@ -69,6 +73,7 @@ class Catalog:
 
 
 async def decline(*args, **kwargs):
+    """拒绝服务端主动发起的 elicitation 请求。"""
     from fastmcp.client.elicitation import ElicitResult
     return ElicitResult(action='decline')
 
@@ -146,6 +151,7 @@ def validate_arguments(schema, arguments, path=''):
 
 @asynccontextmanager
 async def mcp_resources(config, workspace, *, caller=None):
+    """按配置连接 MCP 服务并托管资源；单服务初始化失败时隔离。"""
     if config.mcp is None or not config.mcp.servers:
         yield Catalog()
         return
@@ -154,6 +160,7 @@ async def mcp_resources(config, workspace, *, caller=None):
     unavailable = {}
     async with AsyncExitStack() as stack:
         for name, settings in config.mcp.servers.items():
+            # 非主人和空白名单均不启动或连接该服务。
             if not caller.owner:
                 continue
             if not settings.tools:
@@ -165,6 +172,8 @@ async def mcp_resources(config, workspace, *, caller=None):
                 from langchain.mcp import MCPAdapter
                 pending = []
                 tools = None
+
+                # 飞书原生工具与本地语义工具分别发现，再合并白名单结果。
                 if settings.transport == 'feishu':
                     from ai_assistant.integrations.feishu import OfficialConnection
                     from ai_assistant.integrations.feishu_docs import (
@@ -188,12 +197,14 @@ async def mcp_resources(config, workspace, *, caller=None):
                         semantic = {tool.name: tool for tool in create_semantic_tools(
                             api, convert_api)}
                         tools.extend(tool for name, tool in semantic.items() if name in settings.tools)
+                # stdio 使用明确配置的可执行程序和环境。
                 elif settings.transport == 'stdio':
                     overrides = {k: v.get_secret_value() for k, v in settings.env.items()}
                     binary = executable(settings.command, path=overrides.get('PATH'))
                     env = {**executable_env(binary), **overrides}
                     target = StdioTransport(command=binary, args=settings.args,
                                             env=env, keep_alive=True)
+                # 文件服务使用受限工作区及对应飞书身份。
                 elif settings.transport == 'feishu_files':
                     import httpx
                     from ai_assistant.integrations.feishu_files import FeishuAPI, create_server
@@ -204,10 +215,12 @@ async def mcp_resources(config, workspace, *, caller=None):
                         trust_env=False, follow_redirects=False))
                     tokens = TokenStore(config, workspace.root) if settings.identity == 'user' else None
                     target = create_server(FeishuAPI(config.integrations.feishu, http, tokens), workspace)
+                # HTTP 传输使用显式地址和受保护的请求头。
                 elif settings.transport == 'http':
                     target = StreamableHttpTransport(settings.url,
                         headers={k: v.get_secret_value() for k, v in settings.headers.items()})
                 if tools is None:
+                    # 通过框架原生适配器建立连接并发现工具。
                     client = Client(target, elicitation_handler=decline,
                                     timeout=config.mcp.call_timeout,
                                     init_timeout=config.mcp.connect_timeout)
@@ -218,6 +231,8 @@ async def mcp_resources(config, workspace, *, caller=None):
                 found = {tool.name for tool in tools}
                 if set(settings.tools) - found:
                     raise ConfigError(f'MCP server {name}: configured tools are missing.')
+
+                # 仅发布白名单中的工具，并给模型使用带身份信息的稳定 ID。
                 for tool in tools:
                     if tool.name not in settings.tools:
                         continue
@@ -245,6 +260,8 @@ async def mcp_resources(config, workspace, *, caller=None):
                     'dependency_unavailable' if isinstance(exc, ImportError) else
                     'timeout' if isinstance(exc, TimeoutError) else 'initialization_failed'}
                 continue
+
+            # 整个服务初始化成功后，才把连接交给外层资源栈并发布工具。
             await stack.enter_async_context(scope)
             entries.extend(pending)
         yield Catalog(entries, timeout=config.mcp.call_timeout, unavailable=unavailable)

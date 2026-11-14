@@ -2,6 +2,7 @@
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
+# 用量与会话关联，但通过独立连接保存，避免随业务 checkpoint 回退。
 DDL = '''CREATE TABLE IF NOT EXISTS assistant_model_usage (
     call_id uuid PRIMARY KEY,
     session_id uuid NOT NULL REFERENCES assistant_sessions(id) ON DELETE CASCADE,
@@ -15,10 +16,12 @@ DDL = '''CREATE TABLE IF NOT EXISTS assistant_model_usage (
 
 @dataclass(frozen=True)
 class UsageCapabilities:
+    """记录当前用量结构是否支持调用关联字段。"""
     linked: bool = False
 
 
 class UsageStore:
+    """保存服务已报告的用量，并按会话生成不完整性提示。"""
     def __init__(self, conn, capabilities=None):
         self.conn = conn
         self.disabled = False
@@ -30,6 +33,7 @@ class UsageStore:
         return self.capabilities.linked
 
     async def record(self, call_id, session_id, profile, role, started_at, status, usage, *, input_id=None, execution_thread_id=None, parent_run_id=None):
+        """按调用 ID 幂等保存已报告用量；无用量时不写入。"""
         if self.disabled or not usage:
             return
         try:
@@ -41,10 +45,12 @@ class UsageStore:
                 (call_id, session_id, profile, role, started_at, status, usage.get('input_tokens'),
                  usage.get('output_tokens'), usage.get('total_tokens'), input_id, execution_thread_id, parent_run_id))
         except Exception:
+            # 本连接写入失败后停止后续统计写入，异常由上层隔离处理。
             self.disabled = True
             raise
 
     async def report(self, session_id):
+        """汇总已保存记录；缺失用量保持未知，不等同完整账单。"""
         rows = await (await self.conn.execute('''SELECT profile,role,count(*) AS calls,
             sum(input_tokens) AS input_tokens,sum(output_tokens) AS output_tokens,
             sum(total_tokens) AS total_tokens,
@@ -76,6 +82,7 @@ class UsageStore:
 
 @asynccontextmanager
 async def postgres_usage_storage(settings):
+    """使用限时独立连接访问用量数据，退出时关闭连接。"""
     from psycopg import AsyncConnection
     from psycopg.rows import dict_row
     conn = await AsyncConnection.connect(settings.database_url.get_secret_value(),
@@ -93,6 +100,7 @@ async def postgres_usage_storage(settings):
 
 
 def usage_storage(settings):
+    """按配置选择用量存储后端。"""
     from ai_assistant.storage.backends import backend_factory
     if settings is None:
         from ai_assistant.config import ConfigError
