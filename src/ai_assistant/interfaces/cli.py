@@ -49,12 +49,15 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _main(argv: list[str] | None = None) -> int:
+    # 注册顶层命令；存储初始化必须由用户显式触发。
     parser = argparse.ArgumentParser(prog="python -m ai_assistant")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init", help="Initialize configured storage explicitly").add_argument(
         "--config", default="assistant.toml", metavar="PATH")
     from ai_assistant.observability import add_commands as add_observability
     add_observability(commands)
+
+    # model check 会发送真实请求，允许指定模型、检查范围和超时时间。
     model_parser = commands.add_parser("model", help="Live model checks")
     model_commands = model_parser.add_subparsers(dest="action", required=True)
     probe = model_commands.add_parser("check", help="Send real requests using profile SDK retries")
@@ -62,6 +65,8 @@ def _main(argv: list[str] | None = None) -> int:
     probe.add_argument("--model", metavar="NAME")
     probe.add_argument("--capability", choices=("all", "chat", "tools"), default="all")
     probe.add_argument("--timeout", type=_positive_timeout, default=60.0)
+
+    # 各业务模块自行注册子命令，入口只负责组装和分发。
     from ai_assistant.knowledge.cli import add_commands
     add_commands(commands)
     from ai_assistant.interfaces.sessions import add_commands as add_sessions
@@ -70,6 +75,8 @@ def _main(argv: list[str] | None = None) -> int:
     add_skills(commands)
     from ai_assistant.integrations.cli import add_commands as add_mcp
     add_mcp(commands)
+
+    # 飞书服务和配置检查共用同一套配置入口。
     feishu_parser = commands.add_parser("feishu", help="Feishu owner bot")
     feishu_commands = feishu_parser.add_subparsers(dest="action", required=True)
     feishu_commands.add_parser("serve").add_argument("--config", default="assistant.toml")
@@ -77,6 +84,7 @@ def _main(argv: list[str] | None = None) -> int:
     for action in ('list', 'check'):
         config_commands.add_parser(action).add_argument('--config', default='assistant.toml')
 
+    # 递归为支持 --config 的命令添加 --profile，避免各模块重复声明。
     def add_profile_options(current):
         if any(action.dest == 'config' for action in current._actions):
             current.add_argument('--profile', help='Select a named configuration profile')
@@ -84,9 +92,11 @@ def _main(argv: list[str] | None = None) -> int:
             if isinstance(action, argparse._SubParsersAction):
                 for child in action.choices.values():
                     add_profile_options(child)
+
     add_profile_options(parser)
     args = parser.parse_args(argv)
     try:
+        # 列出方案只读取入口文件，不加载组件或连接服务。
         if args.command == 'config' and args.action == 'list':
             from ai_assistant.configuration import read_toml, profile_options
             profiles, default = profile_options(read_toml(args.config))
@@ -95,8 +105,11 @@ def _main(argv: list[str] | None = None) -> int:
             for name in profiles:
                 print(name + ('（默认）' if name == default else ''))
             return 0
+
+        # 其余命令先加载并校验所选方案，再交给对应模块执行。
         config = (load_config(args.config) if args.profile is None else
                   load_config(args.config, profile=args.profile))
+
         if args.command == 'observability':
             from ai_assistant.observability import execute
             try:
@@ -106,12 +119,17 @@ def _main(argv: list[str] | None = None) -> int:
             except Exception:
                 print('观测操作失败：请检查配置、网络及存储结构。', file=sys.stderr)
                 return 2
+
+        # config check 到这里说明配置已通过离线校验。
         if args.command == 'config':
             print('配置校验通过：' + config.profile)
             return 0
+
         if args.command == "init":
             from ai_assistant.interfaces.initialization import execute
             return asyncio.run(execute(config))
+
+        # 各入口按需导入，执行失败时输出面向用户的错误摘要。
         if args.command == "feishu":
             from ai_assistant.channels.feishu.receiver import serve
             try:
@@ -122,6 +140,7 @@ def _main(argv: list[str] | None = None) -> int:
             except Exception:
                 print("飞书入口失败：请检查部署、持久存储和认证状态；缺少结构时请显式执行 init。", file=sys.stderr)
                 return 2
+
         if args.command == "mcp":
             from ai_assistant.integrations.cli import execute
             try:
@@ -134,6 +153,7 @@ def _main(argv: list[str] | None = None) -> int:
             except Exception:
                 print("MCP 操作失败：请检查可选依赖、配置和部署；缺少结构时请显式执行 init。", file=sys.stderr)
                 return 2
+
         if args.command == "skill":
             from ai_assistant.skills.cli import execute
             from ai_assistant.skills.catalog import SkillError
@@ -142,6 +162,7 @@ def _main(argv: list[str] | None = None) -> int:
             except (SkillError, OSError, ImportError) as exc:
                 print(f"Skill 操作失败：{exc}", file=sys.stderr)
                 return 2
+
         if args.command == "rag":
             from ai_assistant.knowledge.cli import execute
             from ai_assistant.knowledge import KnowledgeError
@@ -153,6 +174,7 @@ def _main(argv: list[str] | None = None) -> int:
             except Exception:
                 print("RAG 操作失败：数据库或集成错误；请检查依赖和连接；缺少结构时请显式执行 init。", file=sys.stderr)
                 return 2
+
         if args.command == "session":
             from ai_assistant.interfaces.sessions import execute
             try:
@@ -160,6 +182,8 @@ def _main(argv: list[str] | None = None) -> int:
             except SessionError as exc:
                 print(f"会话操作失败：{getattr(exc, 'turn_message', str(exc))}", file=sys.stderr)
                 return 2
+
+        # 模型检查会调用远端服务，先确认模型存在并提示可能产生费用。
         if args.model is not None and args.model not in config.models:
             raise ConfigError("Unknown model profile.")
         if args.command == "model":
@@ -172,6 +196,8 @@ def _main(argv: list[str] | None = None) -> int:
             print(f"开始真实模型检查（可能产生费用），SDK 重试：{retry_text}；每项一次逻辑调用。", flush=True)
             results = asyncio.run(check_model(config, args.model, args.capability, args.timeout, on_result=_print_result))
             return 1 if any(item.status == "failed" for item in results) else 0
+
+    # 统一处理跨命令的会话错误、配置错误和用户中断。
     except SessionError as exc:
         print(f"会话失败：{getattr(exc, 'turn_message', str(exc))}", file=sys.stderr, flush=True)
         return 2

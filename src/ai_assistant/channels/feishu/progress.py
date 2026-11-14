@@ -22,6 +22,7 @@ MIN_UPDATE_SECONDS = 0.5
 CALL_TIMEOUT = 5.0
 PHASE_CHARS = 40
 
+# 工作状态映射为卡片颜色和标题；终态文案与最终文本回复分开。
 STATE_STYLES = {
     'working': ('blue', '处理中'),
     'complete': ('green', '已完成'),
@@ -39,6 +40,7 @@ TERMINAL_PHASES = {
 
 
 def friendly_tool(name):
+    """限制卡片中展示的工具名称长度。"""
     text = (name or '').strip()
     if not text:
         return '未知工具'
@@ -48,11 +50,13 @@ def friendly_tool(name):
 
 
 def _elapsed_text(seconds):
+    """把非负耗时格式化为分钟和秒。"""
     total = max(0, int(seconds))
     return f'{total // 60:02d}:{total % 60:02d}'
 
 
 def _card_json(title, template, summary, preview, phase):
+    """组装飞书卡片结构；有预览时显示在当前阶段之前。"""
     elements = []
     if preview:
         elements.append({'tag': 'markdown', 'element_id': 'preview', 'content': preview})
@@ -66,6 +70,7 @@ def _card_json(title, template, summary, preview, phase):
 
 
 def _encoded_size(card):
+    """计算卡片 JSON 序列化后的 UTF-8 字节数。"""
     return len(json.dumps(card, ensure_ascii=False).encode('utf-8'))
 
 
@@ -113,14 +118,18 @@ class ProgressCard:
         self._last_second = -1
         self._failures = 0
         self._updates_disabled = False
+
+        # 后台任务等待结束信号；事件回调仅修改内存，不直接调用飞书。
         self._done_event = asyncio.Event()
         self._task = None
 
     @property
     def enabled(self):
+        # 没有 API 或延迟配置不大于 0 时不创建工作卡。
         return self.api is not None and self.settings.progress_card_delay_seconds > 0
 
     def start(self):
+        """启动延迟创建及定期更新的后台任务。"""
         if not self.enabled:
             self._closed = True
             return
@@ -132,6 +141,8 @@ class ProgressCard:
             return
         try:
             kind = item.get('event')
+
+            # 把模型和工具事件映射为简短阶段文字。
             if kind == 'on_model_start':
                 self.phase = '正在思考…'
             elif kind == 'on_tool_start':
@@ -148,6 +159,7 @@ class ProgressCard:
                     return
                 self.phase = '正在生成回答…'
                 if limit:
+                    # 预览超长时仅保留最新内容，不改变最终答案。
                     combined = self.preview + text
                     if len(combined) > limit:
                         self._truncated = True
@@ -175,6 +187,8 @@ class ProgressCard:
             self.phase = TERMINAL_PHASES[state]
         self._done = True
         self._done_event.set()
+
+        # 等待后台循环退出后，尽力将已创建的卡片原地更新为终态。
         if self._task is not None:
             with suppress(asyncio.CancelledError, TimeoutError):
                 await asyncio.wait_for(self._task, CALL_TIMEOUT + self.settings.progress_card_delay_seconds)
@@ -183,6 +197,7 @@ class ProgressCard:
 
     async def _run(self):
         try:
+            # 延迟期间若轮次已结束，不创建短暂闪现的工作卡。
             if self.settings.progress_card_delay_seconds > 0:
                 try:
                     await asyncio.wait_for(self._done_event.wait(),
@@ -192,6 +207,8 @@ class ProgressCard:
                     pass
             if self._done or not await self._create():
                 return
+
+            # 创建成功后定期检查状态，具体更新仍受节流条件约束。
             while not self._done:
                 try:
                     await asyncio.wait_for(self._done_event.wait(), TICK_SECONDS)
@@ -208,6 +225,7 @@ class ProgressCard:
             self._updates_disabled = True
 
     def _render_preview(self):
+        """整理预览的省略提示、代码围栏和安全 Markdown。"""
         if not self.preview:
             return ''
         text = _closed_fence(self.preview)
@@ -216,6 +234,7 @@ class ProgressCard:
         return _safe_markdown(text)
 
     def _card(self):
+        """根据当前状态、耗时、阶段和预览构造卡片。"""
         template, label = STATE_STYLES.get(self.state, STATE_STYLES['working'])
         elapsed = _elapsed_text(monotonic() - self.started)
         title = f'{label} · {elapsed}' if self.state in {'working', 'complete'} else label
@@ -228,6 +247,7 @@ class ProgressCard:
         return _fit_card(factory, preview)
 
     async def _create(self):
+        """创建工作卡并通知调用方保存卡片 ID。"""
         try:
             async with asyncio.timeout(CALL_TIMEOUT):
                 data = await self.api.request(
@@ -247,6 +267,8 @@ class ProgressCard:
             return False
         self.card_id = card_id
         event('progress.created', input_id=self.input_id, status='working')
+
+        # 保存卡片 ID 的回调失败只记录事件，不影响业务执行。
         if self.on_created is not None:
             try:
                 returned = self.on_created(self.input_id, card_id)
@@ -257,11 +279,13 @@ class ProgressCard:
         return True
 
     async def _patch_safely(self, *, force=False):
+        """受频率限制地更新卡片；连续失败时停用常规更新。"""
         if self.card_id is None or self.api is None:
             return
         now = monotonic()
         elapsed = int(now - self.started)
         if not force:
+            # 无新内容且秒数未变化时跳过；强制终态更新不受此限制。
             if self._updates_disabled or now - self._last_patch < MIN_UPDATE_SECONDS:
                 return
             if not self._dirty and elapsed == self._last_second:
@@ -277,6 +301,7 @@ class ProgressCard:
             self._failures = 0
         except Exception as error:
             self._failures += 1
+            # 三次连续失败后停止常规更新，终态仍会尽力更新一次。
             if self._failures >= 3:
                 self._updates_disabled = True
             event('progress.failed', input_id=self.input_id, status='update_failed',
@@ -284,6 +309,7 @@ class ProgressCard:
 
 
 def _simple_card(title, template, summary, text):
+    """构造不含预览的简洁终态卡片。"""
     return _card_json(title, template, summary, '', text)
 
 
@@ -342,6 +368,7 @@ class FeishuProgressSink:
     def __init__(self, card):
         self.card = card
 
+    # 将通用进度接口转发给飞书工作卡实现。
     def start(self):
         self.card.start()
 

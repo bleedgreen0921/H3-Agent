@@ -12,8 +12,10 @@ from ai_assistant.storage.sessions import SessionError, session_storage
 
 
 async def _session_end(ctx, name):
+    """处理取消或新建会话，并保存可重复读取的命令结果。"""
     from ai_assistant.observability import event
     async with session_storage(ctx.worker.config.sessions) as repo:
+        # 先固定命令对应的目标；重复处理时直接使用已保存的结果。
         stored = await prepare_session_end(repo, ctx.row)
         if stored['result']:
             async with repo.conn.transaction():
@@ -22,16 +24,20 @@ async def _session_end(ctx, name):
         target = json.loads(stored['target'] or '{}')
         sid = target.get('session_id')
         if sid:
+            # 获取会话锁并校验聊天归属，避免操作其他聊天的会话。
             await repo.acquire(sid)
             owned = await repo.session_binding(sid)
             if not owned or owned['binding'] != ctx.row['binding']:
                 raise SessionError('取消目标会话不存在或不属于当前聊天。')
         async with repo.conn.transaction():
+            # 阻止目标输入后续处理及尚待投递的结果。
             active = target.get('active_input_id')
             if active:
                 event('request.cancelled', command=name, target_id=active)
                 await OutboxRepository(repo.conn).block_pending(active)
                 await InboxRepository(repo.conn).block_running(active, ctx.row['binding'])
+
+            # /new 在终止旧会话处理后创建并绑定新会话；/cancel 只返回停止回执。
             if name == '/new':
                 base = ctx.worker.config.config_path.parent if ctx.worker.config.config_path else Path.cwd()
                 root = (base / ctx.worker.config.workspace.root).resolve()
@@ -40,26 +46,32 @@ async def _session_end(ctx, name):
                 text = f"已创建新会话。\nID：{session['id']}"
             else:
                 text = '已停止当前执行；已发生的操作保留，已提交的知识库任务继续执行。'
+
+            # 在同一事务内保存命令结果和待投递回复。
             await CommandRepository(repo.conn).finish_existing(ctx.row['id'], text)
             await reply(repo.conn, ctx.row, text, ctx.worker.config.channels.feishu)
 
 
 async def _new(ctx):
+    """结束当前执行并创建新会话。"""
     await _session_end(ctx, '/new')
     return CommandResult()
 
 
 async def _cancel(ctx):
+    """停止当前执行并保留已发生的操作。"""
     await _session_end(ctx, '/cancel')
     return CommandResult()
 
 
 async def _usage(ctx):
+    """委托 worker 查询当前会话的模型用量。"""
     await ctx.worker.show_usage(ctx.row)
     return CommandResult()
 
 
 async def _list(ctx):
+    """分页列出当前聊天绑定下的会话。"""
     page = ctx.value
     async with session_storage(ctx.worker.config.sessions) as repo:
         conn = repo.conn
@@ -69,6 +81,8 @@ async def _list(ctx):
             async with conn.transaction():
                 await reply(conn, ctx.row, stored['result'], ctx.worker.config.channels.feishu)
             return CommandResult()
+
+        # 每页展示 10 条，多取 1 条判断是否需要显示下一页。
         rows = await repo.list_binding(ctx.row['binding'], (page - 1) * 10, 11)
         if not rows:
             text = '当前聊天暂无会话。' if page == 1 else '该页没有会话。'
@@ -82,6 +96,8 @@ async def _list(ctx):
             if len(rows) > 10:
                 lines.append(f'下一页：/list {page + 1}')
             text = '\n\n'.join(lines)
+
+        # 命令结果与回复一起提交，重复处理时可复用结果。
         async with conn.transaction():
             await commands.upsert_result(ctx.row['id'], ctx.row['binding'], '/list', None, text)
             await reply(conn, ctx.row, text, ctx.worker.config.channels.feishu)
@@ -89,6 +105,7 @@ async def _list(ctx):
 
 
 async def _delete(ctx):
+    """删除当前聊天下的指定会话，并保留不属于会话的数据。"""
     target = ctx.value
     async with session_storage(ctx.worker.config.sessions) as repo:
         conn = repo.conn
@@ -103,6 +120,7 @@ async def _delete(ctx):
             text = '会话已删除。' if stored else '未找到可删除的会话。'
         else:
             try:
+                # 加锁后重新检查状态；运行中的会话需先取消并完成清理。
                 await repo.acquire(target)
                 current = await repo.status_for_binding(target, ctx.row['binding'])
                 if not current or current['status'] == 'running':
@@ -114,6 +132,7 @@ async def _delete(ctx):
                 text = '会话已删除（应用侧聊天、摘要及 checkpoint）。飞书消息、知识库、文件和必要业务回执保留。'
             except SessionError:
                 check = await repo.status(target)
+                # 已进入删除中的异常交由上层处理，不误报为普通占用。
                 if check and check['status'] == 'deleting':
                     raise
                 text = '会话正在使用，请先 /cancel 并等待清理结束。'
@@ -124,6 +143,7 @@ async def _delete(ctx):
 
 
 async def _skills(ctx):
+    """列出当前已发现的 Skills，并保存命令结果。"""
     catalog = getattr(ctx.worker.resources, 'skills', None)
     text = '\n'.join(f"{s.id} | {s.metadata['name']}：{s.metadata['description']}"
                      for s in catalog.skills.values()) if catalog else '未配置 Skills。'
@@ -144,6 +164,7 @@ async def _rag(ctx):
 
 
 async def _plan(ctx):
+    """将规划命令转换为需要启动的模型轮次。"""
     if not getattr(getattr(ctx.worker.config, 'planning', None), 'enabled', False):
         await ctx.worker.enqueue_reply(ctx.row, '规划能力未启用。')
         return CommandResult()
@@ -155,6 +176,7 @@ async def _plan(ctx):
 
 
 async def _skill(ctx):
+    """解析用户指定的 Skill，再把请求交给模型轮次。"""
     from ai_assistant.skills.catalog import SkillError
     identity, text = ctx.value
     if ctx.recover:
@@ -172,6 +194,7 @@ async def _skill(ctx):
     return CommandResult(start_turn=True, turn_text=text, skill_ids=[identity])
 
 
+# 参数解析器只负责校验和转换；无效输入由通用命令注册表返回用法。
 def _no_args(text):
     if text:
         raise ValueError
@@ -214,12 +237,15 @@ def _plan_parse(text):
 
 
 def _rag_parse(text):
+    # 知识库子命令的语法由知识库模块统一维护。
     from ai_assistant.knowledge.commands import parse as parse_rag
     parts = ['/rag'] + (text.split(maxsplit=1) if text else [])
     return parse_rag(parts)
 
 
 def default_registry():
+    """集中声明飞书命令、参数解析器及调度标记。"""
+    # preempt 用于抢占当前执行；turn 标记需要进入模型轮次的命令。
     return CommandRegistry([
         CommandSpec('/new', '/new', _no_args, _new, preempt=True, progress=False),
         CommandSpec('/cancel', '/cancel', _no_args, _cancel, preempt=True, progress=False),

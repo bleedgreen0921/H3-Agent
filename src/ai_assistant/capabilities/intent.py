@@ -5,6 +5,7 @@
 import re
 from dataclasses import dataclass
 
+# 将中英文关键词归一到通用动作，供请求和能力描述共同使用。
 ACTION_TERMS = {
     'read': ('read', 'get', 'download', 'open', 'load', 'fetch', 'raw', 'content', '读取', '查看', '打开', '下载', '抓取'),
     'summarize': ('summarize', 'summary', 'summarise', '分析', '总结', '概括'),
@@ -16,8 +17,10 @@ ACTION_TERMS = {
     'upload': ('upload', '上传'),
     'send': ('send', 'post', '发送'),
 }
+# 含这些动作的意图或能力会被标记为可能产生写入效果。
 WRITE_ACTIONS = frozenset({'create', 'update', 'delete', 'upload', 'send'})
 
+# 领域描述业务范围，对象描述操作目标；一个词可以属于多个类别。
 DOMAIN_TERMS = {
     'docs': ('document', 'docx', 'wiki', 'drive', 'markdown', '文档', '论文', 'pdf', '知识库'),
     'tasks': ('task', 'todo', '任务', '待办'),
@@ -46,12 +49,15 @@ OBJECT_TERMS = {
 }
 ATTACHMENT_TERMS = ('file reference', 'file_key', 'attachment', '附件')
 
+# 英文按词提取；中文先提取连续文本，再补充相邻双字词。
 _WORD = re.compile(r'[a-z0-9_]+')
 _CJK = re.compile(r'[\u4e00-\u9fff]+')
 
 
 @dataclass(frozen=True)
 class QueryIntent:
+    """保存一次关键词推导出的意图，供能力路由使用。"""
+
     actions: frozenset[str] = frozenset()
     objects: frozenset[str] = frozenset()
     domains: frozenset[str] = frozenset()
@@ -60,12 +66,14 @@ class QueryIntent:
     confidence: float = 0.0
 
     def summary(self):
+        # 排序后便于稳定展示和记录；此摘要不包含置信度。
         return {'actions': sorted(self.actions), 'objects': sorted(self.objects),
                 'domains': sorted(self.domains), 'side_effect': self.side_effect,
                 'attachments': self.attachments}
 
 
 def _tokens(text):
+    """提取英文词、连续中文片段及其相邻双字词。"""
     text = (text or '').casefold()
     tokens = set(_WORD.findall(text))
     for run in _CJK.findall(text):
@@ -75,11 +83,13 @@ def _tokens(text):
 
 
 def _matches(text, groups):
+    """按子串匹配返回所有命中的类别，不做语义或否定判断。"""
     text = (text or '').casefold()
     return {name for name, terms in groups.items() if any(term in text for term in terms)}
 
 
 def query_terms(query):
+    """为检索生成原始词项，并补充命中的标准类别名称。"""
     terms = _tokens(query)
     for groups in (ACTION_TERMS, DOMAIN_TERMS, OBJECT_TERMS):
         for name, words in groups.items():
@@ -104,12 +114,15 @@ def infer_descriptor(name, description, *, write_hint=False, use_description=Tru
 
 
 def extract(query):
+    """从用户请求推导动作、对象、领域、附件和读写倾向。"""
     text = (query or '').casefold()
     actions = _matches(text, ACTION_TERMS)
     objects = _matches(text, OBJECT_TERMS)
     domains = _matches(text, DOMAIN_TERMS)
     attachments = any(term in text for term in ATTACHMENT_TERMS)
     side_effect = 'write' if actions & WRITE_ACTIONS else 'read'
+
+    # 置信度仅按命中类别数粗略估算，不代表模型概率或权限判断。
     matches = len(actions) + len(objects) + len(domains) + int(attachments)
     return QueryIntent(actions=frozenset(actions), objects=frozenset(objects),
                        domains=frozenset(domains), side_effect=side_effect,

@@ -17,6 +17,7 @@ class CapabilityRegistry:
     """不可变能力目录；选择计划由 router 生成。"""
 
     def __init__(self, tools, descriptors, skills, settings, policy, log_path=None):
+        # 保存输入映射的副本，并预先整理核心工具和 Skill 的 ID。
         self.tools = dict(tools)
         self.descriptors = dict(descriptors)
         self.skills = dict(skills)
@@ -30,6 +31,7 @@ class CapabilityRegistry:
 
     @classmethod
     def from_sources(cls, tools, *, mcp=None, skills=None, settings=None, log_path=None):
+        """将已装配的工具、MCP 信息和 Skills 整理为统一能力目录。"""
         policy = CapabilityPolicy(
             max_schema_tokens=getattr(settings, 'max_schema_tokens', 25000),
             top_k=getattr(settings, 'top_k', 8),
@@ -39,6 +41,8 @@ class CapabilityRegistry:
         configured_core = tuple(getattr(settings, 'core', ()) or policy.core_tools)
         descriptors = {}
         tool_map = {}
+
+        # 每个工具保留来源、身份、读写效果和 schema 成本。
         for tool in tools:
             name = tool.name
             entry = entries.get(name)
@@ -60,6 +64,7 @@ class CapabilityRegistry:
                 core=name in configured_core, write=side_effect == 'write', tool=tool)
             tool_map[name] = tool
 
+        # Skill 使用同一描述结构，但预算按目录说明而非工具 schema 估算。
         skill_map = {}
         for skill in (getattr(skills, 'skills', {}) or {}).values():
             description = str(skill.metadata.get('description', ''))
@@ -76,6 +81,7 @@ class CapabilityRegistry:
                 core=False, tool=None, skill=skill)
             skill_map[skill.id] = skill
 
+        # 核心工具未装配时仅告警，不因可选能力缺失中断注册。
         missing = [name for name in configured_core if name not in tool_map]
         if missing:
             logger.warning('Unknown core capability names: %s', ', '.join(missing))
@@ -83,21 +89,25 @@ class CapabilityRegistry:
 
     @staticmethod
     def skill_directory_line(skill):
+        """生成展示给模型的单行 Skill 目录信息。"""
         name = skill.metadata.get('name', skill.id)
         return f"{skill.id} | {name}: {skill.metadata.get('description', '')}"
 
     @staticmethod
     def _tokens(text):
+        """按消息格式近似估算文本 token 数。"""
         from langchain_core.messages import SystemMessage
         return count_tokens_approximately([SystemMessage(content=text)])
 
     def build_policy(self):
+        """从已登记的工具效果构建运行时读写分类策略。"""
         from ai_assistant.capabilities.policy import CapabilityPolicy
         return CapabilityPolicy({name: item.side_effect for name, item in self.descriptors.items()
                                  if item.kind == 'tool'})
 
     def plan(self, query, *, directory_budget=6000, active_skill_ids=(),
              server=None, identity=None, effect=None):
+        """生成初始计划，再应用资源身份、读写和 schema 预算约束。"""
         from ai_assistant.capabilities.router import build_plan
         plan = build_plan(self, query, directory_budget=directory_budget,
                           active_skill_ids=active_skill_ids, effect=effect)
@@ -136,6 +146,7 @@ class CapabilityRegistry:
 
     @staticmethod
     def _is_doc_descriptor(descriptor):
+        """根据服务、标签和原始名称识别文档或文件相关能力。"""
         return bool(descriptor.server and (
             descriptor.domains & {'docs', 'files'}
             or descriptor.objects & {'document', 'file'}
@@ -145,6 +156,7 @@ class CapabilityRegistry:
 
     @staticmethod
     def _creates_document(descriptor):
+        """根据原始工具名识别受创建限制的能力。"""
         original = descriptor.original_name.casefold()
         return any(term in original for term in
                    ('document_create', 'doc_create', 'spacenode_create'))
@@ -152,6 +164,7 @@ class CapabilityRegistry:
     def seed_resource_tools(self, plan, *, server=None, identity=None,
                             effect=None, forbid_create=False, append=False):
         """资源任务的必备工具由资源解析确定，不依赖查询检索是否命中。"""
+        # 先筛选目标服务和身份下符合读写、创建限制的文档工具。
         candidates = []
         for descriptor in self.descriptors.values():
             if descriptor.kind != 'tool' or not self._is_doc_descriptor(descriptor):
@@ -165,6 +178,7 @@ class CapabilityRegistry:
             if effect == 'read' and descriptor.write:
                 continue
             candidates.append(descriptor)
+
         # 追加任务优先使用高层语义工具；没有时回退到原生 block 工具。
         def priority(item):
             original = item.original_name.casefold()
@@ -177,6 +191,7 @@ class CapabilityRegistry:
                     return 1
                 return 2
             return 3
+
         candidates.sort(key=lambda item: (priority(item), item.schema_tokens, item.id))
         maximum = int(plan.max_schema_tokens or
                       getattr(self.settings, 'max_schema_tokens', 0) or 0)
@@ -198,6 +213,7 @@ class CapabilityRegistry:
         action_ids = {item.id for item in action}
         if effect == 'write' and not action_ids:
             raise ValueError('目标文档没有可用的写入工具。')
+
         # 动作工具是必达能力；readers 可以在预算内补充，但不能把必达工具
         # 以外的 schema 挤进模型上下文。动作工具本身超预算时明确失败。
         selected, used = [], 0
@@ -213,6 +229,7 @@ class CapabilityRegistry:
                 used += cost
         semantic_append = bool(action) and any(
             'append_markdown' in item.original_name.casefold() for item in action)
+
         # 语义追加已覆盖块构造，不再把原生 block 工具作为可选项塞回上下文。
         existing = [item.id for item in candidates if item.id not in selected]
         existing += [name for name in plan.tool_ids if name not in selected]
@@ -250,6 +267,8 @@ class CapabilityRegistry:
         maximum = int(plan.max_schema_tokens or getattr(self.settings, 'max_schema_tokens', 0) or 0)
         known = set(plan.tool_ids)
         candidates = []
+
+        # 排除已绑定或不符合当前计划约束的工具，再对相关候选评分。
         for name, descriptor in self.descriptors.items():
             if (descriptor.kind != 'tool' or descriptor.core
                     or name == 'search_tools' or name in known):
@@ -270,6 +289,8 @@ class CapabilityRegistry:
             if score > 0:
                 candidates.append((score, descriptor))
         candidates.sort(key=lambda item: (-item[0], item[1].id))
+
+        # 按分数加入预算允许的工具，并报告因预算跳过的数量。
         added, skipped = [], 0
         used = plan.tool_schema_tokens
         for _, descriptor in candidates:
@@ -284,6 +305,7 @@ class CapabilityRegistry:
         plan.tool_schema_tokens = used
         return added, skipped, bool(skipped and not added)
 
+    # 以下方法按 ID 取回能力对象、目录文本和预算统计。
     def all_tool_ids(self):
         return [name for name, item in self.descriptors.items() if item.kind == 'tool']
 
@@ -306,11 +328,13 @@ class CapabilityRegistry:
                 if name in self.skills]
 
     def score(self, descriptor, terms, intent=None):
+        """按名称、描述和可选意图标签计算工具相关性分数。"""
         if descriptor.kind != 'tool':
             return 0
         name = descriptor.name.casefold()
         original = descriptor.original_name.casefold()
         text = (name + ' ' + original + ' ' + descriptor.description).casefold()
+        # 名称命中权重高于描述；意图标签再按领域、动作、对象加权。
         score = sum(3 if term in name else 2 if term in original else 1
                     for term in terms if term in text)
         if intent is not None:
@@ -322,6 +346,7 @@ class CapabilityRegistry:
         return score
 
     def search_tools(self, query, limit=8):
+        """返回匹配的非核心工具摘要，不直接修改能力计划。"""
         terms = query_terms(query)
         items = []
         for name, descriptor in self.descriptors.items():
@@ -351,6 +376,8 @@ class CapabilityRegistry:
               search_calls=search_calls, reason=plan.reason)
         if self.log_path is None:
             return
+
+        # 可选 JSONL 日志记录计划摘要；写入失败不阻断当前业务。
         record = {
             'ts': datetime.now(timezone.utc).isoformat(),
             'input_id': input_id,
@@ -377,6 +404,7 @@ class CapabilityRegistry:
 
     @staticmethod
     def _plan_hash(plan):
+        """对排序后的能力 ID 计算短哈希，便于关联同一计划快照。"""
         payload = {'tools': sorted(plan.tool_ids),
                    'skills': sorted(plan.skill_directory_ids),
                    'active': sorted(plan.active_skill_ids)}

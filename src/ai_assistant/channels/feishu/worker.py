@@ -55,6 +55,7 @@ def failure_message(error):
 
 @dataclass(frozen=True)
 class ProcessResources:
+    """服务进程共享的 MCP、Skill、能力缓存和命令注册资源。"""
     catalog: object
     skills: object = None
     capability_cache: dict | None = None
@@ -64,6 +65,7 @@ class ProcessResources:
 
 
 def caller_for(config, row):
+    """从已登记的输入验证主人私聊身份，构造可信调用者。"""
     settings = config.integrations.feishu
     body = row['body']
     if body.get('owner_open_id') != settings.owner_open_id:
@@ -74,6 +76,8 @@ def caller_for(config, row):
 
 
 class BotWorker:
+    """消费飞书输入，调度命令和会话轮次，并登记回复。"""
+
     def __init__(self, config, store, resources, api=None):
         self.config, self.store, self.resources, self.api = config, store, resources, api
         self.commands = getattr(resources, 'commands', None) or default_registry()
@@ -83,17 +87,22 @@ class BotWorker:
             self.outbox = getattr(store, 'outbox', None) or OutboxRepository(store.conn)
         else:
             self.inbox = self.outbox = None
+
+        # 跟踪当前后台执行及其输入，供抢占命令取消和清理。
         self.active = None
         self.active_row = None
 
     async def enqueue_reply(self, row, text, *, conn=None, purpose='answer', snapshot=None,
                             presentation_ref=None):
+        """在事务中登记回复；真正的飞书发送由独立投递器完成。"""
         from ai_assistant.channels.feishu.outbox import enqueue_text
 
         async def enqueue(connection):
             async with connection.transaction():
                 await enqueue_text(connection, self.config.channels.feishu, row, text,
                     purpose=purpose, snapshot=snapshot, presentation_ref=presentation_ref)
+
+        # 优先使用调用方连接，否则为回复登记单独获取存储连接。
         if conn is not None:
             await enqueue(conn)
         else:
@@ -112,6 +121,8 @@ class BotWorker:
         """
         if progress is None:
             return
+
+        # 屏蔽外层取消，确保卡片终态清理结束后再传播取消。
         task = asyncio.create_task(progress.finish(state, phase=phase))
         try:
             await asyncio.shield(task)
@@ -138,6 +149,8 @@ class BotWorker:
         if saved:
             await self.inbox.mark_completed(row['id'])
             return
+
+        # 没有批次时只读取已保存的轮次结果；找不到则登记待核实提示。
         async with session_storage(self.config.sessions) as repo:
             session = await repo.binding_session(row['binding'])
             if not session:
@@ -152,6 +165,7 @@ class BotWorker:
         await self.enqueue_reply(row, display.text, snapshot=display.snapshot())
 
     async def binding_session(self, row):
+        """查询当前聊天绑定的会话 ID。"""
         from ai_assistant.storage.sessions import SessionRepository
         result = await SessionRepository(self.store.conn, None).binding_session_id(row['binding'])
         return str(result['session_id']) if result else None
@@ -171,11 +185,13 @@ class BotWorker:
         await self.enqueue_reply(row, text)
 
     async def save_binding(self, row, session_id, conn):
+        """将当前聊天绑定到会话，并在事务内提交。"""
         from ai_assistant.interfaces.chat_commands import bind
         async with conn.transaction():
             await bind(conn, row['binding'], session_id)
 
     async def execute(self, row, *, recover=False):
+        """执行或恢复一条输入，回复登记后执行轮次后处理。"""
         # 回复已登记后结束执行 trace；摘要独立记录，资源和会话锁仍由同一作用域清理。
         async with AsyncExitStack() as stack:
             with span("request.execute", input_id=row["id"]):
@@ -184,11 +200,14 @@ class BotWorker:
                 await session.after_reply()
 
     async def _execute(self, row, stack, *, recover=False):
+        """校验输入、处理命令，并在需要时运行或恢复会话轮次。"""
         from datetime import datetime, timezone
         from time import monotonic
         preparation_started = monotonic()
         if row.get("received_at"):
             event("request.dequeued", queue_wait_seconds=max(0, (datetime.now(timezone.utc) - row["received_at"]).total_seconds()))
+
+        # 校验可信主人身份，再解析命令；解析错误直接登记提示。
         caller = caller_for(self.config, row)
         text = row['body']['text'].strip()
         command, value = self.commands.parse(text)
@@ -199,6 +218,7 @@ class BotWorker:
             return None
         result = None
         command_kwargs = {}
+
         # 延迟工作卡只服务真实等待；即时指令和关闭状态不建卡。
         progress = None
         channel = getattr(getattr(self.config, 'channels', None), 'feishu', None)
@@ -209,6 +229,8 @@ class BotWorker:
                 chat_id=row['body']['chat_id'], input_id=row['id'],
                 on_created=self._remember_progress_card)
             progress.start()
+
+        # 命令可直接结束，也可返回需要继续执行的轮次参数。
         if command is not None:
             result = await command.handler(CommandContext(
                 worker=self, row=row, caller=caller, text=text,
@@ -224,9 +246,12 @@ class BotWorker:
         else:
             skill_ids = None
         try:
+            # 恢复模式只读取结果，不创建 Agent 或重跑旧业务。
             if recover:
                 await self.recover_reply(row)
                 return
+
+            # 打开或恢复绑定会话，登记当前绑定并把进度回调传入轮次。
             session_id = await self.binding_session(row)
             session = await stack.enter_async_context(assistant_session(
                 self.config, session_id=session_id, caller=caller, resources=self.resources))
@@ -237,6 +262,8 @@ class BotWorker:
             if progress is not None:
                 turn_kwargs['on_event'] = progress.on_event
             result = await session.run_turn(text, **turn_kwargs)
+
+            # 将已保存的业务结果投影为展示文本，再登记到 outbox。
             from ai_assistant.runtime.presentation import project, saved_body
             display = project(result.result, saved_body(result.result, result.messages))
             await self.enqueue_reply(row, display.text, snapshot=display.snapshot(),
@@ -245,6 +272,7 @@ class BotWorker:
             await self._finish_progress(progress, display.state)
             return session
         except BaseException as error:
+            # 取消和异常均尽力结束工作卡，原始异常继续向上传播。
             state = 'cancelled' if isinstance(error, asyncio.CancelledError) else 'failed'
             with suppress(Exception):
                 await self._finish_progress(progress, state)
@@ -269,6 +297,8 @@ class BotWorker:
                     or target.get('active_input_id') != str(self.active_row['id'])):
                 from ai_assistant.storage.sessions import SessionError
                 raise SessionError('取消目标已变化，未取消当前执行。')
+
+            # 取消后等待任务及其工具清理完成，失败时向上报告。
             self.active.cancel()
             from ai_assistant.cancellation import _drain_worker
             await _drain_worker(self.active)
@@ -297,8 +327,10 @@ class BotWorker:
                          row['id'], type(exc).__name__)
 
     async def run(self):
+        """循环消费 inbox，同时监督已派发的后台执行。"""
         try:
             while True:
+                # 先回收已结束任务；异常或取消后优先只读恢复已保存结果。
                 if self.active and self.active.done():
                     try:
                         self.active.result()
@@ -319,6 +351,8 @@ class BotWorker:
                             # checkpoint 提交也可能已成功但确认失败，先只读检查，不能覆盖原答案。
                             await self.recover_reply(self.active_row, fallback=failure_message(exc))
                     self.active = self.active_row = None
+
+                # 从 inbox 获取输入；历史群消息保留但不处理。
                 rows = await self.inbox.received()
                 for row in rows:
                     if (row.get('body') or {}).get('group') is not False:
@@ -327,6 +361,8 @@ class BotWorker:
                     spec, value = self.commands.parse(text)
                     turn_command = bool(spec and (spec.turn or (
                         spec.turn_check is not None and spec.turn_check(value))))
+
+                    # 抢占命令先完成取消清理，再执行命令并登记回执。
                     if spec is not None and spec.preempt:
                         try:
                             caller_for(self.config, row)
@@ -335,6 +371,8 @@ class BotWorker:
                         except Exception as exc:
                             await self.enqueue_reply(row, failure_message(exc))
                         continue
+
+                    # 不需后台派发的输入先领取，再直接执行处理流程。
                     if not turn_command:
                         try:
                             await self.inbox.claim(row['id'])
@@ -345,12 +383,15 @@ class BotWorker:
                             else:
                                 await self.enqueue_reply(row, failure_message(exc))
                         continue
+
+                    # 需后台执行的命令仅在当前没有活动任务时派发。
                     if self.active is None:
                         await self.inbox.claim(row['id'])
                         self.active_row = row
                         self.active = asyncio.create_task(self.execute(row))
                 await asyncio.sleep(0.25)
         finally:
+            # 服务关闭时取消活动任务，并等待资源清理结束。
             if self.active:
                 self.active.cancel()
                 from ai_assistant.cancellation import _drain_worker
