@@ -168,6 +168,8 @@ class PlanningConfig(BaseModel):
     task_tool_call_limit: int = Field(default=40, gt=0, strict=True)
     task_timeout_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
     planner_timeout_seconds: float = Field(default=90, gt=0, allow_inf_nan=False)
+    intent_timeout_seconds: float = Field(default=15, gt=0, allow_inf_nan=False)
+    intent_confidence: float = Field(default=0.8, gt=0, le=1, allow_inf_nan=False)
     default_document_identity: Literal['user', 'bot'] = 'user'
 
 

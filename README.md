@@ -85,7 +85,7 @@ cp config.example/assistant.example.toml assistant.toml
 
 ## 规划模式
 
-在 Web 输入 `/plan` 或使用规划按钮：
+在 Web 顶部切换到“规划模式”，或输入 `/plan`：
 
 ```text
 /plan 整理本周会议并创建待办
@@ -93,6 +93,10 @@ cp config.example/assistant.example.toml assistant.toml
 /plan status
 /plan exit
 ```
+
+顶部持续显示当前模式；输入框固定在页面底部，长会话只滚动消息区。规划面板可折叠查看目标、待补充问题和任务进度，执行中会定时刷新；页面普通刷新即可加载最新前端资源。
+
+Web 端的模式切换和按钮等价于 `/plan`、`/plan run`、`/plan exit`，不需要手打命令。规划模式内也可以直接回复“开始执行”“退出规划模式”“计划状态”；系统会用同一个对话模型做一次短意图判断，置信度低于 0.8 或判断失败时不执行，按普通补充处理。
 
 Planner 只生成草稿，不执行工具；信息不足时先返回问题并暂停执行，用户补充后重新规划。`/plan run` 后只读任务并行、写任务串行。规划模式由用户手动进入和退出；任务完成、失败或取消后仍保留计划状态，发送新目标可重新规划，`/plan exit` 才回到普通对话；不自动重跑旧计划。
 

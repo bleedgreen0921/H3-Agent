@@ -6,7 +6,6 @@ from html import escape
 import json
 import logging
 from pathlib import Path
-import re
 import secrets
 from typing import Annotated
 
@@ -17,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from ai_assistant.attachments.service import AttachmentError
+from ai_assistant.web.render import safe_html as _safe_html
 from ai_assistant.web.runtime import WebRuntime, failure_message
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,12 @@ ROOT = Path(__file__).parent
 
 def _token_path(config):
     return config.web.token_path()
+
+
+def _asset_version():
+    """用静态文件修改时间生成查询参数，避免浏览器沿用旧前端资源。"""
+    files = (ROOT / "static" / "app.js", ROOT / "static" / "app.css")
+    return str(max(int(path.stat().st_mtime) for path in files))
 
 
 def _load_token(config):
@@ -45,18 +51,6 @@ def _authorized(request: Request, token: str) -> bool:
     cookie = request.cookies.get("assistant_token")
     query = request.query_params.get("token")
     return token in {header, cookie, query}
-
-
-def _safe_html(text: str) -> str:
-    """Markdown 渲染前转义原始 HTML，并限制链接协议。"""
-    import markdown
-    rendered = markdown.markdown(escape(text or ""), extensions=[
-        "fenced_code", "tables", "nl2br", "sane_lists"])
-    rendered = re.sub(r'<(img|script|style|iframe)[^>]*>', "", rendered,
-                      flags=re.IGNORECASE)
-    rendered = re.sub(r'href="(?!https?://|/|#|mailto:)[^"]*"',
-                      'href="#"', rendered)
-    return rendered
 
 
 class TurnRequest(BaseModel):
@@ -97,6 +91,15 @@ def create_app(config) -> FastAPI:
         return templates.TemplateResponse(
             request, "login.html", {"request": request}, status_code=401)
 
+    @app.middleware("http")
+    async def revalidate_ui(request: Request, call_next):
+        # 本地单用户入口不做前端资源指纹；禁止启发式缓存，刷新即可拿到最新界面。
+        response = await call_next(request)
+        if (request.url.path.startswith("/static")
+                or request.url.path in {"/", "/login"}):
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
     @app.on_event("startup")
     async def startup():
         await runtime.start()
@@ -127,7 +130,9 @@ def create_app(config) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
-        return templates.TemplateResponse(request, "index.html", {"request": request})
+        return templates.TemplateResponse(
+            request, "index.html",
+            {"request": request, "asset_version": _asset_version()})
 
     @app.get("/api/sessions")
     async def list_sessions():
@@ -257,7 +262,7 @@ def create_app(config) -> FastAPI:
 
     @app.get("/api/plan/{session_id}")
     async def plan(session_id: str):
-        return {"planning": await runtime.plan_state(session_id)}
+        return await runtime.plan_state(session_id)
 
     async def _knowledge_store():
         if config.knowledge is None:

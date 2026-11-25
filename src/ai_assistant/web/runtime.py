@@ -15,8 +15,25 @@ from ai_assistant.runtime.types import final_text
 from ai_assistant.storage.attachments import AttachmentService
 from ai_assistant.storage.sessions import session_storage
 from ai_assistant.storage.web import WebMessageStore
+from ai_assistant.web.render import safe_html
 
 logger = logging.getLogger(__name__)
+
+
+def _task_results_view(value):
+    """只向 UI 暴露状态和短摘要，避免每次轮询重复传输完整产物。"""
+    if not isinstance(value, dict):
+        return None
+    items = {}
+    for task_id, result in (value.get("items") or {}).items():
+        if not isinstance(result, dict):
+            continue
+        items[task_id] = {
+            key: result[key] for key in
+            ("id", "status", "summary", "error", "questions", "attempts")
+            if key in result
+        }
+    return {"plan_id": value.get("plan_id"), "items": items}
 
 
 def failure_message(error):
@@ -113,6 +130,7 @@ class TurnBroker:
                     "session_id": turn.session_id,
                     "status": status,
                     "text": body,
+                    "html": safe_html(body or ""),
                     "sources": self.runtime.serialize_sources(result.sources),
                     "usage": self.runtime.serialize_usage(result.usage),
                 }
@@ -258,20 +276,23 @@ class WebRuntime:
         return await self.messages.list(session_id)
 
     async def plan_state(self, session_id):
+        """返回规划状态和任务结果；两者都来自 checkpoint。"""
+        empty = {"planning": None, "task_results": None}
         async with session_storage(self.config.sessions) as repo:
             row = await (await repo.execute(
                 "SELECT thread_id FROM assistant_sessions WHERE id=%s",
                 (str(session_id),))).fetchone()
             if not row:
-                return None
+                return empty
             try:
                 snapshot = await repo.saver.aget_tuple(
                     {"configurable": {"thread_id": row["thread_id"]}})
             except Exception:
-                return None
+                return empty
             values = (snapshot.checkpoint.get("channel_values", {})
                       if snapshot is not None else {})
-            return values.get("planning")
+            return {"planning": values.get("planning"),
+                    "task_results": _task_results_view(values.get("task_results"))}
 
     async def attachment_metadata(self, session_id, ids):
         result = []

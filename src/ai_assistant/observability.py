@@ -42,6 +42,7 @@ _ALLOWED = frozenset({"input_id", "session_id", "thread_id", "execution_thread_i
     "tool_count", "selected_count", "schema_tokens", "reason",
     # 能力计划与命令：只记录名称、计数、哈希和内部标识，不记录用户正文。
     "kind", "command", "target_id", "change", "plan_hash", "skill_id", "action",
+    "intent", "confidence",
     "skill_count", "selected_skill_count", "active_skill_count", "skill_directory_tokens",
     "selected_tools", "selected_skills", "search_calls",
     # 边界事件：稳定错误码、可重试标记和模型调用顺序。

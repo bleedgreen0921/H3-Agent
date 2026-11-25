@@ -1,10 +1,41 @@
 const state = {
-  sessions: [], currentSession: null, currentInput: null,
-  attachments: [], streamText: "", streamEl: null, source: null,
+  sessions: [],
+  currentSession: null,
+  currentInput: null,
+  attachments: [],
+  streamText: "",
+  streamItem: null,
+  streamBody: null,
+  streamHead: null,
+  streamPre: null,
+  streamState: null,
+  streamStatus: null,
+  source: null,
   planning: null,
+  taskResults: null,
+  pendingPlan: false,
+  planOpen: null,
+  planTimer: null,
+  knowledgeTimer: null,
+  knowledgeJob: null,
+  activeTab: "chat",
 };
 
 const $ = (id) => document.getElementById(id);
+const PLAN_LABELS = {
+  draft: "草稿", running: "执行中", completed: "已完成",
+  failed: "失败", cancelled: "已取消",
+};
+const TASK_ICONS = {
+  done: "✓", failed: "!", unknown: "!", partial: "!",
+  blocked: "■", needs_input: "?", cancelled: "×",
+  superseded: "↷", running: "◐", pending: "○",
+};
+const SOURCE_KINDS = {
+  local_directory: "本地目录", feishu_wiki: "飞书知识库",
+  feishu_doc: "飞书文档", feishu_sheet: "飞书表格",
+  feishu_base: "飞书多维表格",
+};
 
 async function api(path, options = {}) {
   const response = await fetch(path, { credentials: "same-origin", ...options });
@@ -24,126 +55,622 @@ function el(tag, className, text) {
   return node;
 }
 
-function addMessage(role, text, html, meta) {
+let toastTimer = null;
+function showToast(message, kind = "error") {
+  const node = $("toast");
+  node.textContent = message || "";
+  node.className = `toast ${kind}`;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { node.className = "toast hidden"; }, 4200);
+}
+
+function formatTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function fullTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString();
+}
+
+function relativeTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const diff = Date.now() - date.getTime();
+  if (diff < 60_000) return "刚刚";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+  return date.toLocaleDateString();
+}
+
+function formatBytes(value) {
+  if (!Number.isFinite(value)) return "";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+function isNearBottom() {
+  const node = $("messages");
+  return node.scrollHeight - node.scrollTop - node.clientHeight < 120;
+}
+
+function jumpToBottom() {
+  const node = $("messages");
+  node.scrollTop = node.scrollHeight;
+}
+
+function renderEmptyState(title, text) {
+  const box = el("div", "empty-state");
+  box.appendChild(el("div", "empty-title", title));
+  box.appendChild(el("div", "empty-text", text));
+  $("messages").appendChild(box);
+}
+
+function addMessage(role, text, html, createdAt) {
+  const stick = isNearBottom();
+  // 空会话提示只在消息列表为空时存在；第一条消息到达后立即移除。
+  const empty = $("messages").querySelector(".empty-state");
+  if (empty) empty.remove();
+  const labels = { user: "你", assistant: "助手", system: "系统" };
   const item = el("div", `message ${role}`);
-  item.appendChild(el("div", "role", role === "user" ? "你" : "助手"));
+  const head = el("div", "message-head");
+  head.appendChild(el("span", "role", labels[role] || role));
+  if (createdAt) {
+    const stamp = el("time", "message-time", formatTime(createdAt));
+    stamp.title = fullTime(createdAt);
+    head.appendChild(stamp);
+  }
+  item.appendChild(head);
+
   const body = el("div", "body");
   if (html) body.innerHTML = html;
-  else body.appendChild(el("pre", "", text || ""));
+  else body.appendChild(el("pre", "plain", text || ""));
   item.appendChild(body);
-  if (meta) item.appendChild(el("div", "meta", meta));
   $("messages").appendChild(item);
-  $("messages").scrollTop = $("messages").scrollHeight;
-  return body;
+  if (stick) jumpToBottom();
+  return { item, body, head };
 }
 
-function statusLine(text) {
-  const node = el("div", "tool-status", text);
-  $("messages").appendChild(node);
-  $("messages").scrollTop = $("messages").scrollHeight;
+function clearToolStatus() {
+  if (state.streamStatus) state.streamStatus.remove();
+  state.streamStatus = null;
 }
 
-async function loadSessions() {
-  state.sessions = await api("/api/sessions");
+function setToolStatus(text) {
+  if (!state.streamItem) return;
+  const stick = isNearBottom();
+  if (!state.streamStatus) {
+    state.streamStatus = el("div", "tool-status", text);
+    state.streamItem.insertAdjacentElement("afterend", state.streamStatus);
+  } else {
+    state.streamStatus.textContent = text;
+  }
+  if (stick) jumpToBottom();
+}
+
+function clearStreamState() {
+  if (state.streamState) state.streamState.remove();
+  state.streamState = null;
+}
+
+function resetStreamState() {
+  state.streamText = "";
+  state.streamItem = null;
+  state.streamBody = null;
+  state.streamHead = null;
+  state.streamPre = null;
+  clearStreamState();
+  clearToolStatus();
+}
+
+function setBusy(busy) {
+  $("send-button").disabled = busy;
+  $("mode-chat").disabled = busy;
+  $("mode-plan").disabled = busy;
+  $("new-session").disabled = busy;
+  $("plan-run").disabled = busy;
+  $("cancel-button").hidden = !busy;
+}
+
+function setModeButton(button, active) {
+  button.classList.toggle("active", active);
+  button.setAttribute("aria-pressed", active ? "true" : "false");
+}
+
+function planQuestions(planning) {
+  const plan = planning && planning.plan ? planning.plan : {};
+  if (Array.isArray(plan.questions) && plan.questions.length) return plan.questions;
+  if (Array.isArray(planning && planning.questions)) return planning.questions;
+  return [];
+}
+
+function taskStatusOf(taskId) {
+  const items = state.taskResults && state.taskResults.items;
+  const result = items && items[taskId];
+  return result && result.status ? result.status : "pending";
+}
+
+function renderMode() {
+  const planning = state.planning;
+  const inPlan = Boolean(planning) || state.pendingPlan;
+  setModeButton($("mode-chat"), !inPlan);
+  setModeButton($("mode-plan"), inPlan);
+  $("composer-mode").textContent = inPlan ? "规划模式" : "普通对话";
+
+  if (state.pendingPlan) {
+    $("input").placeholder = "输入规划目标，Enter 开始规划";
+    $("composer-hint").textContent = "输入规划目标，Enter 开始规划；Esc 取消";
+    $("composer-hint").classList.remove("hidden");
+  } else if (planning) {
+    $("input").placeholder = "补充计划，或输入新的规划目标";
+    $("composer-hint").classList.add("hidden");
+  } else {
+    $("input").placeholder = "输入消息；Enter 发送，Shift+Enter 换行";
+    $("composer-hint").classList.add("hidden");
+  }
+
+  const plan = planning && planning.plan ? planning.plan : {};
+  const tasks = Array.isArray(plan.tasks) ? plan.tasks : [];
+  const runnable = Boolean(planning && planning.status === "draft"
+    && !planQuestions(planning).length && tasks.length);
+  $("plan-run").hidden = !runnable;
+  $("plan-run").disabled = Boolean(state.currentInput);
+  $("cancel-button").hidden = !state.currentInput;
+}
+
+function setPlanOpen(open) {
+  $("plan-toggle").setAttribute("aria-expanded", open ? "true" : "false");
+  $("plan-body").classList.toggle("hidden", !open);
+}
+
+function renderPlanPanel() {
+  const planning = state.planning;
+  if (!planning) {
+    $("plan-panel").classList.add("hidden");
+    $("plan-goal").textContent = "";
+    $("plan-questions").innerHTML = "";
+    $("plan-tasks").innerHTML = "";
+    $("plan-note").textContent = "";
+    $("plan-progress").textContent = "";
+    state.planOpen = null;
+    return;
+  }
+
+  const plan = planning.plan || {};
+  const status = planning.status || "draft";
+  const tasks = Array.isArray(plan.tasks) ? plan.tasks : [];
+  const questions = planQuestions(planning);
+  const complete = tasks.filter((task) => taskStatusOf(task.id) === "done").length;
+
+  $("plan-panel").classList.remove("hidden");
+  $("plan-status").textContent = `规划 · ${PLAN_LABELS[status] || status}`;
+  $("plan-status-dot").className = `status-dot ${status}`;
+  $("plan-progress").textContent = tasks.length ? `${complete}/${tasks.length}` : "";
+  const goal = plan.goal || planning.goal || "";
+  $("plan-goal").textContent = goal ? `目标：${goal}` : "正在生成计划…";
+
+  const questionBox = $("plan-questions");
+  questionBox.innerHTML = "";
+  questions.forEach((question, index) => {
+    questionBox.appendChild(el("div", "plan-question", `${index + 1}. ${question}`));
+  });
+
+  const taskBox = $("plan-tasks");
+  taskBox.innerHTML = "";
+  tasks.forEach((task) => {
+    const taskStatus = taskStatusOf(task.id);
+    const row = el("li", "plan-task");
+    const icon = el("span", `task-icon ${taskStatus}`, TASK_ICONS[taskStatus] || "○");
+    icon.setAttribute("aria-hidden", "true");
+    const ident = el("span", "plan-task-id", task.id);
+    const text = el("span", "plan-task-text", task.description || task.intent || "");
+    text.title = task.description || task.intent || "";
+    row.append(icon, ident, text);
+    taskBox.appendChild(row);
+  });
+
+  let note = "";
+  if (status === "draft") {
+    note = questions.length ? "请直接在下方补充信息；补充后会重新规划。"
+      : tasks.length ? "计划已就绪；可点击“执行计划”，或直接回复“开始执行”。"
+        : "正在生成计划…";
+  } else if (status === "running") {
+    note = "任务执行中；可取消当前轮次。";
+  } else if (status === "completed") {
+    note = "计划已结束；发送新目标可重新规划，或切换到普通对话。";
+  } else if (status === "failed") {
+    note = "计划未完成；发送新目标可重新规划，或切换到普通对话。";
+  } else if (status === "cancelled") {
+    note = "计划已取消；发送新目标可重新规划，或切换到普通对话。";
+  }
+  if (status === "failed" || status === "cancelled") {
+    const failure = Object.values((state.taskResults && state.taskResults.items) || {})
+      .find((item) => item && item.error && item.error.message);
+    if (failure) note += `\n原因：${failure.error.message}`;
+  }
+  $("plan-note").textContent = note;
+
+  const autoOpen = status === "draft" || status === "running";
+  setPlanOpen(state.planOpen === null ? autoOpen : state.planOpen);
+}
+
+function applyPlan(data) {
+  state.planning = data && data.planning ? data.planning : null;
+  state.taskResults = data && data.task_results ? data.task_results : null;
+}
+
+async function loadPlan() {
+  if (!state.currentSession) {
+    state.planning = null;
+    state.taskResults = null;
+    renderMode();
+    renderPlanPanel();
+    return;
+  }
+  const sessionId = state.currentSession;
+  try {
+    const data = await api(`/api/plan/${sessionId}`);
+    if (state.currentSession !== sessionId) return;
+    applyPlan(data);
+  } catch (_) {
+    state.planning = null;
+    state.taskResults = null;
+  }
+  renderMode();
+  renderPlanPanel();
+  schedulePlanPoll();
+}
+
+function clearPlanTimer() {
+  if (state.planTimer) clearTimeout(state.planTimer);
+  state.planTimer = null;
+}
+
+function schedulePlanPoll() {
+  clearPlanTimer();
+  if (!state.currentSession || state.activeTab !== "chat" || document.hidden) return;
+  if (!state.planning || state.planning.status !== "running") return;
+  state.planTimer = setTimeout(async () => {
+    state.planTimer = null;
+    if (!state.currentSession) return;
+    try {
+      const data = await api(`/api/plan/${state.currentSession}`);
+      applyPlan(data);
+      renderMode();
+      renderPlanPanel();
+    } catch (_) {}
+    schedulePlanPoll();
+  }, 2500);
+}
+
+function updateTitle() {
+  const session = state.sessions.find((item) => item.id === state.currentSession);
+  const title = session ? (session.title || "新会话") : "未选择会话";
+  $("session-title").textContent = title;
+  $("session-title").title = title;
+}
+
+function renderSessions() {
   const list = $("session-list");
   list.innerHTML = "";
   for (const session of state.sessions) {
-    const node = el("div", "session-item", session.title || "新会话");
-    node.title = session.id;
-    if (session.id === state.currentSession) node.classList.add("active");
-    node.onclick = () => selectSession(session.id);
-    list.appendChild(node);
+    const title = session.title || "新会话";
+    const item = el("div", "session-item");
+    item.dataset.id = session.id;
+    item.title = title;
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    if (session.id === state.currentSession) {
+      item.classList.add("active");
+      item.setAttribute("aria-current", "true");
+    }
+    item.appendChild(el("div", "session-title", title));
+    item.appendChild(el("div", "session-meta", relativeTime(session.updated_at)));
+    const remove = el("button", "session-delete", "×");
+    remove.type = "button";
+    remove.title = "删除会话";
+    remove.setAttribute("aria-label", `删除会话：${title}`);
+    remove.onclick = async (event) => {
+      event.stopPropagation();
+      await deleteSession(session.id, title);
+    };
+    item.appendChild(remove);
+    item.onclick = () => selectSession(session.id);
+    item.onkeydown = (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectSession(session.id);
+      }
+    };
+    list.appendChild(item);
   }
-  if (!state.currentSession && state.sessions.length) {
+}
+
+async function refreshSessions({ autoSelect = true } = {}) {
+  state.sessions = await api("/api/sessions");
+  renderSessions();
+  updateTitle();
+  if (autoSelect && !state.currentSession && state.sessions.length) {
     await selectSession(state.sessions[0].id);
   }
 }
 
-async function selectSession(id) {
-  state.currentSession = id;
-  const session = state.sessions.find((item) => item.id === id);
-  $("session-title").textContent = session ? (session.title || "新会话") : id;
-  document.querySelectorAll(".session-item").forEach((node) => {
-    node.classList.toggle("active", node.title === id);
-  });
+function clearChat() {
+  clearPlanTimer();
+  state.currentSession = null;
+  state.currentInput = null;
+  state.pendingPlan = false;
+  state.planning = null;
+  state.taskResults = null;
+  state.planOpen = null;
   $("messages").innerHTML = "";
-  const rows = await api(`/api/sessions/${id}/messages`);
-  for (const row of rows) {
-    addMessage(row.role, row.text, row.html,
-      row.created_at ? new Date(row.created_at).toLocaleString() : "");
-  }
-  await loadPlan();
+  showTab("chat");
+  setBusy(false);
+  renderSessions();
+  updateTitle();
+  renderMode();
+  renderPlanPanel();
+  renderEmptyState("开始一段新对话", "直接输入消息，或切换到规划模式先整理目标。");
 }
 
-function planStatusLabel(status) {
-  return ({draft: "草稿", running: "执行中", completed: "已完成",
-           failed: "失败", cancelled: "已取消"}[status] || status || "草稿");
-}
-
-async function loadPlan() {
-  if (!state.currentSession) return;
-  try {
-    const data = await api(`/api/plan/${state.currentSession}`);
-    state.planning = data.planning || null;
-  } catch (_) {
-    state.planning = null;
-  }
-  const planning = state.planning;
-  const badge = $("mode-badge");
-  const panel = $("plan-panel");
-  if (!planning) {
-    badge.textContent = "普通对话";
-    badge.classList.remove("plan");
-    panel.classList.add("hidden");
-    $("input").placeholder = "输入消息";
+async function deleteSession(id, title) {
+  if (state.currentInput) {
+    showToast("当前轮次仍在执行，请等待完成或取消。", "info");
     return;
   }
-  badge.textContent = `规划模式 · ${planStatusLabel(planning.status)}`;
-  badge.classList.add("plan");
-  panel.classList.remove("hidden");
-  $("plan-status").textContent = planStatusLabel(planning.status);
-  $("input").placeholder = "补充计划，或输入新的规划目标";
-  const content = $("plan-content");
-  content.innerHTML = "";
-  const plan = planning.plan || {};
-  const goal = plan.goal || planning.goal || "";
-  if (goal) content.appendChild(el("div", "plan-line", `目标：${goal}`));
-  const questions = plan.questions || planning.questions || [];
-  for (const question of questions) {
-    content.appendChild(el("div", "plan-question", `• ${question}`));
-  }
-  const tasks = plan.tasks || [];
-  if (tasks.length) {
-    content.appendChild(el("div", "plan-line", `任务（${tasks.length}）：`));
-    tasks.forEach((task, index) => {
-      content.appendChild(el("div", "plan-question",
-        `${index + 1}. [${task.id}] ${task.description}`));
-    });
-  }
-  if (planning.status === "completed") {
-    content.appendChild(el("div", "plan-line", "计划已结束；发送新目标可重新规划。"));
-  } else if (planning.status === "failed" || planning.status === "cancelled") {
-    content.appendChild(el("div", "plan-line", "计划已结束；发送新目标可重新规划。"));
+  if (!confirm(`删除会话「${title}」？删除后无法恢复。`)) return;
+  try {
+    await api(`/api/sessions/${id}`, { method: "DELETE" });
+    if (state.currentSession === id) {
+      state.currentSession = null;
+      $("messages").innerHTML = "";
+      state.planning = null;
+      state.taskResults = null;
+    }
+    await refreshSessions();
+    if (!state.currentSession) clearChat();
+  } catch (error) {
+    showToast(error.message);
   }
 }
 
 async function newSession() {
+  if (state.currentInput) {
+    showToast("当前轮次仍在执行，请等待完成或取消。", "info");
+    return;
+  }
   const data = await api("/api/sessions", { method: "POST" });
-  await loadSessions();
+  await refreshSessions({ autoSelect: false });
   await selectSession(data.id);
 }
 
-async function uploadFiles(files) {
-  if (!state.currentSession) await newSession();
-  for (const file of files) {
-    const form = new FormData();
-    form.append("session_id", state.currentSession);
-    form.append("file", file);
-    const data = await api("/api/attachments", { method: "POST", body: form });
-    state.attachments.push(data);
-    renderChips();
+async function selectSession(id) {
+  if (state.currentInput) {
+    showToast("当前轮次仍在执行，请等待完成或取消。", "info");
+    return;
   }
-  $("file-input").value = "";
+  const session = state.sessions.find((item) => item.id === id);
+  if (!session) return;
+  if (state.activeTab !== "chat") showTab("chat");
+  state.currentSession = id;
+  state.pendingPlan = false;
+  state.planOpen = null;
+  clearPlanTimer();
+  clearKnowledgeTimer();
+  renderSessions();
+  updateTitle();
+  $("messages").innerHTML = "";
+  state.planning = null;
+  state.taskResults = null;
+  renderMode();
+  renderPlanPanel();
+
+  try {
+    const rows = await api(`/api/sessions/${id}/messages`);
+    if (state.currentSession !== id) return;
+    for (const row of rows) {
+      addMessage(row.role, row.text, row.html, row.created_at);
+    }
+    if (!rows.length) {
+      renderEmptyState("这个会话还没有消息", "在下方输入消息，或切换到规划模式开始整理目标。");
+    }
+    jumpToBottom();
+    await loadPlan();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function appendSources(body, sources) {
+  if (!sources || !sources.length) return;
+  const names = sources.map((source) => {
+    const meta = source.metadata || {};
+    return meta.source_name || meta.document_id || meta.source_uri || "来源";
+  });
+  body.appendChild(el("div", "message-sources", `来源：${names.join("；")}`));
+}
+
+function startStream(inputId) {
+  if (state.source) state.source.close();
+  state.currentInput = inputId;
+  state.streamText = "";
+  const node = addMessage("assistant", "", null, new Date().toISOString());
+  state.streamItem = node.item;
+  state.streamBody = node.body;
+  state.streamHead = node.head;
+  state.streamState = el("span", "stream-state", "生成中…");
+  state.streamHead.appendChild(state.streamState);
+  state.streamBody.classList.add("streaming");
+  state.streamPre = el("pre", "plain");
+  state.streamBody.appendChild(state.streamPre);
+  setBusy(true);
+  renderMode();
+
+  const source = new EventSource(`/api/turns/${inputId}/events`);
+  state.source = source;
+
+  source.addEventListener("model.delta", (event) => {
+    const data = JSON.parse(event.data);
+    const stick = isNearBottom();
+    state.streamText += data.text || "";
+    if (state.streamPre) state.streamPre.textContent = state.streamText;
+    if (stick) jumpToBottom();
+  });
+  source.addEventListener("tool.started", (event) => {
+    const data = JSON.parse(event.data);
+    setToolStatus(`正在调用工具：${data.label || data.name || "外部工具"}…`);
+  });
+  source.addEventListener("tool.finished", () => setToolStatus("工具调用完成。"));
+  source.addEventListener("tool.failed", () => setToolStatus("工具调用失败。"));
+
+  source.addEventListener("answer.final", async (event) => {
+    const data = JSON.parse(event.data);
+    clearToolStatus();
+    const body = state.streamBody;
+    const head = state.streamHead;
+    const item = state.streamItem;
+    if (body) {
+      body.classList.remove("streaming");
+      if (data.html) body.innerHTML = data.html;
+      else body.textContent = data.text || "（无输出）";
+      appendSources(body, data.sources);
+    }
+    if (head) {
+      const stamp = head.querySelector(".message-time");
+      if (stamp) stamp.textContent = formatTime(new Date().toISOString());
+    }
+    if (item) item.classList.remove("streaming");
+    state.currentInput = null;
+    setBusy(false);
+    resetStreamState();
+    try {
+      await refreshSessions({ autoSelect: false });
+    } catch (error) {
+      showToast(error.message);
+    }
+    await loadPlan();
+  });
+
+  source.addEventListener("turn.failed", async (event) => {
+    const data = JSON.parse(event.data);
+    clearToolStatus();
+    if (state.streamBody) {
+      state.streamBody.classList.remove("streaming");
+      state.streamBody.classList.add("error");
+      state.streamBody.textContent = data.message || "本轮失败。";
+    }
+    if (state.streamHead) {
+      const stamp = state.streamHead.querySelector(".message-time");
+      if (stamp) stamp.textContent = formatTime(new Date().toISOString());
+    }
+    if (state.streamItem) state.streamItem.classList.add("failed");
+    state.currentInput = null;
+    setBusy(false);
+    resetStreamState();
+    showToast(data.message || "本轮失败。");
+    await loadPlan();
+  });
+
+  source.addEventListener("turn.cancelled", (event) => {
+    const data = JSON.parse(event.data);
+    clearToolStatus();
+    if (state.streamBody) {
+      state.streamBody.classList.remove("streaming");
+      state.streamBody.classList.add("cancelled");
+      state.streamBody.textContent = data.message || "已取消当前执行。";
+    }
+    if (state.streamHead) {
+      const stamp = state.streamHead.querySelector(".message-time");
+      if (stamp) stamp.textContent = formatTime(new Date().toISOString());
+    }
+    if (state.streamItem) state.streamItem.classList.add("cancelled");
+    state.currentInput = null;
+    setBusy(false);
+    resetStreamState();
+    showToast(data.message || "已取消当前执行。", "info");
+    loadPlan();
+  });
+
+  source.addEventListener("done", () => {
+    source.close();
+    if (state.source === source) state.source = null;
+    state.currentInput = null;
+    setBusy(false);
+    renderMode();
+  });
+  source.onerror = () => {
+    // EventSource 会自动重连；已经落库的轮次结果仍可从消息接口恢复。
+  };
+}
+
+async function sendMessage(text, extra = {}) {
+  const value = (text || "").trim();
+  if (!value) return;
+  if (state.currentInput) {
+    showToast("当前轮次仍在执行，请等待完成或取消。", "info");
+    return;
+  }
+  if (!state.currentSession) await newSession();
+  if (!state.currentSession) return;
+
+  const request = { ...extra };
+  if (state.pendingPlan && request.planning_action === undefined
+      && !value.startsWith("/plan")) {
+    request.planning_action = "create";
+    request.planning_goal = value;
+  }
+  const attachmentIds = state.attachments.map((item) => item.id);
+
+  let data;
+  try {
+    data = await api(`/api/sessions/${state.currentSession}/turns`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: value, attachment_ids: attachmentIds, ...request,
+      }),
+    });
+  } catch (error) {
+    showToast(error.message);
+    return;
+  }
+
+  if (state.pendingPlan) state.pendingPlan = false;
+  const terminalPlan = state.planning
+    && ["completed", "failed", "cancelled"].includes(state.planning.status);
+  const planTextCreate = value.startsWith("/plan")
+    && !/^\/plan\s+(run|exit|status)(?:\s|$)/.test(value);
+  const startingPlan = request.planning_action === "create"
+    || (terminalPlan && (!value.startsWith("/plan") || planTextCreate))
+    || (!state.planning && planTextCreate);
+  if (startingPlan) {
+    // 计划生成期间保持规划模式，避免界面短暂退回普通对话。
+    state.planning = {
+      active: true, status: "draft",
+      goal: request.planning_goal || value.replace(/^\/plan\s*/, ""),
+      plan: null, questions: [],
+    };
+    state.planOpen = null;
+    renderPlanPanel();
+  }
+  if (request.planning_action === "run" && state.planning) {
+    // 立即显示执行中，轮询会随后补上真实任务进度。
+    state.planning = { ...state.planning, status: "running" };
+    renderPlanPanel();
+  }
+  state.attachments = [];
+  renderChips();
+  addMessage("user", value, null, new Date().toISOString());
+  $("input").value = "";
+  resizeInput();
+  startStream(data.input_id);
+  schedulePlanPoll();
+  $("input").focus();
 }
 
 function renderChips() {
@@ -151,162 +678,368 @@ function renderChips() {
   box.innerHTML = "";
   state.attachments.forEach((item, index) => {
     const chip = el("span", "chip");
-    chip.appendChild(el("span", "", `${item.name} · ${Math.round(item.bytes / 1024)}KB`));
+    chip.appendChild(el("span", "", `${item.name} · ${formatBytes(item.bytes)}`));
     const ingest = el("button", "mini", "入库");
+    ingest.type = "button";
     ingest.title = "显式提交到知识库";
     ingest.onclick = async (event) => {
       event.stopPropagation();
       try {
-        const result = await api(`/api/attachments/${item.id}/ingest?session_id=${state.currentSession}`,
+        const result = await api(
+          `/api/attachments/${item.id}/ingest?session_id=${state.currentSession}`,
           { method: "POST" });
-        alert(JSON.stringify(result, null, 2));
-      } catch (error) { alert(error.message); }
+        showToast(result.document_id ? `已提交入库：${result.document_id}` : "已提交入库。", "info");
+      } catch (error) {
+        showToast(error.message);
+      }
     };
     chip.appendChild(ingest);
-    chip.onclick = () => { state.attachments.splice(index, 1); renderChips(); };
+    chip.onclick = () => {
+      state.attachments.splice(index, 1);
+      renderChips();
+    };
     box.appendChild(chip);
   });
 }
 
-function startStream(inputId) {
-  if (state.source) state.source.close();
-  state.currentInput = inputId;
-  state.streamText = "";
-  state.streamEl = addMessage("assistant", "", null, "正在处理…");
-  const source = new EventSource(`/api/turns/${inputId}/events`);
-  state.source = source;
-
-  source.addEventListener("model.delta", (event) => {
-    const data = JSON.parse(event.data);
-    state.streamText += data.text || "";
-    state.streamEl.innerHTML = "";
-    state.streamEl.appendChild(el("pre", "", state.streamText));
-    $("messages").scrollTop = $("messages").scrollHeight;
-  });
-  source.addEventListener("tool.started", (event) => {
-    const data = JSON.parse(event.data);
-    statusLine(`调用工具：${data.label || data.name || "外部工具"}…`);
-  });
-  source.addEventListener("tool.finished", () => statusLine("工具调用完成。"));
-  source.addEventListener("tool.failed", () => statusLine("工具调用失败。"));
-  source.addEventListener("answer.final", async (event) => {
-    const data = JSON.parse(event.data);
-    if (data.sources && data.sources.length) {
-      const meta = data.sources.map((s) => {
-        const m = s.metadata || {};
-        return m.source_name || m.document_id || m.source_uri || "来源";
-      }).join("；");
-      const metaNode = el("div", "meta", `来源：${meta}`);
-      state.streamEl.parentElement.appendChild(metaNode);
-    }
-    await selectSession(state.currentSession);
-  });
-  source.addEventListener("turn.failed", (event) => {
-    const data = JSON.parse(event.data);
-    addMessage("assistant", data.message || "本轮失败。");
-  });
-  source.addEventListener("turn.cancelled", (event) => {
-    const data = JSON.parse(event.data);
-    addMessage("assistant", data.message || "已取消。");
-  });
-  source.addEventListener("done", () => {
-    source.close();
-    state.source = null;
-    state.currentInput = null;
-  });
-  source.onerror = () => {
-    // 浏览器会自动重连；轮次结果仍可通过持久消息读取。
-  };
-}
-
-async function sendMessage(text, extra = {}) {
+async function uploadFiles(files) {
+  if (!files.length) return;
   if (!state.currentSession) await newSession();
-  if (!text.trim()) return;
-  const attachmentIds = state.attachments.map((item) => item.id);
-  state.attachments = [];
+  if (!state.currentSession) return;
+  for (const file of files) {
+    const form = new FormData();
+    form.append("session_id", state.currentSession);
+    form.append("file", file);
+    try {
+      const data = await api("/api/attachments", { method: "POST", body: form });
+      state.attachments.push(data);
+    } catch (error) {
+      showToast(error.message);
+      break;
+    }
+  }
   renderChips();
-  const data = await api(`/api/sessions/${state.currentSession}/turns`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, attachment_ids: attachmentIds, ...extra }),
-  });
-  addMessage("user", text, null, "");
-  if (attachmentIds.length) statusLine(`已附加 ${attachmentIds.length} 个文件。`);
-  startStream(data.input_id);
-  $("input").value = "";
+  $("file-input").value = "";
 }
 
-async function loadKnowledge() {
-  $("knowledge-sources").textContent = "加载中…";
-  $("knowledge-documents").textContent = "加载中…";
+function resizeInput() {
+  const node = $("input");
+  node.style.height = "auto";
+  node.style.height = `${Math.min(node.scrollHeight, 180)}px`;
+}
+
+async function cancelTurn() {
+  if (!state.currentInput) return;
   try {
-    const [sources, documents] = await Promise.all([
-      api("/api/knowledge/sources"), api("/api/knowledge/documents")]);
-    $("knowledge-sources").textContent = JSON.stringify(sources, null, 2);
-    $("knowledge-documents").textContent = JSON.stringify(documents, null, 2);
+    await api(`/api/turns/${state.currentInput}/cancel`, { method: "POST" });
+    showToast("正在取消当前轮次…", "info");
   } catch (error) {
-    $("knowledge-sources").textContent = error.message;
-    $("knowledge-documents").textContent = error.message;
+    showToast(error.message);
   }
 }
 
+function switchToChatMode() {
+  if (state.currentInput) return;
+  if (state.pendingPlan) {
+    state.pendingPlan = false;
+    renderMode();
+    $("input").focus();
+    return;
+  }
+  if (!state.planning) return;
+  if (state.planning.status === "running") {
+    showToast("计划正在执行，请先取消当前轮次。", "info");
+    return;
+  }
+  sendMessage("退出规划模式", { planning_action: "exit" })
+    .catch((error) => showToast(error.message));
+}
+
+function switchToPlanMode() {
+  if (state.currentInput) return;
+  if (state.planning) return;
+  state.pendingPlan = true;
+  renderMode();
+  $("input").focus();
+}
+
+function clearKnowledgeTimer() {
+  if (state.knowledgeTimer) clearTimeout(state.knowledgeTimer);
+  state.knowledgeTimer = null;
+  state.knowledgeJob = null;
+}
+
+function pollKnowledge(jobId, attempt = 0) {
+  clearKnowledgeTimer();
+  state.knowledgeJob = jobId;
+  state.knowledgeTimer = setTimeout(async () => {
+    if (state.knowledgeJob !== jobId) return;
+    try {
+      const data = await api(`/api/knowledge/status/${jobId}`);
+      const progress = data.progress
+        ? Object.entries(data.progress).map(([key, value]) => `${key} ${value}`).join(" · ")
+        : "";
+      $("knowledge-status").textContent = [data.state || "处理中", progress]
+        .filter(Boolean).join(" · ");
+      if (["ready", "failed", "cancelled"].includes(data.state) || attempt >= 30) {
+        state.knowledgeJob = null;
+        await loadKnowledge();
+        return;
+      }
+    } catch (_) {}
+    pollKnowledge(jobId, attempt + 1);
+  }, 2000);
+}
+
+async function syncKnowledge() {
+  const button = $("sync-knowledge");
+  button.disabled = true;
+  button.textContent = "同步中…";
+  $("knowledge-status").textContent = "正在提交同步任务…";
+  try {
+    const data = await api("/api/knowledge/sync", { method: "POST" });
+    $("knowledge-status").textContent = "已提交同步任务";
+    pollKnowledge(data.sync_id);
+  } catch (error) {
+    $("knowledge-status").textContent = error.message;
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "同步来源";
+  }
+}
+
+function sourceKind(kind) {
+  return SOURCE_KINDS[kind] || kind || "未知来源";
+}
+
+function renderSources(sources) {
+  const box = $("knowledge-sources");
+  box.innerHTML = "";
+  if (!sources.length) {
+    box.appendChild(el("div", "muted", "暂无来源。"));
+    return;
+  }
+  for (const source of sources) {
+    const config = source.config || {};
+    const card = el("div", "source-card");
+    const head = el("div", "source-head");
+    head.appendChild(el("strong", "", source.id));
+    head.appendChild(el("span", `badge ${source.enabled ? "on" : "off"}`,
+      source.enabled ? "已启用" : "未启用"));
+    card.appendChild(head);
+    card.appendChild(el("div", "source-meta", sourceKind(config.kind)));
+    card.appendChild(el("div", "source-target",
+      config.path || config.token || config.node_token || "—"));
+    if (source.error) card.appendChild(el("div", "source-error", source.error));
+    card.appendChild(el("div", "source-meta",
+      source.checked_at ? `最近检查：${fullTime(source.checked_at)}` : "尚未检查"));
+    box.appendChild(card);
+  }
+}
+
+function documentTitle(doc) {
+  const metadata = doc.metadata || {};
+  return metadata.title || metadata.name || doc.source_uri || doc.id;
+}
+
+function buildTable(headers, rows) {
+  const table = document.createElement("table");
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  headers.forEach((label) => headRow.appendChild(el("th", "", label)));
+  head.appendChild(headRow);
+  table.appendChild(head);
+  const body = document.createElement("tbody");
+  rows.forEach((cells) => {
+    const row = document.createElement("tr");
+    cells.forEach((cell) => {
+      const td = document.createElement("td");
+      if (cell instanceof Node) td.appendChild(cell);
+      else td.textContent = cell === undefined || cell === null ? "" : String(cell);
+      row.appendChild(td);
+    });
+    body.appendChild(row);
+  });
+  table.appendChild(body);
+  return table;
+}
+
+function renderDocuments(documents) {
+  const box = $("knowledge-documents");
+  box.innerHTML = "";
+  $("knowledge-document-count").textContent = documents.length ? `${documents.length} 篇` : "";
+  if (!documents.length) {
+    box.appendChild(el("div", "muted", "暂无文档。"));
+    return;
+  }
+  const rows = documents.map((document) => [
+    documentTitle(document),
+    (document.source_ids || []).join("、"),
+    document.deleted ? "已删除" : (document.index_state || "未索引"),
+    document.active_build || "",
+  ]);
+  box.appendChild(buildTable(["标题 / 路径", "来源", "状态", "当前构建"], rows));
+}
+
+async function loadKnowledge() {
+  $("knowledge-status").textContent = "加载中…";
+  $("knowledge-sources").innerHTML = "";
+  $("knowledge-sources").appendChild(el("div", "muted", "加载中…"));
+  $("knowledge-documents").innerHTML = "";
+  try {
+    const [sources, documents] = await Promise.all([
+      api("/api/knowledge/sources"), api("/api/knowledge/documents")]);
+    renderSources(sources);
+    renderDocuments(documents);
+    $("knowledge-status").textContent = "已加载";
+  } catch (error) {
+    $("knowledge-status").textContent = error.message;
+    $("knowledge-sources").innerHTML = "";
+    $("knowledge-sources").appendChild(el("div", "muted", error.message));
+    $("knowledge-documents").innerHTML = "";
+  }
+}
+
+function renderSettings(data) {
+  const box = $("settings");
+  box.innerHTML = "";
+  const attachments = data.attachments || {};
+  const rows = [
+    ["默认模型", data.default_model || ""],
+    ["可用模型", (data.models || []).join("、")],
+    ["工作区", data.workspace || ""],
+    ["知识库", data.knowledge ? "已启用" : "未启用"],
+    ["飞书文档", data.feishu_docs ? "已启用" : "未启用"],
+    ["附件", attachments.enabled
+      ? `已启用（单文件最大 ${formatBytes(attachments.max_bytes)}）` : "未启用"],
+    ["允许扩展名", (attachments.extensions || []).join(" ")],
+    ["规划模式", data.planning ? "已启用" : "未启用"],
+  ];
+  rows.forEach(([key, value]) => {
+    const row = el("div", "settings-row");
+    row.appendChild(el("div", "settings-key", key));
+    row.appendChild(el("div", "settings-value", String(value)));
+    box.appendChild(row);
+  });
+}
+
 async function loadSettings() {
-  try { $("settings").textContent = JSON.stringify(await api("/api/settings"), null, 2); }
-  catch (error) { $("settings").textContent = error.message; }
+  try {
+    renderSettings(await api("/api/settings"));
+  } catch (error) {
+    $("settings").innerHTML = "";
+    $("settings").appendChild(el("div", "muted", error.message));
+    showToast(error.message);
+  }
 }
 
 function showTab(name) {
+  state.activeTab = name;
   for (const view of ["chat", "knowledge", "settings"]) {
     $(`${view}-view`).classList.toggle("hidden", view !== name);
   }
   document.querySelectorAll(".tabs button").forEach((node) => {
     node.classList.toggle("active", node.dataset.tab === name);
   });
+  if (name === "chat") {
+    resizeInput();
+    schedulePlanPoll();
+  } else {
+    clearPlanTimer();
+  }
   if (name === "knowledge") loadKnowledge();
+  else clearKnowledgeTimer();
   if (name === "settings") loadSettings();
 }
 
-$("new-session").onclick = () => newSession().catch((e) => alert(e.message));
-$("composer").onsubmit = (event) => {
-  event.preventDefault();
-  sendMessage($("input").value).catch((e) => alert(e.message));
-};
-$("input").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) {
+function bind() {
+  $("new-session").onclick = () => newSession().catch((error) => showToast(error.message));
+  $("composer").onsubmit = (event) => {
     event.preventDefault();
-    $("composer").requestSubmit();
-  }
-});
-$("file-input").onchange = (event) => uploadFiles([...event.target.files]).catch((e) => alert(e.message));
-$("cancel-button").onclick = async () => {
-  if (!state.currentInput) return;
-  await api(`/api/turns/${state.currentInput}/cancel`, { method: "POST" });
-};
-$("plan-button").onclick = () => {
-  const goal = prompt("规划目标");
-  if (goal) sendMessage(goal, { planning_action: "create", planning_goal: goal })
-    .catch((e) => alert(e.message));
-};
-$("plan-run").onclick = () => sendMessage("执行计划", { planning_action: "run" })
-  .catch((e) => alert(e.message));
-$("plan-exit").onclick = () => sendMessage("退出规划模式", { planning_action: "exit" })
-  .catch((e) => alert(e.message));
-document.querySelectorAll(".tabs button").forEach((node) => {
-  node.onclick = () => showTab(node.dataset.tab);
-});
-$("sync-knowledge").onclick = async () => {
-  try { alert(JSON.stringify(await api("/api/knowledge/sync", { method: "POST" }), null, 2)); }
-  catch (e) { alert(e.message); }
-};
-$("knowledge-form").onsubmit = async (event) => {
-  event.preventDefault();
-  try {
-    const result = await api("/api/knowledge/submit", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reference: $("knowledge-reference").value }),
-    });
-    alert(JSON.stringify(result, null, 2));
-  } catch (e) { alert(e.message); }
-};
+    sendMessage($("input").value).catch((error) => showToast(error.message));
+  };
+  $("input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      $("composer").requestSubmit();
+    }
+    if (event.key === "Escape" && state.pendingPlan) {
+      state.pendingPlan = false;
+      renderMode();
+      showToast("已取消规划输入。", "info");
+    }
+  });
+  $("input").addEventListener("input", resizeInput);
+  $("file-input").onchange = (event) => {
+    uploadFiles([...event.target.files]).catch((error) => showToast(error.message));
+  };
+  $("cancel-button").onclick = cancelTurn;
+  $("mode-chat").onclick = switchToChatMode;
+  $("mode-plan").onclick = switchToPlanMode;
+  $("plan-run").onclick = () => {
+    sendMessage("执行计划", { planning_action: "run" })
+      .catch((error) => showToast(error.message));
+  };
+  $("plan-toggle").onclick = () => {
+    const open = $("plan-toggle").getAttribute("aria-expanded") === "true";
+    state.planOpen = !open;
+    setPlanOpen(!open);
+  };
+  $("sync-knowledge").onclick = syncKnowledge;
+  $("knowledge-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const input = $("knowledge-reference");
+    const reference = input.value.trim();
+    if (!reference) return;
+    const button = event.target.querySelector("button");
+    button.disabled = true;
+    $("knowledge-status").textContent = "提交中…";
+    try {
+      await api("/api/knowledge/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reference }),
+      });
+      input.value = "";
+      $("knowledge-status").textContent = "已提交入库";
+      showToast("已提交入库。", "info");
+      await loadKnowledge();
+    } catch (error) {
+      $("knowledge-status").textContent = error.message;
+      showToast(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  };
+  document.querySelectorAll(".tabs button").forEach((node) => {
+    node.onclick = () => showTab(node.dataset.tab);
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      clearPlanTimer();
+    } else if (state.activeTab === "chat") {
+      loadPlan();
+    }
+  });
+  window.addEventListener("beforeunload", () => {
+    clearPlanTimer();
+    clearKnowledgeTimer();
+    if (state.source) state.source.close();
+  });
+}
 
-loadSessions().catch((e) => alert(e.message));
+async function init() {
+  bind();
+  try {
+    await refreshSessions();
+  } catch (error) {
+    showToast(error.message);
+  }
+  if (!state.currentSession) clearChat();
+  renderMode();
+  renderPlanPanel();
+  resizeInput();
+}
+
+init();
