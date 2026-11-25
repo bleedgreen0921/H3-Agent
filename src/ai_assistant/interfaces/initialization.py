@@ -24,11 +24,23 @@ async def execute(config):
                 from ai_assistant.storage.integrations import operation_storage
                 async with operation_storage(config.sessions, initialize=True):
                     pass
-                completed.append('渠道操作')
+                completed.append('操作回执')
             except Exception:
-                failed.append('渠道操作')
+                failed.append('操作回执')
+            try:
+                from ai_assistant.storage.attachments import initialize as init_attachments
+                await init_attachments(config.sessions)
+                completed.append('附件')
+            except Exception:
+                failed.append('附件')
+            try:
+                from ai_assistant.storage.web import initialize as init_web
+                await init_web(config.sessions)
+                completed.append('Web 消息')
+            except Exception:
+                failed.append('Web 消息')
         else:
-            failed.append('渠道操作（依赖会话）')
+            failed.append('操作回执（依赖会话）')
 
     # 知识库独立初始化；无论成功失败都关闭已创建的存储对象。
     if config.knowledge is not None:

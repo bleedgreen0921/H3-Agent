@@ -21,25 +21,13 @@ def core_sections():
 def attachment_section():
     """返回启用附件读取时使用的指导。"""
     return PromptSection('tools.attachment', 60,
-        'PDF、DOCX、Markdown 附件先用 read_document_attachment（传入引用中的 file_name）读取正文，按 next_cursor 续读；整理内容概述、主要要点，重要数字和结论保留返回的位置：PDF 物理页码、DOCX 段落或表格行、Markdown 行号；不得编造 Word 页码。读取不自动授权写入，写入须有用户明确要求。未读完、有 gaps 或图片未识别时注明处理范围，不声称完整覆盖。')
+        'PDF、DOCX、Markdown 附件先用 read_attachment（传入附件列表中的 attachment_id）读取正文，按 next_cursor 续读；整理内容概述、主要要点，重要数字和结论保留返回的位置：PDF 物理页码、DOCX 段落或表格行、Markdown 行号。不得编造 Word 页码。读取不自动授权写入或入库；未读完、有 gaps 或图片未识别时注明处理范围，不声称完整覆盖。')
 
 
 def knowledge_section():
     """返回启用知识库时使用的证据与范围指导。"""
     return PromptSection('knowledge.read', 70,
         '知识库问题应检索证据并引用片段 ID；证据不足时明确说明。全文总结不属于检索问答，不把少量命中片段当作阅读全文。查询已登记知识库时使用 search_knowledge 获取已发布快照证据，可按 source_id/document_id 限定。未确认索引完成时不得声称当前可检索。')
-
-
-def feishu_docs_section():
-    """返回飞书文档操作及回执指导。"""
-    return PromptSection('feishu.docs', 80,
-        '仅提供附件时在聊天回答；用户明确要求写入且未指定已有文档时创建新文档。修改已有飞书文档前先读目标，追加或覆盖遵循明确要求，覆盖范围不明确先澄清。创建与正文写入分别核对回执；写入失败返回已创建链接及未完成部分，不重新创建或自动重放。最终报告链接、处理范围与已确认状态。')
-
-
-def feishu_tasks_section():
-    """返回飞书任务时间、身份和回执指导。"""
-    return PromptSection('feishu.tasks', 85,
-        '任务时间先结合可信当前日期明确为 ISO，再调用 resolve_datetime；写入时间须来自本轮转换，日期不明确先澄清。身份使用可信身份工具，不从姓名推导 ID。主人飞书私聊创建时未传 members 遵循默认负责人配置，显式空列表不覆盖。patch 只更新 update_fields，负责人使用 addMembers。回执核验仅比较本次发送字段与本次接口返回；未返回字段表示未确认，接口接受不证明提醒实际送达。')
 
 
 def skills_section():

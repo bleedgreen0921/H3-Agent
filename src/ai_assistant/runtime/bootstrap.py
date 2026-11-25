@@ -11,7 +11,7 @@ from ai_assistant.agents import create_assistant_agent, load_persona
 from ai_assistant.config import ConfigError
 from ai_assistant.llm.factory import create_model
 from ai_assistant.llm.requests import model_session
-from ai_assistant.tools.builtin import create_builtin_tools
+from ai_assistant.tools.builtin import create_builtin_tools  # noqa: F401 - 保留组件/测试注入入口
 from ai_assistant.tools.context import tool_context
 from ai_assistant.cancellation import _drain_worker
 from ai_assistant.storage.sessions import session_storage
@@ -66,15 +66,7 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         # 统一托管工具上下文、操作回执和模型客户端。
         context = await stack.enter_async_context(tool_context(config, retriever=retriever,
             skill_snapshot=getattr(resources, "skills", None) if caller.personal else None))
-        from ai_assistant.tools.context import FeishuService
-        feishu = (FeishuService(config.integrations.feishu.owner_open_id,
-                                config.integrations.feishu.default_task_assignee,
-                                config.integrations.feishu.task_members,
-                                config.integrations.feishu.default_calendar_id,
-                                config.planning.default_document_identity)
-                  if caller.personal and config.integrations.feishu else FeishuService())
         context = replace(context, usage_store=usage_store,
-                          services={**context.services, 'feishu': feishu},
                           timezone=config.agent.timezone if caller.personal else 'UTC',
                           caller=caller,
                           skills_directory_tokens=config.skills.directory_tokens if config.skills else 6000)
@@ -132,7 +124,17 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         if planning_enabled:
             # 规划父图组合普通 Agent 与任务 Agent，共享原生 checkpointer。
             from ai_assistant.agents.planning import PlanState, create_planning_agent
-            normal_agent = create_assistant_agent(model, tools, checkpointer=None,
+            # 普通对话直接使用 normal_agent；规划父图只在显式 /plan 或活跃计划时使用。
+            normal_agent = create_assistant_agent(model, tools, checkpointer=saver,
+                settings=config.agent, persona=persona,
+                context_settings=config.context,
+                tool_result_tokens=result_tokens,
+                max_input_tokens=config.models[selected].max_input_tokens,
+                model_parameters=config.models[selected].parameters,
+                prompt_sections=prompt_sections, component_middleware=component_middleware,
+                failure_notices=failure_notices, capability_registry=registry,
+                capability_policy=registry.build_policy(), state_schema=PlanState)
+            planning_normal_agent = create_assistant_agent(model, tools, checkpointer=None,
                 settings=config.agent, persona=persona,
                 context_settings=config.context,
                 tool_result_tokens=result_tokens,
@@ -154,14 +156,14 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
                 failure_notices=failure_notices, capability_registry=registry,
                 capability_policy=registry.build_policy())
             agent = create_planning_agent(
-                normal_agent=normal_agent, task_agent=task_agent, model=model,
+                normal_agent=planning_normal_agent, task_agent=task_agent, model=model,
                 checkpointer=saver, registry=registry, settings=config.planning,
                 max_input_tokens=config.models[selected].max_input_tokens)
             # 维护逻辑仍从 session.agent 读取记忆入口；规划父图本身不执行会话压缩。
-            agent.session_memory = normal_agent.session_memory
-            agent.memory_every_turns = normal_agent.memory_every_turns
+            agent.session_memory = planning_normal_agent.session_memory
+            agent.memory_every_turns = planning_normal_agent.memory_every_turns
         else:
-            agent = create_assistant_agent(model, tools, checkpointer=saver, settings=config.agent,
+            normal_agent = create_assistant_agent(model, tools, checkpointer=saver, settings=config.agent,
                 persona=persona, context_settings=config.context,
                 tool_result_tokens=result_tokens,
                 max_input_tokens=config.models[selected].max_input_tokens,
@@ -169,8 +171,10 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
                 prompt_sections=prompt_sections, component_middleware=component_middleware,
                 failure_notices=failure_notices, capability_registry=registry,
                 capability_policy=registry.build_policy())
+            agent = normal_agent
         session = AssistantSession(agent, context, config.agent, model_name=selected,
-                                   repository=repository)
+                                   repository=repository,
+                                   normal_agent=normal_agent if planning_enabled else None)
         await session.open(session_id)
         watcher = asyncio.create_task(session.watch_connection()) if repository else None
         try:

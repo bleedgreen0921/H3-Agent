@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Assistant</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="app">
+  <aside class="sidebar">
+    <div class="brand">AI Assistant</div>
+    <button id="new-session" class="primary">新建会话</button>
+    <div id="session-list" class="session-list"></div>
+    <nav class="tabs">
+      <button data-tab="chat" class="active">对话</button>
+      <button data-tab="knowledge">知识库</button>
+      <button data-tab="settings">设置</button>
+    </nav>
+  </aside>
+
+  <main id="chat-view" class="view">
+    <header class="topbar">
+      <div id="session-title">未选择会话</div>
+      <div class="mode"><span id="mode-badge" class="mode-badge">普通对话</span></div>
+      <div class="actions">
+        <button id="plan-button">规划模式</button>
+        <button id="plan-run">执行计划</button>
+        <button id="plan-exit">退出规划</button>
+        <button id="cancel-button" class="danger">取消</button>
+      </div>
+    </header>
+    <section id="plan-panel" class="plan-panel hidden">
+      <div class="plan-panel-head">
+        <strong>规划工作区</strong>
+        <span id="plan-status"></span>
+      </div>
+      <div id="plan-content"></div>
+    </section>
+    <section id="messages" class="messages"></section>
+    <form id="composer" class="composer">
+      <div id="attachment-chips" class="chips"></div>
+      <textarea id="input" rows="3" placeholder="输入消息；Enter 发送，Shift+Enter 换行"></textarea>
+      <div class="composer-row">
+        <label class="upload">附件
+          <input id="file-input" type="file" multiple accept=".pdf,.docx,.md">
+        </label>
+        <button type="submit" class="primary">发送</button>
+      </div>
+    </form>
+  </main>
+
+  <main id="knowledge-view" class="view hidden">
+    <header class="topbar"><div>知识库</div><button id="sync-knowledge">同步来源</button></header>
+    <section class="panel">
+      <h2>来源</h2>
+      <pre id="knowledge-sources">加载中…</pre>
+      <h2>文档</h2>
+      <pre id="knowledge-documents">加载中…</pre>
+      <form id="knowledge-form" class="inline-form">
+        <input id="knowledge-reference" placeholder="飞书文档链接或工作区相对路径">
+        <button type="submit">提交入库</button>
+      </form>
+    </section>
+  </main>
+
+  <main id="settings-view" class="view hidden">
+    <header class="topbar"><div>设置</div></header>
+    <section class="panel"><pre id="settings">加载中…</pre></section>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

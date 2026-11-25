@@ -100,6 +100,8 @@ def turn_result(state, operations=(), *, interrupted=None, executed_tool_calls=N
     # 已确认效果与失败、取消或未知并存时使用 partial。
     if interrupted == 'cancelled' or execution_status == 'cancelled':
         status = 'partial' if confirmed else 'cancelled'
+    elif execution_status == 'needs_clarification':
+        status = 'partial' if confirmed else 'needs_clarification'
     elif unknown or interrupted == 'unknown' or execution_status == 'unknown':
         status = 'partial' if confirmed else 'unknown'
     elif interrupted or bad or (execution and execution.get('status') in {'failed', 'unknown'}):

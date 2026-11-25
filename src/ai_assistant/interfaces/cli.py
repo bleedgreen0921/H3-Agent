@@ -79,10 +79,23 @@ def _main(argv: list[str] | None = None) -> int:
     from ai_assistant.integrations.cli import add_commands as add_mcp
     add_mcp(commands)
 
-    # 飞书服务和配置检查共用同一套配置入口。
-    feishu_parser = commands.add_parser("feishu", help="Feishu owner bot")
+    # 本地 Web 主入口。
+    web_parser = commands.add_parser("web", help="Local web UI")
+    web_commands = web_parser.add_subparsers(dest="action", required=True)
+    web_commands.add_parser("serve", help="Run local web server").add_argument(
+        "--config", default="assistant.toml", metavar="PATH")
+    cleanup = web_commands.add_parser("cleanup", help="Remove expired attachments")
+    cleanup.add_argument("--config", default="assistant.toml", metavar="PATH")
+    cleanup.add_argument("--days", type=int, default=30)
+    cleanup.add_argument("--execute", action="store_true")
+
+    # 飞书只读文档授权；不包含聊天、任务或日历。
+    feishu_parser = commands.add_parser("feishu", help="Feishu docs authorization")
     feishu_commands = feishu_parser.add_subparsers(dest="action", required=True)
-    feishu_commands.add_parser("serve").add_argument("--config", default="assistant.toml")
+    auth = feishu_commands.add_parser("auth").add_subparsers(dest="auth_action", required=True)
+    for action in ("login", "status", "logout"):
+        auth.add_parser(action).add_argument("--config", default="assistant.toml")
+    feishu_commands.add_parser("check").add_argument("--config", default="assistant.toml")
     config_commands = commands.add_parser('config', help='Offline configuration inspection').add_subparsers(dest='action', required=True)
     for action in ('list', 'check'):
         config_commands.add_parser(action).add_argument('--config', default='assistant.toml')
@@ -132,16 +145,56 @@ def _main(argv: list[str] | None = None) -> int:
             from ai_assistant.interfaces.initialization import execute
             return asyncio.run(execute(config))
 
-        # 各入口按需导入，执行失败时输出面向用户的错误摘要。
-        if args.command == "feishu":
-            from ai_assistant.channels.feishu.receiver import serve
+        # 本地 Web 服务是主入口；CLI 仍负责配置、初始化和管理。
+        if args.command == "web":
+            if args.action == "cleanup":
+                if config.sessions is None:
+                    raise ConfigError("Web 清理需要 [sessions]。")
+                from ai_assistant.storage.attachments import cleanup
+                result = asyncio.run(cleanup(config.sessions, days=args.days,
+                                             execute=args.execute))
+                print(result)
+                return 0
+            from ai_assistant.web.server import serve
             try:
-                asyncio.run(serve(config))
+                serve(config)
                 return 0
             except ConfigError:
                 raise
             except Exception:
-                print("飞书入口失败：请检查部署、持久存储和认证状态；缺少结构时请显式执行 init。", file=sys.stderr)
+                print("Web 入口失败：请检查配置、数据库和认证状态；缺少结构时请显式执行 init。", file=sys.stderr)
+                return 2
+
+        if args.command == "feishu":
+            from ai_assistant.integrations.oauth import TokenStore
+            from pathlib import Path
+            base = config.config_path.parent if config.config_path else Path.cwd()
+            workspace = (base / config.workspace.root).resolve()
+            try:
+                tokens = TokenStore(config, workspace)
+                if args.action == "auth":
+                    if args.auth_action == "login":
+                        asyncio.run(tokens.login())
+                        print("飞书用户授权已保存。")
+                    else:
+                        print(tokens.status() if args.auth_action == "status" else tokens.logout())
+                else:
+                    import httpx
+                    async def check():
+                        if config.integrations.feishu.default_identity == "user":
+                            await TokenStore(config, workspace).access()
+                        else:
+                            async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+                                from ai_assistant.feishu_docs.client import FeishuAPI
+                                api = FeishuAPI(config.integrations.feishu, client)
+                                await api.request("GET", "/bot/v3/info")
+                    asyncio.run(check())
+                    print("飞书文档连接检查通过。")
+                return 0
+            except ConfigError:
+                raise
+            except Exception:
+                print("飞书文档操作失败：请检查应用凭据、OAuth 授权和只读权限。", file=sys.stderr)
                 return 2
 
         if args.command == "mcp":

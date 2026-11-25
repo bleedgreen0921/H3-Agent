@@ -87,12 +87,6 @@ class FilesConfig(BaseModel):
     scan_bytes: int = Field(default=128 * 1024 * 1024, gt=0, strict=True)
 
 
-class PDFConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
-    enabled: bool = False
-    timeout: float = Field(default=60, gt=0, le=300, allow_inf_nan=False)
-
-
 class ToolSelectionConfig(BaseModel):
     """按轮暴露的工具选择；权限白名单仍由 mcp.servers 控制。"""
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
@@ -106,7 +100,6 @@ class ToolSelectionConfig(BaseModel):
 
 class ToolsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
-    pdf: PDFConfig = Field(default_factory=PDFConfig)
     web: WebConfig | None = None
     files: FilesConfig = Field(default_factory=FilesConfig)
     selection: ToolSelectionConfig = Field(default_factory=ToolSelectionConfig)
@@ -194,8 +187,9 @@ class SkillsConfig(BaseModel):
     disabled: list[str] = Field(default_factory=list)
 
 
-from ai_assistant.integrations.config import MCPConfig, IntegrationsConfig, ChannelsConfig
-from ai_assistant.integrations.mail_config import MailConfig
+from ai_assistant.integrations.config import MCPConfig, IntegrationsConfig
+from ai_assistant.attachments.config import AttachmentsConfig
+from ai_assistant.web.config import WebServerConfig
 
 
 from ai_assistant.observability import ObservabilityConfig
@@ -207,10 +201,10 @@ class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
-    mail: MailConfig = Field(default_factory=MailConfig)
+    web: WebServerConfig = Field(default_factory=WebServerConfig)
+    attachments: AttachmentsConfig = Field(default_factory=AttachmentsConfig)
     mcp: MCPConfig | None = None
     integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
-    channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     skills: SkillsConfig | None = None
     sessions: SessionsConfig | None = None
     context: ContextConfig | None = None
@@ -246,10 +240,8 @@ class AppConfig(BaseModel):
         if self.default_model not in self.models:
             raise ValueError("default_model must refer to an existing model profile")
         if self.knowledge and any(s.kind != 'local_directory' for s in self.knowledge.sources.values()):
-            if self.integrations.feishu is None or self.mcp is None:
-                raise ValueError('Cloud knowledge sources require explicit Feishu integration and token state configuration')
-        if self.tools.pdf.enabled and self.integrations.feishu is None:
-            raise ValueError('PDF attachments require integrations.feishu')
+            if self.integrations.feishu is None:
+                raise ValueError('Cloud knowledge sources require explicit Feishu docs configuration')
         if self.tools.web is not None:
             profile = self.models.get(self.tools.web.credential_profile)
             if profile is None or profile.provider != "deepseek" or profile.api_key is None:
@@ -258,10 +250,6 @@ class AppConfig(BaseModel):
             for server in self.mcp.servers.values():
                 if server.allow_write and self.sessions is None:
                     raise ValueError('External writes require persistent sessions')
-                if server.transport in {'feishu', 'feishu_files'} and self.integrations.feishu is None:
-                    raise ValueError('Feishu services require integrations.feishu')
-        if self.channels.feishu.enabled and (self.sessions is None or self.integrations.feishu is None):
-            raise ValueError('Feishu channel requires sessions and Feishu configuration')
         return self
 
 

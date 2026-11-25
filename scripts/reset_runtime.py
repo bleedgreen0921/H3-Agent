@@ -10,11 +10,12 @@ from ai_assistant.storage.sessions import lock_key
 # 精确列出应用和固定 Saver 拥有的表；禁止前缀匹配与 CASCADE。
 TABLES = (
     'assistant_outbox', 'assistant_inbox', 'assistant_chat_commands',
-    'assistant_channel_sessions', 'assistant_operations', 'assistant_model_usage',
+    'assistant_channel_sessions', 'assistant_operations',
+    'assistant_model_usage', 'assistant_attachments', 'assistant_web_messages',
     'checkpoint_writes', 'checkpoint_blobs', 'checkpoints', 'checkpoint_migrations',
     'assistant_sessions', 'assistant_session_schema',
 )
-LOCKS = (714160001, 714160002, 714160004, 714160005)
+LOCKS = (714160001, 714160002, 714160004, 714160005, 714160006)
 REQUIRED = {
     'assistant_outbox': {'id', 'input_id', 'body', 'status', 'part'},
     'assistant_inbox': {'id', 'binding', 'body', 'status'},
@@ -22,6 +23,8 @@ REQUIRED = {
     'assistant_channel_sessions': {'binding', 'session_id'},
     'assistant_operations': {'id', 'input_id', 'principal', 'tool', 'args_digest'},
     'assistant_model_usage': {'call_id', 'session_id', 'profile', 'role'},
+    'assistant_attachments': {'id', 'session_id', 'storage_path'},
+    'assistant_web_messages': {'id', 'session_id', 'role', 'text'},
     'assistant_sessions': {'id', 'workspace', 'thread_ids'},
     'assistant_session_schema': {'singleton', 'version'},
     'checkpoints': {'thread_id', 'checkpoint_ns', 'checkpoint_id', 'checkpoint'},

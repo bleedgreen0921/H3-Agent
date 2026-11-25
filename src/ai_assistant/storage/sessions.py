@@ -172,29 +172,28 @@ class SessionRepository:
 
     async def binding_session(self, binding):
         return await (await self.execute(
-            'SELECT s.* FROM assistant_sessions s JOIN assistant_channel_sessions c '
-            'ON c.session_id=s.id WHERE c.binding=%s', (binding,))).fetchone()
+            'SELECT * FROM assistant_sessions WHERE binding=%s ORDER BY updated_at DESC LIMIT 1',
+            (binding,))).fetchone()
 
     async def binding_session_id(self, binding):
-        return await (await self.execute(
-            'SELECT session_id FROM assistant_channel_sessions WHERE binding=%s', (binding,))).fetchone()
+        row = await self.binding_session(binding)
+        return {'session_id': row['id']} if row else None
 
     async def session_binding(self, ident):
         return await (await self.execute(
             'SELECT binding FROM assistant_sessions WHERE id=%s', (str(ident),))).fetchone()
 
     async def list_binding(self, binding, offset=0, limit=11):
-        return await (await self.execute('''SELECT s.id,s.title,s.updated_at,s.status,
-            (c.session_id=s.id) AS current FROM assistant_sessions s
-            LEFT JOIN assistant_channel_sessions c ON c.binding=s.binding
-            WHERE s.binding=%s ORDER BY s.updated_at DESC,s.id LIMIT %s OFFSET %s''',
+        return await (await self.execute('''SELECT id,title,updated_at,status
+            FROM assistant_sessions WHERE binding=%s
+            ORDER BY updated_at DESC,id LIMIT %s OFFSET %s''',
             (binding, limit, offset))).fetchall()
 
     async def list_admin(self, binding=None, offset=0, limit=10):
-        return await (await self.execute('''SELECT s.id,s.title,s.binding,s.updated_at,s.status,
-            EXISTS(SELECT 1 FROM assistant_channel_sessions c WHERE c.binding=s.binding AND c.session_id=s.id) AS current
-            FROM assistant_sessions s WHERE (%s::text IS NULL OR s.binding=%s)
-            ORDER BY s.updated_at DESC,s.id LIMIT %s OFFSET %s''',
+        return await (await self.execute('''SELECT id,title,binding,updated_at,status,
+            false AS current
+            FROM assistant_sessions WHERE (%s::text IS NULL OR binding=%s)
+            ORDER BY updated_at DESC,id LIMIT %s OFFSET %s''',
             (binding, binding, limit, offset))).fetchall()
 
     async def status_for_binding(self, ident, binding):
@@ -212,8 +211,6 @@ class SessionRepository:
             WHERE id=%s AND (binding IS NULL OR binding=%s)''', (binding, session_id, binding))
         if cursor.rowcount != 1:
             raise SessionBindingError('会话不属于当前聊天。')
-        await self.execute('''INSERT INTO assistant_channel_sessions(binding,session_id) VALUES(%s,%s)
-            ON CONFLICT(binding) DO UPDATE SET session_id=EXCLUDED.session_id''', (binding, session_id))
 
     async def list(self):
         return await (await self.execute('''SELECT id,workspace,status,created_at,updated_at
@@ -275,9 +272,6 @@ class SessionRepository:
         except Exception:
             raise SessionStorageError('Session deletion incomplete; retry session delete.') from None
         async with self.conn.transaction():
-            exists = await (await self.execute("SELECT to_regclass('assistant_channel_sessions') AS name")).fetchone()
-            if exists['name']:
-                await self.execute('DELETE FROM assistant_channel_sessions WHERE session_id=%s', (ident,))
             await self.execute('DELETE FROM assistant_sessions WHERE id=%s', (ident,))
 
 @asynccontextmanager

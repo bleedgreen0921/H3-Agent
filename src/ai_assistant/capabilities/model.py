@@ -91,7 +91,7 @@ class CapabilityPolicy:
 
     # 默认核心工具名称；实际可用性仍取决于注册表中的工具。
     core_tools: tuple[str, ...] = (
-        'read_document_attachment', 'read_text', 'list_directory', 'search_text',
+        'read_attachment', 'read_text', 'list_directory', 'search_text',
         'web_search', 'web_fetch', 'search_knowledge', 'search_tools',
         'search_skills', 'load_skill', 'read_skill_resource', 'unload_skill',
         'resolve_datetime', 'read_tool_result',

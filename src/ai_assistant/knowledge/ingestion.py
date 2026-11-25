@@ -16,7 +16,13 @@ from ai_assistant.knowledge.models import embedding
 def snapshot(workspace, relative, directory):
     """读取工作区普通文件，按内容摘要保存只读快照。"""
     target = workspace._path(relative)
+    digest, path, name = snapshot_file(target, directory)
+    return target.as_uri(), digest, path, name
 
+
+def snapshot_file(target, directory):
+    """把已授权的普通文件保存为内容寻址的只读快照。"""
+    target = Path(target)
     # 不跟随最终路径的符号链接；非阻塞打开后再检查是否为普通文件。
     descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     directory = Path(directory)
@@ -44,7 +50,7 @@ def snapshot(workspace, relative, directory):
         except FileExistsError:
             if hashlib.sha256(final.read_bytes()).hexdigest() != digest.hexdigest():
                 raise KnowledgeError('不可变资料快照校验失败。')
-        return target.as_uri(), digest.hexdigest(), final.resolve(), target.name
+        return digest.hexdigest(), final.resolve(), target.name
     finally:
         if temporary:
             temporary.unlink(missing_ok=True)

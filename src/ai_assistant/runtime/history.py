@@ -75,8 +75,15 @@ def recovery_values(values):
                         id='unconfirmed:' + call['id'], tool_call_id=call['id'], name='unconfirmed_result',
                         status='error', artifact={'execution_fact': {'control': 'stop', 'error_category': 'unknown'}}))
     keys = ('conversation_title', 'completed_turns', 'session_state',
-            'last_counted_input_id', 'active_skills')
-    return {**{key: values[key] for key in keys if key in values}, 'messages': paired}
+            'last_counted_input_id', 'active_skills', 'task_results')
+    recovered = {**{key: values[key] for key in keys if key in values}, 'messages': paired}
+    planning = values.get('planning')
+    if isinstance(planning, dict):
+        # 失败/取消后新建分支时保留规划工作区；中断的执行计划归一化为失败终态。
+        if planning.get('status') == 'running':
+            planning = {**planning, 'status': 'failed', 'active': False}
+        recovered['planning'] = planning
+    return recovered
 
 
 def saved_turn(values, *, input_id=None, threads=None):

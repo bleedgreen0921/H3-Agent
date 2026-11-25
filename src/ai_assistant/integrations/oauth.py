@@ -19,10 +19,10 @@ class TokenStore:
     """本地保存和刷新飞书主人用户令牌，不向模型暴露凭据。"""
 
     def __init__(self, config, workspace):
-        if config.mcp is None or config.integrations.feishu is None:
-            raise ConfigError('Configure [mcp] and [integrations.feishu] first.')
+        if config.integrations.feishu is None:
+            raise ConfigError('Configure [integrations.feishu] first.')
         self.settings = config.integrations.feishu
-        self.root = Path(config.mcp.state_dir).expanduser().absolute()
+        self.root = Path(self.settings.state_dir).expanduser().absolute()
 
         # 授权状态必须位于工作区外，并限制目录所有者与访问权限。
         if self.root.resolve().is_relative_to(workspace.resolve()):
@@ -50,7 +50,7 @@ class TokenStore:
         try:
             fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
         except FileNotFoundError:
-            raise ConfigError('Run mcp auth feishu login on the local CLI.') from None
+            raise ConfigError('Run feishu auth login on the local CLI.') from None
         with os.fdopen(fd) as stream:
             if os.fstat(stream.fileno()).st_mode & 0o077:
                 raise ConfigError('OAuth token file must have mode 0600.')
@@ -84,27 +84,10 @@ class TokenStore:
             actual = info.get('data', {}).get('open_id')
             if info.get('code', 0) != 0 or not isinstance(actual, str) or not actual:
                 raise ConfigError('OAuth user information is unavailable; check user_info permissions and re-login.')
-            if actual != self.settings.owner_open_id:
-                # IDs stay in private local diagnostics, never in shared console output.
-                report = self.root / ('feishu-owner-check-' + self.settings.app_id + '.json')
-                temporary = self.root / ('.owner-check-' + secrets.token_hex(16))
-                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-                try:
-                    with os.fdopen(fd, 'w') as stream:
-                        json.dump({'app_id': self.settings.app_id,
-                                   'configured_owner_open_id': self.settings.owner_open_id,
-                                   'authorized_open_id': actual, 'matched': False}, stream)
-                    os.replace(temporary, report)
-                finally:
-                    temporary.unlink(missing_ok=True)
-                raise ConfigError('飞书授权账号的 open_id 与当前配置 owner_open_id 不一致；'
-                                  '未保存令牌或修改主人。请确认浏览器登录账号，并核对当前应用下的主人 ID。'
-                                  '私有身份对照：' + str(report))
         return dict(access_token=data['access_token'], refresh_token=data.get('refresh_token'),
                     expires_at=time.time() + data['expires_in'],
                     refresh_expires_at=time.time() + data.get('refresh_token_expires_in', 0),
-                    scope=data.get('scope', ''), owner_open_id=self.settings.owner_open_id,
-                    status='ready')
+                    scope=data.get('scope', ''), status='ready')
 
     def _access(self):
         """在进程锁内返回有效令牌，必要时执行一次刷新。"""
@@ -112,8 +95,6 @@ class TokenStore:
             data = self.read()
             if data.get('status') != 'ready':
                 raise ConfigError('OAuth refresh result is unknown; log in again.')
-            if data.get('owner_open_id') != self.settings.owner_open_id:
-                raise ConfigError('Token owner differs from configuration; log in again.')
             if data['expires_at'] > time.time() + 90:
                 return data['access_token']
             if not data.get('refresh_token') or data.get('refresh_expires_at', 0) <= time.time():

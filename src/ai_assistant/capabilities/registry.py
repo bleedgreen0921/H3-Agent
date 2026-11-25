@@ -146,13 +146,21 @@ class CapabilityRegistry:
 
     @staticmethod
     def _is_doc_descriptor(descriptor):
-        """根据服务、标签和原始名称识别文档或文件相关能力。"""
-        return bool(descriptor.server and (
+        """根据来源、标签和原始名称识别文档或文件相关能力。"""
+        if descriptor.server:
+            return bool(
+                descriptor.domains & {'docs', 'files'}
+                or descriptor.objects & {'document', 'file'}
+                or any(word in descriptor.original_name.casefold()
+                       for word in ('docx', 'wiki', 'drive'))
+            )
+        # 本地只读飞书文档插件没有 MCP server，也属于文档能力。
+        return bool(
             descriptor.domains & {'docs', 'files'}
             or descriptor.objects & {'document', 'file'}
-            or any(word in descriptor.original_name.casefold()
-                   for word in ('docx', 'wiki', 'drive'))
-        ))
+            or descriptor.original_name.casefold().startswith(
+                ('feishu_', 'docx_', 'wiki_', 'drive_'))
+        )
 
     @staticmethod
     def _creates_document(descriptor):

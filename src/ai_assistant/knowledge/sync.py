@@ -10,9 +10,6 @@ from ai_assistant.knowledge.config import resolve_knowledge_paths
 from ai_assistant.knowledge.ingestion import snapshot
 from ai_assistant.knowledge.sources import (
     SourceFailure,
-    cloud_reader,
-    cloud_reference,
-    cloud_uri,
     local_descriptor,
     local_inventory,
     save_documents,
@@ -34,6 +31,7 @@ async def resolve_submission(config, reference, *, identity="user", tags=None):
     """仅解析来源；云端只读请求不占用数据库事务。"""
     base = config.config_path.parent if config.config_path else Path.cwd()
     if reference.startswith("https://"):
+        from ai_assistant.feishu_docs.reader import cloud_reference, cloud_reader, cloud_uri
         descriptor = cloud_reference(config, reference, identity)
         async with cloud_reader(config, identity) as reader:
             descriptor = await reader.resolve(descriptor)
@@ -133,6 +131,7 @@ async def synchronize(config, store, run):
                     local_inventory, config, definition
                 )
             else:
+                from ai_assistant.feishu_docs.reader import cloud_reader, cloud_uri
                 async with cloud_reader(config, definition["identity"]) as reader:
                     descriptors = [
                         (
@@ -211,6 +210,7 @@ async def synchronize(config, store, run):
                     }
                 else:
                     # 云文档优先复用可靠版本对应的快照；否则读取并核对版本。
+                    from ai_assistant.feishu_docs.reader import cloud_reader
                     async with cloud_reader(config, descriptor["identity"]) as reader:
                         descriptor = await reader.resolve(descriptor)
                         current, title = await reader.revision(descriptor)

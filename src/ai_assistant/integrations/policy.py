@@ -13,14 +13,15 @@ class Caller:
     scope: Literal['local', 'private'] | None = field(default=None, kw_only=True)
 
     def __post_init__(self):
-        # 外部入口必须显式提供可信范围和平台命名空间绑定。
-        if self.channel == 'cli' and self.scope is None:
+        # 本地 Web 与 CLI 都属于单用户本地入口，不需要聊天绑定。
+        if self.channel in {'cli', 'web'} and self.scope is None:
             object.__setattr__(self, 'scope', 'local')
         if self.channel == 'feishu_group':
             raise ValueError('群聊入口已移除。')
         if self.scope not in {'local', 'private'}:
             raise ValueError('外部入口必须明确会话范围。')
-        if self.channel != 'cli' and (self.scope == 'local' or not self.binding or ':' not in self.binding):
+        if self.channel not in {'cli', 'web'} and (
+                self.scope == 'local' or not self.binding or ':' not in self.binding):
             raise ValueError('外部入口必须提供私聊范围及平台命名空间绑定。')
 
     @property

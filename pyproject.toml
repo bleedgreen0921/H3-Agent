@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = ["fastmcp==4.0.11"]
+web = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1", "jinja2>=3.1,<4", "python-multipart>=0.0.9,<1", "markdown>=3.5,<4"]
 skills = ["PyYAML>=6,<7"]
 dev = ["pytest>=9,<10"]
 sessions = ["langgraph-checkpoint-postgres==3.2.0", "psycopg[binary]==3.2.6"]
@@ -45,6 +46,7 @@ namespaces = false
 
 [tool.setuptools.package-data]
 "ai_assistant.integrations" = ["*.json"]
+"ai_assistant.web" = ["templates/*.html", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

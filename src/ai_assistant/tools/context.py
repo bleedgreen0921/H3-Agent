@@ -26,16 +26,6 @@ class KnowledgeService:
 
 
 @dataclass(frozen=True)
-class FeishuService:
-    """工具调用需要的飞书主人身份和默认业务策略。"""
-    owner_open_id: str | None = None
-    default_task_assignee: str = 'none'
-    task_members: str = 'model'
-    default_calendar_id: str | None = None
-    document_identity: str = 'user'
-
-
-@dataclass(frozen=True)
 class ToolContext:
     """由可信运行时构造的工具依赖、调用身份和轮次状态。"""
     workspace: ReadOnlyWorkspace

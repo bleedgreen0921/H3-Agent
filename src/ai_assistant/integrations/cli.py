@@ -21,7 +21,7 @@ def _safe_operation(row):
 
 def add_commands(commands):
     """注册 MCP 服务、授权和操作回执相关的终端命令。"""
-    root = commands.add_parser('mcp', help='Office MCP configuration and diagnostics')
+    root = commands.add_parser('mcp', help='Generic MCP configuration and diagnostics')
     actions = root.add_subparsers(dest='action', required=True)
 
     # list 查看配置，check 检查服务，tools 查看指定服务的工具及 schema。
@@ -33,12 +33,7 @@ def add_commands(commands):
         if action in {'list', 'check'}:
             parser.add_argument('server', nargs='?')
 
-    # 飞书主人授权和外部操作回执分别使用独立子命令。
-    auth = actions.add_parser('auth').add_subparsers(dest='auth_service', required=True)
-    feishu = auth.add_parser('feishu').add_subparsers(dest='auth_action', required=True)
-    for action in ['login', 'status', 'logout']:
-        parser = feishu.add_parser(action)
-        parser.add_argument('--config', default='assistant.toml')
+    # 外部操作回执查询。
     operations = actions.add_parser('operations').add_subparsers(dest='operation_action', required=True)
     for action in ['list', 'inspect']:
         parser = operations.add_parser(action)
@@ -48,26 +43,18 @@ def add_commands(commands):
 
 
 async def execute(config, args):
-    """按已解析的参数执行 MCP 授权、诊断或回执查询。"""
-    if args.action == 'auth':
-        # 授权状态由 TokenStore 管理；login 显式发起飞书用户授权。
-        from ai_assistant.integrations.oauth import TokenStore
-        base = config.config_path.parent if config.config_path else Path.cwd()
-        tokens = TokenStore(config, base / config.workspace.root)
-        if args.auth_action == 'login':
-            await tokens.login()
-            print('Feishu owner authorization saved.')
-        else:
-            print(json.dumps(tokens.status() if args.auth_action == 'status' else tokens.logout()))
-        return 0
-
+    """按已解析的参数执行 MCP 诊断或回执查询。"""
     if args.action == 'operations':
-        # 查询持久化操作及渠道记录；工具操作只输出安全摘要。
+        # 查询持久化外部操作回执；只输出安全摘要。
         from ai_assistant.storage.integrations import operation_storage
         async with operation_storage(config.sessions) as store:
-            result = {'tools': [_safe_operation(row) for row in await store.operations.list()], 'channel_replies': await store.diagnostics.replies(), 'management_commands': await store.diagnostics.commands()} if args.operation_action == 'list' else await store.diagnostics.inspect(args.operation_id)
-        if isinstance(result, dict) and result.get('kind') == 'tool_operation':
-            result = _safe_operation(result)
+            rows = await store.operations.list()
+            if args.operation_action == 'list':
+                result = {'tools': [_safe_operation(row) for row in rows]}
+            else:
+                result = next((row for row in rows if row.get('id') == args.operation_id), None)
+                if result is not None:
+                    result = _safe_operation(result)
 
         # 配置知识库时补充管理命令的业务回执，便于核对渠道与入库状态。
         if config.knowledge is not None:
@@ -108,33 +95,14 @@ async def execute(config, args):
             for key, s in chosen.items()}, ensure_ascii=False))
         return 0
 
-    # check 先离线检查依赖、可执行文件和飞书工具配置。
+    # check 先离线检查依赖和可执行文件。
     if args.action == 'check':
         problems = []
         if chosen and importlib.util.find_spec('fastmcp') is None:
             problems.append('Install the mcp extra.')
-        base = config.config_path.parent if config.config_path else Path.cwd()
         for key, settings in chosen.items():
             if settings.transport == 'stdio' and shutil.which(settings.command, path=settings.env['PATH'].get_secret_value() if 'PATH' in settings.env else None) is None:
                 problems.append(f'{key}: configured stdio executable is unavailable.')
-            if settings.transport == 'feishu':
-                from ai_assistant.integrations.feishu import allowed_capabilities
-                allowed_capabilities(settings)
-                if config.integrations.feishu is None:
-                    problems.append(f'{key}: configure integrations.feishu.')
-                else:
-                    project = base / config.integrations.feishu.node_project
-
-                    # 只检查已安装的固定版本，不在诊断时安装依赖。
-                    for package, version in [('@larksuiteoapi/lark-mcp', '0.5.1'), ('@larksuiteoapi/node-sdk', '1.76.0'), ('pg', '8.23.1')]:
-                        try:
-                            actual = json.loads((project / 'node_modules' / package / 'package.json').read_text())['version']
-                        except (OSError, ValueError, KeyError):
-                            actual = None
-                        if actual != version:
-                            problems.append(f'{key}: install locked Node package {package}@{version} with npm ci.')
-                    if shutil.which('node') is None:
-                        problems.append(f'{key}: Node >=20 is required.')
         if problems:
             print(json.dumps({'ok': False, 'problems': problems}, ensure_ascii=False))
             return 2
@@ -155,20 +123,6 @@ async def execute(config, args):
             print(json.dumps({'ok': False, 'unavailable': {
                 name: status['reason'] for name, status in catalog.unavailable.items()}}, ensure_ascii=False))
             return 2
-        if args.action == 'check':
-            # 飞书身份额外调用只读接口验证当前用户或机器人连接。
-            import asyncio
-            import httpx
-            from ai_assistant.integrations.feishu_files import FeishuAPI
-            from ai_assistant.integrations.oauth import TokenStore
-            async with asyncio.timeout(config.mcp.call_timeout):
-                async with httpx.AsyncClient(timeout=config.mcp.call_timeout, trust_env=False) as http:
-                    for settings in chosen.values():
-                        if settings.transport in {'feishu', 'feishu_files'}:
-                            tokens = TokenStore(config, workspace.root) if settings.identity == 'user' else None
-                            api = FeishuAPI(config.integrations.feishu, http, tokens)
-                            await api.request('GET', '/authen/v1/user_info' if tokens else '/bot/v3/info')
-
         # tools 额外返回输入 schema；check 输出已发现工具的概要。
         print(json.dumps([{**e.info(), **({'input_schema': e.tool.args_schema} if args.action == 'tools' else {})} for e in catalog.entries.values()], ensure_ascii=False))
     return 0

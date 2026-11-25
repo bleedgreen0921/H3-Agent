@@ -173,48 +173,13 @@ async def mcp_resources(config, workspace, *, caller=None):
                 pending = []
                 tools = None
 
-                # 飞书原生工具与本地语义工具分别发现，再合并白名单结果。
-                if settings.transport == 'feishu':
-                    from ai_assistant.integrations.feishu import OfficialConnection
-                    from ai_assistant.integrations.feishu_docs import (
-                        SEMANTIC_TOOLS, create_semantic_tools)
-                    native_tools = [name for name in settings.tools if name not in SEMANTIC_TOOLS]
-                    native_writes = [name for name in settings.write_tools if name not in SEMANTIC_TOOLS]
-                    native_settings = settings.model_copy(update={
-                        'tools': native_tools, 'write_tools': native_writes})
-                    tools = (await OfficialConnection(
-                        config, native_settings, workspace).discover()) if native_tools else []
-                    if set(settings.tools) & SEMANTIC_TOOLS:
-                        import httpx
-                        from ai_assistant.integrations.feishu_files import FeishuAPI
-                        from ai_assistant.integrations.oauth import TokenStore
-                        http = await scope.enter_async_context(httpx.AsyncClient(
-                            timeout=config.mcp.call_timeout, trust_env=False,
-                            follow_redirects=False))
-                        tokens = TokenStore(config, workspace.root) if settings.identity == 'user' else None
-                        api = FeishuAPI(config.integrations.feishu, http, tokens)
-                        convert_api = FeishuAPI(config.integrations.feishu, http)
-                        semantic = {tool.name: tool for tool in create_semantic_tools(
-                            api, convert_api)}
-                        tools.extend(tool for name, tool in semantic.items() if name in settings.tools)
                 # stdio 使用明确配置的可执行程序和环境。
-                elif settings.transport == 'stdio':
+                if settings.transport == 'stdio':
                     overrides = {k: v.get_secret_value() for k, v in settings.env.items()}
                     binary = executable(settings.command, path=overrides.get('PATH'))
                     env = {**executable_env(binary), **overrides}
                     target = StdioTransport(command=binary, args=settings.args,
                                             env=env, keep_alive=True)
-                # 文件服务使用受限工作区及对应飞书身份。
-                elif settings.transport == 'feishu_files':
-                    import httpx
-                    from ai_assistant.integrations.feishu_files import FeishuAPI, create_server
-                    from ai_assistant.integrations.oauth import TokenStore
-                    if config.integrations.feishu is None:
-                        raise ConfigError('Configure [integrations.feishu].')
-                    http = await scope.enter_async_context(httpx.AsyncClient(timeout=config.mcp.call_timeout,
-                        trust_env=False, follow_redirects=False))
-                    tokens = TokenStore(config, workspace.root) if settings.identity == 'user' else None
-                    target = create_server(FeishuAPI(config.integrations.feishu, http, tokens), workspace)
                 # HTTP 传输使用显式地址和受保护的请求头。
                 elif settings.transport == 'http':
                     target = StreamableHttpTransport(settings.url,

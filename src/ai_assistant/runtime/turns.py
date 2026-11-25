@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 async def execute_turn(session, text, *, skill_ids=None, on_event=None,
                    input_id=None, user_source=None, planning_action=None,
-                   planning_goal=None):
+                   planning_goal=None, attachments=None):
     """执行一轮输入，持久化统一结果并在异常时等待工具清理。"""
     if session._closed:
         raise RuntimeError('Session is closed.')
@@ -29,6 +29,8 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
         raise SessionStorageError('Session connection lost; reopen the conversation.')
     input_id = input_id or str(uuid4())
     from ai_assistant.runtime.inputs import metadata, user_message, recorded_messages
+
+    # 附件只作为本轮可信输入引用；工具读取时仍检查 session 归属。
 
     # 在本会话相关线程中检查输入 ID，拒绝重复执行或覆盖原输入。
     by_id = {}
@@ -62,6 +64,7 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
     saved_result = None
     session._maintenance = None
     event_enabled = True
+    turn_agent = session.agent
 
     async def emit_aux(item):
         """转发可选的进度事件；回调故障只停用本轮辅助能力，不影响业务结果。"""
@@ -82,6 +85,10 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
     try:
         from ai_assistant.runtime.history import latest_state, recovery_values
         snapshot = await latest_state(session.agent, session._thread)
+        # 普通对话使用直接 Agent；只要存在 planning 状态，就保持规划模式。
+        if session.normal_agent is not None and planning_action is None:
+            if not snapshot.values.get('planning'):
+                turn_agent = session.normal_agent
         recovered = None
         if session._failed:
             # 只复制已保存的对话事实；新线程没有旧任务或 pending writes。
@@ -129,7 +136,7 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
         agent_started = monotonic()
         with span('agent.execute', execution_thread_id=session._thread):
             async with asyncio.timeout(session.settings.turn_timeout_seconds):
-                async for event in session.agent.astream_events(
+                async for event in turn_agent.astream_events(
                     graph_input, config=config, context=turn_context,
                     version='v2', durability='sync'
                 ):
@@ -182,7 +189,7 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
 
         # 读取实际终态与外部操作回执，统一计算业务状态。
         # 会话锁保护最新状态；完成指针只表示已确认提交的位置。
-        state = await session.agent.aget_state({'configurable': {'thread_id': session._thread}})
+        state = await turn_agent.aget_state({'configurable': {'thread_id': session._thread}})
         operations = await session.context.operations.list(input_id) if session.context.operations else []
         from ai_assistant.runtime.outcomes import turn_result, SUCCESS
         execution_state = {**state.values, 'execution': state.values.get('execution') or
@@ -206,10 +213,10 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
 
         # 先保存轮次结果，再根据可恢复性推进会话完成指针。
         with span('result.commit'):
-            state_config = await session.agent.aupdate_state(state.config, update)
+            state_config = await turn_agent.aupdate_state(state.config, update)
         saved_result = unified
-        committed_state = await latest_state(session.agent, session._thread)
-        resumable = unified['status'] == 'complete' and not committed_state.next
+        committed_state = await latest_state(turn_agent, session._thread)
+        resumable = unified['status'] in {'complete', 'needs_clarification'} and not committed_state.next
         phase = 'session_index'
         if session.repository is not None and resumable:
             with span('session.index'):

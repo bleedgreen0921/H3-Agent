@@ -11,8 +11,10 @@ from ai_assistant.observability import event, span
 
 class AssistantSession:
     """持有会话身份、线程、单轮互斥和存储连接状态。"""
-    def __init__(self, agent, context, settings, *, model_name='', repository=None):
+    def __init__(self, agent, context, settings, *, model_name='', repository=None,
+                 normal_agent=None):
         self.agent, self.context, self.settings = agent, context, settings
+        self.normal_agent = normal_agent
         self.model_name = model_name
         self.repository = repository
         self._running = False

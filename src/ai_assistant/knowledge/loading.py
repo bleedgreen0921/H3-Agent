@@ -193,6 +193,35 @@ def _run_local_loader(path):
         finally:
             book.close(); values.close()
 
+    # DOCX 使用 python-docx 读取正文和表格，避免依赖 NLTK。
+    if suffix == '.docx':
+        from docx import Document as WordDocument
+        from langchain_core.documents import Document
+        document = WordDocument(str(path))
+        parts = [paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()]
+        for table in document.tables:
+            for row in table.rows:
+                values = [cell.text.strip() for cell in row.cells]
+                if any(values):
+                    parts.append(' | '.join(values))
+        return [Document(page_content='\n'.join(parts), metadata={'paragraph_count': len(document.paragraphs)})]
+
+    # PPTX 使用 python-pptx 读取幻灯片文本，保留页码。
+    if suffix == '.pptx':
+        from pptx import Presentation
+        from langchain_core.documents import Document
+        presentation = Presentation(str(path))
+        docs = []
+        for index, slide in enumerate(presentation.slides, 1):
+            values = []
+            for shape in slide.shapes:
+                if hasattr(shape, 'text') and shape.text.strip():
+                    values.append(shape.text.strip())
+            if values:
+                docs.append(Document(page_content='\n'.join(values),
+                                     metadata={'slide_number': index}))
+        return docs
+
     # 其他格式使用本地 Unstructured；阻止此路径主动联网和下载资源。
     import socket
     def deny_network(*args, **kwargs):
