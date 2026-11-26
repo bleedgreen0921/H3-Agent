@@ -1,5 +1,6 @@
 """Trusted tool dependencies and explicit asynchronous resource ownership."""
 import asyncio
+from collections.abc import Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,9 +21,35 @@ class ToolContextError(RuntimeError):
 
 @dataclass(frozen=True)
 class KnowledgeService:
-    """知识库配置及可选的已注入 Retriever。"""
+    """知识库配置及可选的已注入 Retriever / 筛选工厂。"""
     config: AppConfig | None = None
     retriever: BaseRetriever | None = None
+    retriever_factory: Callable[[dict], BaseRetriever] | None = None
+
+    def retriever_for(self, filters: dict) -> BaseRetriever:
+        """按本次筛选条件选择 Retriever；注入实例不能绕过筛选。"""
+        from ai_assistant.knowledge import KnowledgeError
+        from ai_assistant.knowledge.metadata import validate_filters
+
+        filters = validate_filters(filters)
+        knowledge = getattr(self.config, 'knowledge', None) if self.config is not None else None
+        if filters:
+            if self.retriever_factory is not None:
+                return self.retriever_factory(filters)
+            if knowledge is None:
+                raise KnowledgeError('当前知识库不支持本次筛选条件。')
+            from ai_assistant.knowledge.retrieval import create_knowledge_retriever
+            from ai_assistant.knowledge.sync import settings
+            return create_knowledge_retriever(settings(self.config), filters=filters)
+        if self.retriever is not None:
+            return self.retriever
+        if self.retriever_factory is not None:
+            return self.retriever_factory({})
+        if knowledge is None:
+            raise KnowledgeError('知识库未配置。')
+        from ai_assistant.knowledge.retrieval import create_knowledge_retriever
+        from ai_assistant.knowledge.sync import settings
+        return create_knowledge_retriever(settings(self.config))
 
 
 @dataclass(frozen=True)
@@ -30,10 +57,8 @@ class ToolContext:
     """由可信运行时构造的工具依赖、调用身份和轮次状态。"""
     workspace: ReadOnlyWorkspace
 
-    # 可变集合记录本轮效果、资源身份及执行中的工具，不进入常规对象展示。
+    # 可变集合记录本轮效果及执行中的工具，不进入常规对象展示。
     effect_facts: list = field(default_factory=list, kw_only=True, repr=False, compare=False)
-    # 本轮已创建/已绑定的外部资源 -> (server, identity)；防止 bot 创建后 user 写入。
-    resource_bindings: dict = field(default_factory=dict, kw_only=True, repr=False, compare=False)
     inflight_tools: set = field(default_factory=set, kw_only=True, repr=False, compare=False)
     executed_tool_calls: set = field(default_factory=set, kw_only=True, repr=False, compare=False)
 
@@ -68,7 +93,9 @@ class ToolContext:
 
 
 @asynccontextmanager
-async def tool_context(config: AppConfig, *, retriever: BaseRetriever | None = None, skill_snapshot=None):
+async def tool_context(config: AppConfig, *, retriever: BaseRetriever | None = None,
+                       retriever_factory: Callable[[dict], BaseRetriever] | None = None,
+                       skill_snapshot=None):
     """按显式配置装配工作区和可选服务，并托管本作用域创建的资源。"""
     base = config.config_path.parent if config.config_path else Path.cwd()
     root = Path(config.workspace.root)
@@ -94,7 +121,7 @@ async def tool_context(config: AppConfig, *, retriever: BaseRetriever | None = N
             client = await stack.enter_async_context(httpx.AsyncClient(follow_redirects=False, trust_env=False))
             web = DeepSeekWeb(client, profile.api_key.get_secret_value(), settings.timeout,
                               search_chars=settings.search_chars, fetch_chars=settings.fetch_chars)
-        services = {'knowledge': KnowledgeService(config, retriever)}
+        services = {'knowledge': KnowledgeService(config, retriever, retriever_factory)}
         if skills is not None:
             services['skills'] = skills
 

@@ -43,7 +43,7 @@ def authorize(caller, server, tool):
     """只允许可信主人调用显式开放的工具；写入另受服务开关限制。"""
     caller.__post_init__()
     if not caller.owner:
-        raise ToolException('Only the configured owner can use office tools.')
+        raise ToolException('Only the configured owner can use external tools.')
     if tool not in server.tools:
         raise ToolException('Tool is outside the configured allow list.')
     if tool in server.write_tools and not server.allow_write:

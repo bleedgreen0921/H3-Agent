@@ -13,6 +13,15 @@ from ai_assistant.knowledge.metadata import normalize, terms
 from ai_assistant.knowledge.models import embedding
 
 
+def sha256_file(path, *, chunk_size=1024 * 1024):
+    """按固定块大小计算文件摘要，避免大快照一次性读入内存。"""
+    digest = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        while data := stream.read(chunk_size):
+            digest.update(data)
+    return digest.hexdigest()
+
+
 def snapshot(workspace, relative, directory):
     """读取工作区普通文件，按内容摘要保存只读快照。"""
     target = workspace._path(relative)
@@ -48,7 +57,7 @@ def snapshot_file(target, directory):
         try:
             os.link(temporary, final)
         except FileExistsError:
-            if hashlib.sha256(final.read_bytes()).hexdigest() != digest.hexdigest():
+            if sha256_file(final) != digest.hexdigest():
                 raise KnowledgeError('不可变资料快照校验失败。')
         return digest.hexdigest(), final.resolve(), target.name
     finally:
@@ -86,7 +95,7 @@ async def prepare_chunks(store, job):
     if job['config_hash'] != c.fingerprint():
         raise KnowledgeError('任务索引配置与 Worker 不一致；请显式重新提交。')
     path = Path(job['snapshot'])
-    digest = await asyncio.to_thread(lambda: hashlib.sha256(path.read_bytes()).hexdigest())
+    digest = await asyncio.to_thread(sha256_file, path)
     if digest != job['digest']:
         raise KnowledgeError('资料快照摘要不匹配。')
 

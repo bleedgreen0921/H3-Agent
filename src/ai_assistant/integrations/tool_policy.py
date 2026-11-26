@@ -109,7 +109,7 @@ DEFAULT_REDACTION_POLICY = RedactionPolicy(
     preserve_keys=BUSINESS_KEYS,
 )
 
-# 投影时需要重新解析为 JSON 的 artifact 字段（飞书工具把原始正文放在这里）。
+# 投影时需要重新解析为 JSON 的 artifact 字段（部分工具把原始正文放在这里）。
 _JSON_ARTIFACT_KEYS = frozenset({
     "content", "full_tool_content", "structured_content", "structuredContent", "raw",
 })

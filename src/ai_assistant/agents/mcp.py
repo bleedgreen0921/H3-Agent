@@ -1,19 +1,21 @@
-"""通用 MCP 授权及调用；服务事实由 transport 适配解释。"""
+"""通用 MCP 授权及调用；不包含产品资源身份绑定。"""
 import asyncio
-import inspect
 from copy import deepcopy
+
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_core.tools import ToolException
+
+from ai_assistant.capabilities.policy import CapabilityPolicy
 from ai_assistant.integrations.mcp import validate_arguments
 from ai_assistant.integrations.policy import authorize, operation_principal
-from ai_assistant.integrations.adapters import service_adapter
 from ai_assistant.integrations.tool_policy import PreflightIssue, ToolPreflightError
-from ai_assistant.capabilities.policy import CapabilityPolicy
 from ai_assistant.observability import event
 
 
 class MCPMiddleware(AgentMiddleware):
+    """通用 MCP 工具执行边界：授权、预检、写回执和超时。"""
+
     def prepare(self, request):
         entries = list(request.runtime.context.services['mcp'].entries.values())
         unavailable = request.runtime.context.services['mcp'].unavailable
@@ -23,9 +25,6 @@ class MCPMiddleware(AgentMiddleware):
         guidance = '\n已配置 MCP 服务：' + (services or '当前入口无授权服务') + '；直接使用已提供的工具，缺失能力如实说明。'
         if unavailable:
             guidance += '\n当前不可用的 MCP 服务：' + ', '.join(sorted(unavailable)) + '；如实说明当前不可用。'
-        adapters = {service_adapter(entry) for entry in entries} - {None}
-        for adapter in sorted(adapters, key=lambda item: item.__name__):
-            guidance += '\n' + adapter.guidance(entries, request.runtime.context)
         return request.override(system_message=SystemMessage(
             (original.text if original else '') + guidance,
             additional_kwargs=original.additional_kwargs if original else {}))
@@ -39,55 +38,33 @@ class MCPMiddleware(AgentMiddleware):
     async def awrap_tool_call(self, request, handler):
         return await self.execute_tool(request, handler)
 
-    @staticmethod
-    def _project(entry, result, context):
-        """统一投影模型可见结果；原始回执已在调用前保存。"""
-        adapter = service_adapter(entry)
-        project = getattr(adapter, 'project', None) if adapter is not None else None
-        return project(entry, result, context, mode='context') if project else result
-
     @classmethod
-    def _preflight_failure(cls, entry, error, request, context):
+    def _preflight_failure(cls, entry, error, request):
         """尚未产生外部副作用；模型可以修正参数后继续。"""
         event('boundary.preflight', tool=entry.id, code=error.issue.code,
               status='error', recoverable=error.issue.recoverable)
-        state = getattr(context, 'capabilities', None)
+        state = getattr(request.runtime.context, 'capabilities', None)
+        stop = False
         if state is not None:
             state.preflight_failures = getattr(state, 'preflight_failures', 0) + 1
-            if state.preflight_failures >= 3:
-                return cls._project(entry, ToolMessage(
-                    error.issue.message + ' 本轮已连续多次预检失败，停止继续尝试。',
-                    status='error',
-                    tool_call_id=request.tool_call['id'],
-                    name=entry.id,
-                    artifact={'execution_fact': {
-                        'version': 1,
-                        'nature': 'read',
-                        'control': 'stop',
-                        'error_code': error.issue.code,
-                        'error_category': error.issue.code,
-                    }},
-                ), context)
-        return cls._project(entry, ToolMessage(
-            error.issue.message,
-            status='error',
-            tool_call_id=request.tool_call['id'],
+            stop = state.preflight_failures >= 3
+        message = error.issue.message + (
+            ' 本轮已连续多次预检失败，停止继续尝试。' if stop else '')
+        return ToolMessage(
+            message, status='error', tool_call_id=request.tool_call['id'],
             name=entry.id,
             artifact={'execution_fact': {
-                'version': 1,
-                'nature': 'read',
-                'control': 'continue',
+                'version': 1, 'nature': 'read',
+                'control': 'stop' if stop else 'continue',
                 'error_code': error.issue.code,
                 'error_category': error.issue.code,
-            }},
-        ), context)
+            }})
 
     async def execute_tool(self, request, handler):
         context = request.runtime.context
         entry = context.services['mcp'].entries.get(request.tool_call['name'])
         if entry is None:
             return await handler(request)
-        adapter = service_adapter(entry)
         try:
             authorize(context.caller, entry.settings, entry.original_name)
             arguments = deepcopy(request.tool_call['args'])
@@ -95,24 +72,9 @@ class MCPMiddleware(AgentMiddleware):
                        or entry.original_name in entry.settings.write_tools)
             state = getattr(context, 'capabilities', None)
             plan = getattr(state, 'plan', None)
-            if plan is not None:
-                if plan.effect == 'read' and writing:
-                    raise ToolPreflightError(PreflightIssue(
-                        'effect_denied', '当前任务为只读，不能执行写入。', recoverable=False))
-                if plan.identity and entry.settings.identity and entry.settings.identity != plan.identity:
-                    raise ToolPreflightError(PreflightIssue(
-                        'identity_mismatch', '目标资源已绑定其他飞书身份；同一资源必须使用创建时的身份。',
-                        recoverable=False))
-            if writing and isinstance(arguments, dict):
-                target = (arguments.get('path') or {}).get('document_id') if isinstance(
-                    arguments.get('path'), dict) else None
-                target = target or arguments.get('document_id')
-                bindings = getattr(context, 'resource_bindings', {}) or {}
-                binding = bindings.get(target) if isinstance(bindings, dict) else None
-                if binding and (entry.server, entry.settings.identity) != tuple(binding):
-                    raise ToolPreflightError(PreflightIssue(
-                        'identity_mismatch', '该文档由另一飞书身份创建；同一资源必须使用创建时的身份。',
-                        recoverable=False))
+            if plan is not None and plan.effect == 'read' and writing:
+                raise ToolPreflightError(PreflightIssue(
+                    'effect_denied', '当前任务为只读，不能执行写入。', recoverable=False))
             schema = getattr(getattr(entry, 'tool', None), 'args_schema', None)
             if schema is not None and not isinstance(schema, dict):
                 schema = schema.model_json_schema()
@@ -123,35 +85,26 @@ class MCPMiddleware(AgentMiddleware):
                 # 预检失败，必须允许模型按同一 schema 修正一次，而不是当成写失败。
                 raise ToolPreflightError(PreflightIssue(
                     'invalid_arguments', str(error), recoverable=True)) from None
-            preflight = getattr(adapter, 'preflight', None) if adapter is not None else None
-            if preflight is not None:
-                checked = preflight(entry, arguments, context)
-                if inspect.isawaitable(checked):
-                    await checked
-            expected, early = await adapter.prepare(entry, arguments, context, request.state, request.runtime.config) if adapter else ({}, None)
-            expected = deepcopy(expected)
-            expected.pop('client_token', None)
-            if early is not None:
-                return self._project(entry, ToolMessage(
-                    early, tool_call_id=request.tool_call['id'], name=entry.id), context)
-            path = adapter.idempotency_path(entry) if adapter else None
-            if path and isinstance(arguments.get(path[0]), dict):
-                arguments[path[0]].pop(path[1], None)
+
             operation = None
             if writing:
                 if context.operations is None or context.input_id is None:
                     raise ToolException('External writes require durable operations and an input ID.')
-                source_key = None
-                if adapter and hasattr(adapter, 'email_source_key'):
-                    source_key = adapter.email_source_key(entry, arguments, context)
-                options = {'source_key': source_key} if source_key else {}
-                fresh, operation = await context.operations.begin(context.input_id, operation_principal(context.caller), entry.id, arguments, **options)
+                fresh, operation = await context.operations.begin(
+                    context.input_id, operation_principal(context.caller),
+                    entry.id, arguments)
                 if not fresh:
-                    return self._project(entry, ToolMessage(
-                        str({'operation_id': operation['id'], 'status': operation['status'], 'result': operation['result']}),
-                        tool_call_id=request.tool_call['id'], name=entry.id, status='success' if operation['status'] == 'succeeded' and not ((operation['result'] or {}).get('verification') == 'mismatch' or (operation['result'] or {}).get('business_outcome')) else 'error'), context)
-                if path:
-                    arguments.setdefault(path[0], {})[path[1]] = operation['id']
+                    result = operation.get('result') or {}
+                    status = 'success' if (
+                        operation['status'] == 'succeeded'
+                        and result.get('verification') != 'mismatch'
+                        and not result.get('business_outcome')) else 'error'
+                    return ToolMessage(
+                        str({'operation_id': operation['id'],
+                             'status': operation['status'],
+                             'result': operation['result']}),
+                        tool_call_id=request.tool_call['id'], name=entry.id,
+                        status=status)
             request = request.override(tool_call={**request.tool_call, 'args': arguments})
             try:
                 async with asyncio.timeout(context.services['mcp'].timeout):
@@ -160,45 +113,32 @@ class MCPMiddleware(AgentMiddleware):
                 if operation:
                     await asyncio.shield(context.operations.finish(operation['id'], 'unknown'))
                 raise
-            result, status = adapter.interpret(entry, result) if adapter else (result,
-                'unknown' if getattr(result, 'status', '') == 'error' else 'succeeded')
-            references = {}
-            if adapter is not None:
-                reference_reader = getattr(adapter, 'references', None)
-                if reference_reader is not None:
-                    references = reference_reader(entry, result) or {}
-            if status == 'succeeded' and references.get('document_id'):
-                bindings = getattr(context, 'resource_bindings', None)
-                if isinstance(bindings, dict):
-                    bindings[references['document_id']] = (
-                        entry.server, entry.settings.identity)
+
+            status = 'unknown' if getattr(result, 'status', '') == 'error' else 'succeeded'
             if operation:
                 operation['status'] = status
-                receipt = {'version': 1, 'accepted': status == 'succeeded', 'verification': 'unverified',
-                    **({'content': result.content, 'artifact': result.artifact,
-                        'references': references}
-                       if isinstance(result, ToolMessage) else {'receipt': str(result),
-                                                               'references': references})}
+                receipt = {'version': 1, 'accepted': status == 'succeeded',
+                           'verification': 'unverified'}
+                if isinstance(result, ToolMessage):
+                    receipt.update(content=result.content, artifact=result.artifact)
+                else:
+                    receipt['receipt'] = str(result)
                 try:
                     await context.operations.finish(operation['id'], status, receipt)
                 except Exception:
-                    return self._project(entry, ToolMessage(
+                    return ToolMessage(
                         '远端调用已返回，但本地回执保存未确认；任务效果待核实，不得自动重发。',
-                        tool_call_id=request.tool_call['id'], name=entry.id, status='error',
-                        artifact={'protected_receipt': True, 'remote_result': receipt,
-                                  'execution_fact': {'version': 1, 'nature': 'effect',
-                                                     'error_category': 'unknown', 'control': 'stop'}}), context)
-                if adapter:
-                    result, detail = await adapter.verify(entry, operation, arguments, expected, result, context, request.runtime.config)
-                    if detail:
-                        receipt.update(detail)
-                        await context.operations.finish(operation['id'], status, receipt)
-
-            result = await adapter.after_read(entry, arguments, result, context) if adapter else result
-            return self._project(entry, result, context)
+                        tool_call_id=request.tool_call['id'], name=entry.id,
+                        status='error',
+                        artifact={'protected_receipt': True,
+                                  'remote_result': receipt,
+                                  'execution_fact': {
+                                      'version': 1, 'nature': 'effect',
+                                      'error_category': 'unknown', 'control': 'stop'}})
+            return result
         except ToolPreflightError as error:
-            # 预检或 prepare 阶段的本地校验失败：operation 尚未创建。
-            return self._preflight_failure(entry, error, request, context)
+            # 预检阶段的本地校验失败：operation 尚未创建。
+            return self._preflight_failure(entry, error, request)
         except ToolException as error:
-            return self._project(entry, ToolMessage(
-                str(error), status='error', tool_call_id=request.tool_call['id'], name=entry.id), context)
+            return ToolMessage(str(error), status='error',
+                               tool_call_id=request.tool_call['id'], name=entry.id)

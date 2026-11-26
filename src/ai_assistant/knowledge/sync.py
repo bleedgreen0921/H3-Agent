@@ -275,6 +275,8 @@ async def _sync_claimed(config, store, run):
             await store.sync_heartbeat(run)
 
     from ai_assistant.observability import event
+    failed = False
+    failure_category = None
     task = asyncio.create_task(synchronize(config, store, run))
     pulse = asyncio.create_task(heartbeat())
     try:
@@ -294,6 +296,8 @@ async def _sync_claimed(config, store, run):
     except Exception as exc:
         from ai_assistant.knowledge import LeaseLost
 
+        failed = True
+        failure_category = type(exc).__name__
         if not isinstance(exc, LeaseLost):
             await store.settle_scan(
                 run, [], [{"source": "sync", "reason": type(exc).__name__}]
@@ -306,7 +310,9 @@ async def _sync_claimed(config, store, run):
         pulse.cancel()
         await asyncio.gather(task, pulse, return_exceptions=True)
     await store.finish_syncs()
-    event('knowledge.sync.finished', sync_id=run.get("id"), status='complete')
+    event('knowledge.sync.finished', sync_id=run.get("id"),
+          status='failed' if failed else 'complete',
+          category=failure_category)
     return True
 
 

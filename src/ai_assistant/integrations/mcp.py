@@ -211,7 +211,7 @@ async def mcp_resources(config, workspace, *, caller=None):
                     original = tool.name
                     identity = stable_id(name, settings.identity, original)
                     native = tool.model_copy(update={'name': identity, 'metadata': {
-                        **(tool.metadata or {}), 'office': {'server': name, 'identity': settings.identity,
+                        **(tool.metadata or {}), 'mcp': {'server': name, 'identity': settings.identity,
                         'original_name': original}}})
                     pending.append(Entry(identity, name, original, native, settings))
             except BaseException as exc:

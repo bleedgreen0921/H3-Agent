@@ -30,7 +30,9 @@ def validate_context_config(config, selected):
 
 
 @asynccontextmanager
-async def assistant_session(config, model_name=None, *, retriever=None, session_id=None, caller=None, resources=None):
+async def assistant_session(config, model_name=None, *, retriever=None,
+                            retriever_factory=None, session_id=None, caller=None,
+                            resources=None):
     """按配置创建会话及其资源，在退出时等待清理。"""
     from ai_assistant.integrations.policy import Caller
     caller = caller or Caller()
@@ -64,7 +66,8 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         saver = repository.saver if repository else InMemorySaver()
 
         # 统一托管工具上下文、操作回执和模型客户端。
-        context = await stack.enter_async_context(tool_context(config, retriever=retriever,
+        context = await stack.enter_async_context(tool_context(
+            config, retriever=retriever, retriever_factory=retriever_factory,
             skill_snapshot=getattr(resources, "skills", None) if caller.personal else None))
         context = replace(context, usage_store=usage_store,
                           timezone=config.agent.timezone if caller.personal else 'UTC',

@@ -54,7 +54,7 @@ async def execute_turn(session, text, *, skill_ids=None, on_event=None,
     # 每轮重建可变运行状态，避免时间、效果和在途工具跨轮泄漏。
     turn_context = replace(session.context, project_rules=project_rules, input_id=input_id, session_id=session.session_id,
                            execution_thread_id=session._thread,
-                           resolved_datetimes=set(), effect_facts=[], resource_bindings={},
+                           resolved_datetimes=set(), effect_facts=[],
                            inflight_tools=set(), executed_tool_calls=set(),
                            capabilities=CapabilityTurnState(registry=registry))
     started = monotonic()

@@ -76,6 +76,10 @@ cp config.example/assistant.example.toml assistant.toml
 
 模型工具只暴露只读操作；知识库同步使用同一个 Python 连接器，不经过模型工具。飞书 OAuth 使用本机 loopback 回调，不启动 Node 接收器。
 
+## MCP 工具
+
+MCP 只保留通用工具调用框架：支持 stdio 和流式 HTTP，按配置发现工具、过滤白名单、校验 schema，并保留 `write_tools` / `allow_write` 和操作回执。MCP 不绑定飞书身份、`document_id` 或规划资源种子；飞书实时读取由上面的只读文档组件提供，飞书 RAG 同步由知识库来源独立完成。
+
 ## 附件读取
 
 1. 在 Web 输入框上传 PDF/DOCX/Markdown/文本/代码/JSON/CSV。

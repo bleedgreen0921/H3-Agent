@@ -61,7 +61,7 @@ async def search_skills(
     messages = messages.get('messages', ()) if isinstance(messages, dict) else ()
     try:
         selection = await selector.select(
-            selection_text(messages, fallback=query),
+            selection_text(messages), query=query,
             tools=[], skills=candidates, max_tools=0, schema_budget=0,
             directory_budget=getattr(runtime.context, 'skills_directory_tokens', 6000))
     except Exception as error:

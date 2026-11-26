@@ -5,7 +5,6 @@ PROVIDER_PRESETS = {
     "deepseek": ("deepseek", "https://api.deepseek.com"),
     "glm": ("openai", "https://open.bigmodel.cn/api/paas/v4/"),
     "qwen": ("openai", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-    "spark": ("openai", "https://maas-api.cn-huabei-1.xf-yun.com/v2"),
     "kimi": ("openai", "https://api.moonshot.ai/v1"),
 }
 

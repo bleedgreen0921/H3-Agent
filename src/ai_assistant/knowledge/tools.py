@@ -47,22 +47,18 @@ async def search_knowledge(
     if context.caller and not context.caller.personal:
         raise ToolException("当前入口未启用私人知识库。")
 
-    # 优先复用运行时提供的 Retriever，否则按本次筛选条件创建。
-    config = context.service('knowledge').config
-    retriever = context.service('knowledge').retriever
-    if retriever is None:
-        config = require_config(runtime)
-        from ai_assistant.knowledge.sync import settings
-        from ai_assistant.knowledge.retrieval import create_knowledge_retriever
+    # 本次筛选条件必须进入 Retriever 构造；已注入实例不能绕过筛选。
+    service = context.service('knowledge')
+    config = service.config
     filters = {
         k: v
         for k, v in {"document_id": document_id, "source_id": source_id}.items()
         if v
     }
-    if retriever is None:
-        retriever = create_knowledge_retriever(settings(config), filters=filters)
+    retriever = service.retriever_for(filters)
     docs = await retriever.ainvoke(query)
-    budget = (config.knowledge.evidence_chars if config is not None else
+    budget = (config.knowledge.evidence_chars
+              if config is not None and config.knowledge is not None else
               getattr(getattr(retriever, 'settings', None), 'evidence_chars', 24000))
     # 在完整片段边界截取，绝不把截断片段当作完整引用。
     selected = []

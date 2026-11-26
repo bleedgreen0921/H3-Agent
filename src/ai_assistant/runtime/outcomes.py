@@ -63,7 +63,7 @@ def turn_result(state, operations=(), *, interrupted=None, executed_tool_calls=N
                 'source_id': registration.get('source_id'), 'sync_id': registration.get('sync_id'),
                 'searchable_confirmed': False, 'summary': '来源已登记，后台任务已提交；尚未确认可检索'})
         if message.status == 'error':
-            if fact.get('error_category') in {'invalid_arguments', 'effect_denied', 'identity_mismatch'}:
+            if fact.get('error_category') in {'invalid_arguments', 'effect_denied'}:
                 if fact.get('control') == 'continue':
                     items.append({'kind': 'read_error', 'tool': message.name,
                         'tool_call_id': message.tool_call_id, 'status': 'read_error',
@@ -72,7 +72,6 @@ def turn_result(state, operations=(), *, interrupted=None, executed_tool_calls=N
                     summary = {
                         'invalid_arguments': '参数未通过本地校验；未发送到远端',
                         'effect_denied': '任务为只读；未执行写入',
-                        'identity_mismatch': '目标文档绑定其他身份；未执行写入',
                     }.get(fact.get('error_category'), '本地预检失败')
                     items.append({'kind': 'tool_failure', 'tool': message.name,
                         'tool_call_id': message.tool_call_id, 'status': 'failed',

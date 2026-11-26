@@ -55,14 +55,9 @@ class CapabilityRegistry:
                 identity = getattr(service, 'identity', None)
                 write_tools = set(getattr(service, 'write_tools', ()) or ())
                 effect = 'write' if original in write_tools else 'read'
-                resource = getattr(service, 'resource_tools', {}) or {}
-                kind = resource.get(original) if isinstance(resource, dict) else None
-                resource_kinds = frozenset((kind,)) if kind else frozenset()
-                append_capable = original in set(
-                    getattr(service, 'append_tools', ()) or ())
-                creates = original in set(getattr(service, 'create_tools', ()) or ())
                 available = not (effect == 'write'
                                  and not bool(getattr(service, 'allow_write', False)))
+                resource_kinds, append_capable, creates = frozenset(), False, False
                 provider = f'mcp:{server}' if server else 'builtin'
             else:
                 original = name
@@ -218,7 +213,7 @@ class CapabilityRegistry:
                 if not action:
                     raise ValueError(
                         '目标资源没有显式声明 append_capable 的写入工具；'
-                        '请在 MCP 配置中声明 append_tools。')
+                        '请检查资源工具元数据。')
             else:
                 # 非追加写任务优先非追加工具；只暴露一个动作工具，避免扩大写入面。
                 ordered = sorted(writes, key=lambda item: (
@@ -227,7 +222,7 @@ class CapabilityRegistry:
                 if not action:
                     raise ValueError(
                         '目标资源没有显式声明的写入工具；'
-                        '请在 MCP 配置中声明 write_tools。')
+                        '请检查资源工具元数据。')
         required = action + readers
 
         # 动作工具是必达能力；readers 只能在预算内补充。
@@ -275,7 +270,7 @@ class CapabilityRegistry:
         if not candidates:
             raise ValueError(
                 '目标资源没有显式声明的创建工具；'
-                '请在 MCP 配置中声明 create_tools。')
+                '请检查资源工具元数据。')
         selected = list(plan.tool_ids)
         used = self.schema_tokens(selected)
         maximum = int(plan.max_schema_tokens

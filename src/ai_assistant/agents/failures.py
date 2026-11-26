@@ -14,21 +14,10 @@ FAILURE_REPLY = '未完成：本轮已停止，不再重试或执行后续步骤
 
 
 def tool_label(context, name):
-    """把内部 stable id 映射成业务名称；不把 mcp_* 暴露给用户。"""
+    """把内部 stable id 映射成工具原名；不把 mcp_* 暴露给用户。"""
     catalog = getattr(context, 'services', {}).get('mcp')
     entry = catalog.entries.get(name) if catalog else None
-    original = getattr(entry, 'original_name', None) if entry else None
-    if not original:
-        return '外部工具'
-    from ai_assistant.integrations.adapters import service_adapter
-    adapter = service_adapter(entry)
-    label = getattr(adapter, 'display_name', None) if adapter else None
-    if label is None:
-        return original
-    try:
-        return label(entry)
-    except Exception:
-        return original
+    return getattr(entry, 'original_name', None) or '外部工具'
 
 
 def readonly_call(request, policy=None):
@@ -136,8 +125,6 @@ class ToolFailureMiddleware(AgentMiddleware):
                     details.append(f'{label}：参数未通过本地校验，未发送到远端；没有写入效果。')
                 elif category == 'effect_denied':
                     details.append(f'{label}：当前任务为只读，未执行写入。')
-                elif category == 'identity_mismatch':
-                    details.append(f'{label}：目标文档已绑定其他飞书身份，未执行写入。')
                 elif category == 'permission':
                     details.append(f'{label}：权限或授权不足，未执行写入。')
                 elif category == 'remote_rejected':

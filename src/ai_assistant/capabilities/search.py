@@ -51,7 +51,7 @@ async def search_tools(
     settings = state.registry.settings
     try:
         selection = await selector.select(
-            selection_text(_messages(runtime), fallback=query),
+            selection_text(_messages(runtime)), query=query,
             tools=candidates, skills=[], max_tools=getattr(settings, 'top_k', 8),
             schema_budget=getattr(settings, 'max_schema_tokens', 0),
             directory_budget=0)

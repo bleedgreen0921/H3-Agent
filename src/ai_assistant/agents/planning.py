@@ -230,7 +230,7 @@ def _resolve_resource(resource, registry, default_identity):
     if not preferred:
         raise PlanValidationError(
             f'没有可用的 {default_identity} 资源工具身份；'
-            '请检查 MCP resource_tools 声明。')
+            '请检查资源工具元数据。')
     servers = sorted({item.server for item in preferred if item.server})
     if not servers:
         return resource
@@ -290,7 +290,7 @@ def _resolve_task(task, planning, registry, settings):
             if (item := registry.descriptors.get(name)) is not None):
         raise PlanValidationError(
             '目标资源没有显式声明的可用工具；'
-            '请在 MCP 配置中声明 resource_tools/write_tools。')
+            '请检查资源工具元数据。')
     plan.effect = effect
     plan.server = server
     plan.identity = identity

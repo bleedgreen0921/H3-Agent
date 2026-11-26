@@ -1,1 +1,1 @@
-"""Optional office integrations; importing this package opens no connections."""
+"""Optional external integrations; importing this package opens no connections."""

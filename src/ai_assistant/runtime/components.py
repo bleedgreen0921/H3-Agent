@@ -139,7 +139,10 @@ class KnowledgeComponent(Component):
     async def open(self, ctx):
         from ai_assistant.tools.context import KnowledgeService
         current = ctx.context.services.get('knowledge')
-        ctx.services['knowledge'] = KnowledgeService(ctx.config, current.retriever if current else None)
+        ctx.services['knowledge'] = KnowledgeService(
+            ctx.config,
+            current.retriever if current else None,
+            getattr(current, 'retriever_factory', None) if current else None)
 
     def contribute(self, ctx):
         from ai_assistant.knowledge.tools import knowledge_middleware, knowledge_tools
