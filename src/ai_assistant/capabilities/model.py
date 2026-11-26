@@ -1,8 +1,19 @@
-"""能力描述、意图与暴露计划；不持有具体工具实现。"""
+"""能力描述、显式元数据与暴露计划；不持有具体工具实现。"""
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
-from ai_assistant.capabilities.intent import QueryIntent
+
+@dataclass(frozen=True)
+class ToolMetadata:
+    """内置工具必须显式声明的能力边界元数据。"""
+
+    # 读写效果与资源类型只来自声明，不能从名称或描述推导。
+    side_effect: Literal['read', 'write']
+    resource_kinds: frozenset[str] = frozenset()  # document | file | record
+    append_capable: bool = False
+    creates: bool = False
+    available: bool = True
 
 
 @dataclass(frozen=True)
@@ -19,11 +30,12 @@ class CapabilityDescriptor:
     server: str | None = None
     identity: str | None = None
 
-    # 通用语义标签用于匹配请求意图；读写标记参与能力筛选。
-    domains: frozenset[str] = frozenset()
-    actions: frozenset[str] = frozenset()
-    objects: frozenset[str] = frozenset()
-    side_effect: str = 'read'
+    # 读写、资源类型和可用性必须由装配方显式提供。
+    side_effect: str | None = None
+    resource_kinds: frozenset[str] = frozenset()
+    append_capable: bool = False
+    creates: bool = False
+    available: bool = True
 
     # 估算工具 schema 与 Skill 目录说明的 token 开销。
     schema_tokens: int = 0
@@ -31,15 +43,22 @@ class CapabilityDescriptor:
 
     # 核心能力标记，以及与该描述关联的工具或 Skill 对象。
     core: bool = False
-    write: bool = False
     tool: object | None = None
     skill: object | None = None
+
+    @property
+    def write(self):
+        """读写判断的唯一来源是显式 side_effect。"""
+        return self.side_effect == 'write'
 
     def summary(self):
         # 输出精简摘要，避免记录完整工具对象或过长描述。
         return {'id': self.id, 'kind': self.kind, 'name': self.name,
                 'original_name': self.original_name, 'provider': self.provider,
-                'description': self.description[:120], 'write': self.write}
+                'description': self.description[:120],
+                'effect': self.side_effect, 'write': self.write,
+                'resource_kinds': sorted(self.resource_kinds),
+                'available': self.available}
 
 
 @dataclass
@@ -51,9 +70,12 @@ class ExposurePlan:
     skill_directory_ids: list[str] = field(default_factory=list)
     active_skill_ids: list[str] = field(default_factory=list)
 
-    # 记录计划来源、识别意图和预计占用的 token。
-    reason: str = 'retrieval'
-    intent: QueryIntent | None = None
+    # 记录计划来源、选择结果和预计占用的 token。
+    reason: str = 'core'
+    selection_source: str = 'core'  # core | llm
+    candidate_tool_count: int = 0
+    candidate_skill_count: int = 0
+    requires_write: bool = False
     tool_schema_tokens: int = 0
     skill_directory_tokens: int = 0
 
@@ -83,24 +105,6 @@ class CapabilityTurnState:
     def initialized(self):
         # 有计划即表示能力规划已经初始化。
         return self.plan is not None
-
-
-@dataclass(frozen=True)
-class CapabilityPolicy:
-    """部署级策略；不是应用分支。"""
-
-    # 默认核心工具名称；实际可用性仍取决于注册表中的工具。
-    core_tools: tuple[str, ...] = (
-        'read_attachment', 'read_text', 'list_directory', 'search_text',
-        'web_search', 'web_fetch', 'search_knowledge', 'search_tools',
-        'search_skills', 'load_skill', 'read_skill_resource', 'unload_skill',
-        'resolve_datetime', 'read_tool_result',
-    )
-
-    # 工具 schema 预算、候选数量和能力搜索次数的默认上限。
-    max_schema_tokens: int = 25000
-    top_k: int = 8
-    max_search_calls: int = 3
 
 
 def resolve_log_path(value, base):

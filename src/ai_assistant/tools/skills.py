@@ -5,6 +5,9 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import ToolException
 from langgraph.types import Command
 from pydantic import Field
+from ai_assistant.capabilities.plan import extend_skills
+from ai_assistant.capabilities.selector import selection_text
+from ai_assistant.runtime.execution import raise_if_fatal
 from ai_assistant.tools.context import ToolContext
 from ai_assistant.skills.catalog import SkillError
 
@@ -29,27 +32,62 @@ def selected(runtime, identity):
 
 
 @tool
-async def search_skills(runtime: ToolRuntime[ToolContext], query: str = '',
-                        offset: Annotated[int, Field(ge=0)] = 0,
-                        limit: Annotated[int, Field(ge=1, le=100)] = 20) -> dict:
-    """Search names and descriptions in the fixed local skill snapshot; pagination is explicit."""
-    result = catalog(runtime).search(query, offset, limit)
-
-    # 搜索结果扩展当前计划中的目录项，但不会激活 Skill 正文。
+async def search_skills(
+    query: Annotated[str, Field(min_length=1, max_length=1000)],
+    runtime: ToolRuntime[ToolContext],
+) -> dict:
+    """Search for additional Skills not currently in the directory; this never activates a Skill."""
     state = getattr(runtime.context, 'capabilities', None)
     plan = getattr(state, 'plan', None)
-    if plan is not None:
-        for item in result['skills']:
-            if item['id'] not in plan.skill_directory_ids:
-                plan.skill_directory_ids.append(item['id'])
-        plan.skill_directory_tokens = state.registry.skill_directory_tokens(plan.skill_directory_ids)
-        state.registry.record_plan(
-            plan, input_id=getattr(runtime.context, 'input_id', None),
-            session_id=getattr(runtime.context, 'session_id', None),
-            change='expand_skills',
-            execution_thread_id=getattr(runtime.context, 'execution_thread_id', None),
-            search_calls=state.search_calls,
-        )
+    if state is None or state.registry is None or plan is None:
+        raise ToolException('Skill 搜索当前不可用。')
+
+    maximum = getattr(state.registry.settings, 'max_search_calls', 3)
+    if state.search_calls >= maximum:
+        raise ToolException('本轮能力搜索次数已达上限。')
+
+    selector = (getattr(runtime.context, 'services', {}) or {}).get('capability_selector')
+    if selector is None:
+        raise ToolException('能力选择器当前不可用。')
+
+    candidates = state.registry.eligible_skills(
+        exclude=plan.skill_directory_ids + plan.active_skill_ids)
+    state.search_calls += 1
+    if not candidates:
+        return {'skills': [], 'directory_count': len(plan.skill_directory_ids),
+                'message': '没有新的相关 Skill。'}
+
+    messages = getattr(runtime, 'state', None)
+    messages = messages.get('messages', ()) if isinstance(messages, dict) else ()
+    try:
+        selection = await selector.select(
+            selection_text(messages, fallback=query),
+            tools=[], skills=candidates, max_tools=0, schema_budget=0,
+            directory_budget=getattr(runtime.context, 'skills_directory_tokens', 6000))
+    except Exception as error:
+        raise_if_fatal(error)
+        raise ToolException('Skill 搜索失败，请稍后重试。') from None
+
+    added, skipped, exhausted = extend_skills(
+        state.registry, plan, selection.skill_ids, eligible_skills=candidates,
+        directory_budget=getattr(runtime.context, 'skills_directory_tokens', 6000))
+    state.registry.record_plan(
+        plan, input_id=getattr(runtime.context, 'input_id', None),
+        session_id=getattr(runtime.context, 'session_id', None),
+        change='expand_skills',
+        execution_thread_id=getattr(runtime.context, 'execution_thread_id', None),
+        search_calls=state.search_calls)
+
+    result = {
+        'skills': [item.summary() for item in added],
+        'directory_count': len(plan.skill_directory_ids),
+    }
+    if not added:
+        result['message'] = '没有新的相关 Skill。'
+    if skipped:
+        result['budget_skipped'] = skipped
+    if exhausted:
+        result['budget_exhausted'] = True
     return result
 
 

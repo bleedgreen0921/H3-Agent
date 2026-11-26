@@ -85,6 +85,7 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             operations=operations, context=context,
             max_input_tokens=config.models[selected].max_input_tokens)
         tools, prompt_sections, component_middleware, failure_notices, services = [], [], [], [], {}
+        tool_metadata = {}
 
         # 启用的组件各自贡献工具、提示、中间件和服务。
         for component in build_components(config, caller, retriever=retriever):
@@ -95,17 +96,20 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
             component_middleware.extend(contribution.middleware)
             failure_notices.extend(contribution.failure_notices)
             services.update(contribution.services)
+            tool_metadata.update(contribution.tool_metadata)
         context = component_context.context
         if services:
             context = replace(context, services={**context.services, **services})
 
         from ai_assistant.capabilities.model import CapabilityTurnState, resolve_log_path
         from ai_assistant.capabilities.registry import CapabilityRegistry
+        from ai_assistant.capabilities.selector import CapabilitySelector
         base = config.config_path.parent if config.config_path else Path.cwd()
         log_path = resolve_log_path(config.tools.selection.log_path, base)
         skills = context.services.get('skills')
         skill_ids = tuple(sorted(getattr(skills, 'skills', {}) or {}))
         key = (caller.binding, tuple(tool.name for tool in tools), skill_ids,
+               tuple(sorted((name, repr(meta)) for name, meta in tool_metadata.items())),
                repr(config.tools.selection), str(log_path))
         cache = getattr(resources, 'capability_cache', None) if resources is not None else None
         registry = cache.get(key) if cache is not None else None
@@ -114,10 +118,15 @@ async def assistant_session(config, model_name=None, *, retriever=None, session_
         if registry is None:
             registry = CapabilityRegistry.from_sources(
                 tools, mcp=context.services.get('mcp'), skills=skills,
-                settings=config.tools.selection, log_path=log_path)
+                metadata=tool_metadata, settings=config.tools.selection,
+                log_path=log_path)
+            registry.validate()
             if cache is not None:
                 cache[key] = registry
-        context = replace(context, capabilities=CapabilityTurnState(registry=registry))
+        selector = CapabilitySelector(model, config.tools.selection)
+        context = replace(
+            context, capabilities=CapabilityTurnState(registry=registry),
+            services={**context.services, 'capability_selector': selector})
         # 结果预算与上下文配置同源；未启用上下文管理时使用 agent 层默认值。
         result_tokens = config.context.tool_result_tokens if config.context else None
         planning_enabled = bool(getattr(config, 'planning', None) and config.planning.enabled)

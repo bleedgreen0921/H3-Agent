@@ -1,23 +1,33 @@
 """统一能力读写分类；权限白名单仍由 integrations.policy.authorize 执行。"""
-from ai_assistant.capabilities.intent import infer_descriptor
 
 
 class CapabilityPolicy:
-    """维护工具名称到读写效果的映射，不负责实际授权。"""
+    """维护工具名称到显式读写效果的映射，不负责实际授权。"""
 
-    def __init__(self, effects=None):
+    # 默认核心工具名称；实际可用性仍取决于注册表中的工具。
+    core_tools = (
+        'read_attachment', 'read_text', 'list_directory', 'search_text',
+        'web_search', 'web_fetch', 'search_knowledge', 'search_tools',
+        'search_skills', 'load_skill', 'read_skill_resource', 'unload_skill',
+        'resolve_datetime', 'read_tool_result',
+    )
+
+    def __init__(self, effects=None, *, max_schema_tokens=25000, top_k=8,
+                 max_search_calls=3):
         # 复制传入的映射，避免外部修改原字典影响当前策略。
         self.effects = dict(effects or {})
+        self.max_schema_tokens = max_schema_tokens
+        self.top_k = top_k
+        self.max_search_calls = max_search_calls
 
     @classmethod
-    def from_tools(cls, tools):
-        """只根据工具名称推导效果；无法匹配任何类别时标为 unknown。"""
+    def from_tools(cls, tools, metadata=None):
+        """只使用显式元数据；缺失时标为 unknown，不再根据名称推断。"""
         effects = {}
+        declared = metadata or {}
         for tool in tools:
-            # 禁用描述匹配，避免描述中的其他动作或否定表达污染分类。
-            actions, objects, domains, side_effect = infer_descriptor(
-                tool.name, getattr(tool, 'description', ''), use_description=False)
-            effects[tool.name] = side_effect if (actions or objects or domains) else 'unknown'
+            item = declared.get(tool.name)
+            effects[tool.name] = getattr(item, 'side_effect', None) or 'unknown'
         return cls(effects)
 
     @classmethod

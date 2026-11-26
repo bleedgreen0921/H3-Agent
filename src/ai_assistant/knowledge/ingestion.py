@@ -104,10 +104,13 @@ async def prepare_chunks(store, job):
     identity = job['metadata'] | dict(knowledge_base_id=job['kb'], document_id=job['document_id'],
         document_version_id=job['version_id'], source_uri=job['source_uri'],
         parse_config_fingerprint=job['config_hash'], index_version=job['build_id'])
-    parser = {'.ragjson':'feishu','.txt':'text','.md':'text','.pdf':'pypdf','.csv':'csv','.xlsx':'openpyxl'}.get(path.suffix,'unstructured')
+    parser = {
+        '.ragjson': 'feishu', '.pdf': 'pypdf', '.docx': 'docx',
+        '.csv': 'csv', '.tsv': 'csv', '.xlsx': 'openpyxl', '.pptx': 'pptx',
+    }.get(path.suffix, 'text')
     normalized = [normalize(doc, identity=identity, parser=parser,
         mapping={'page_start':'page_number','page_end':'page_number'} if parser=='pypdf' else None) for doc in docs]
-    if path.suffix in ('.ragjson','.csv','.xlsx'):
+    if path.suffix in ('.ragjson', '.csv', '.tsv', '.xlsx'):
         for doc, original in zip(normalized, docs):
             doc.metadata.update(original.metadata)
 

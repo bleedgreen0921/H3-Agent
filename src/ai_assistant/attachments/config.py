@@ -3,6 +3,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ai_assistant.documents.formats import ATTACHMENT_EXTENSIONS
+
 
 class AttachmentsConfig(BaseModel):
     """本地 Web 附件目录、类型和解析预算。"""
@@ -13,7 +15,7 @@ class AttachmentsConfig(BaseModel):
     state_dir: str = "~/.local/state/ai-assistant/attachments"
     max_bytes: int = Field(default=25 * 1024 * 1024, gt=0, strict=True)
     allowed_extensions: list[str] = Field(
-        default_factory=lambda: [".pdf", ".docx", ".md"]
+        default_factory=lambda: sorted(ATTACHMENT_EXTENSIONS)
     )
     read_chars: int = Field(default=16000, ge=1000, le=100000, strict=True)
     parse_timeout: float = Field(default=60, gt=0, le=300, allow_inf_nan=False)

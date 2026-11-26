@@ -10,6 +10,10 @@ import os
 import tempfile
 
 from ai_assistant.config import ConfigError
+from ai_assistant.documents.formats import (
+    CSV_EXTENSIONS, DOCX_EXTENSIONS, OFFICE_EXTENSIONS, PDF_EXTENSIONS,
+    TEXT_EXTENSIONS,
+)
 
 
 DDL = '''CREATE TABLE IF NOT EXISTS assistant_attachments (
@@ -131,8 +135,27 @@ def _media_type(name: str) -> str:
     return mimetypes.guess_type(name)[0] or "application/octet-stream"
 
 
+def _coverage(suffix: str) -> str:
+    suffix = suffix.lower()
+    if suffix in PDF_EXTENSIONS:
+        return "PDF 物理页码；空白页记录为 gaps；不提供 OCR。"
+    if suffix in DOCX_EXTENSIONS:
+        return "DOCX 正文段落和表格行；不提供 Word 页码和 OCR。"
+    if suffix in CSV_EXTENSIONS:
+        return "CSV/TSV 记录号；首行作为表头；不计算公式。"
+    if suffix == ".json":
+        return "JSON 原文行号；已校验 JSON 语法。"
+    if suffix == ".jsonl" or suffix == ".ndjson":
+        return "JSON Lines 原文行号；逐行读取。"
+    if suffix in TEXT_EXTENSIONS:
+        return "UTF-8/UTF-16 文本行号；代码只读，不执行。"
+    if suffix in OFFICE_EXTENSIONS:
+        return "XLSX/PPTX 结构化文本；不执行公式。"
+    return "本地文本内容；不提供 OCR。"
+
+
 class AttachmentService:
-    """管理附件文件、数据库记录、解析缓存和显式知识入库。"""
+    """管理附件文件、数据库记录和只读解析缓存。"""
 
     def __init__(self, config):
         self.config = config
@@ -153,11 +176,20 @@ class AttachmentService:
             raise AttachmentError("附件实际格式不是 PDF。")
         if suffix == ".docx" and not data.startswith(b"PK"):
             raise AttachmentError("附件实际格式不是 DOCX。")
-        if suffix == ".md":
+        if suffix == ".doc":
+            raise AttachmentError("旧版 .doc 不支持，请另存为 .docx。")
+        if suffix in TEXT_EXTENSIONS | CSV_EXTENSIONS:
+            from ai_assistant.documents.parsing import decode_text_bytes
+            from ai_assistant.knowledge import IngestionError
             try:
-                data.decode("utf-8-sig")
-            except UnicodeError:
-                raise AttachmentError("Markdown 必须是 UTF-8 文本。") from None
+                text = decode_text_bytes(data)
+                if suffix == ".json":
+                    import json
+                    json.loads(text)
+            except IngestionError as error:
+                raise AttachmentError(str(error) if str(error) else "附件文本格式无效。") from None
+            except ValueError:
+                raise AttachmentError("JSON 文件语法无效。") from None
         ident = str(uuid4())
         directory = self.root / ident
         directory.mkdir(mode=0o700, parents=False, exist_ok=False)
@@ -220,7 +252,7 @@ class AttachmentService:
             from ai_assistant.knowledge.loading import parse_snapshot
             try:
                 self.cache[key] = await parse_snapshot(
-                    path, timeout=self.settings.parse_timeout, attachment=True)
+                    path, timeout=self.settings.parse_timeout, granularity='read')
             except Exception:
                 raise AttachmentError("附件解析失败，请检查格式或离线解析资源。") from None
         pages = self.cache[key]
@@ -257,41 +289,11 @@ class AttachmentService:
             "total_parts": len(pages),
             "gaps": [{"page": i + 1} for i, page in enumerate(pages)
                      if page.metadata.get("gap")],
-            "coverage": "PDF 物理页码；DOCX 仅正文和表格文字；Markdown 原文；不提供 OCR。",
+            "coverage": _coverage(path.suffix),
             "next_cursor": next_cursor,
             "complete": next_cursor is None,
             "external_data": True,
         }
-
-    async def submit_to_knowledge(self, attachment_id: str, session_id: str):
-        record = await self.get(attachment_id, session_id)
-        config = self.config
-        if config.knowledge is None:
-            raise AttachmentError("当前未启用知识库。")
-        from pathlib import Path
-        from ai_assistant.knowledge.config import resolve_knowledge_paths
-        from ai_assistant.knowledge.ingestion import snapshot_file
-        from ai_assistant.storage.rag import RagStore
-        base = (config.config_path.parent if config.config_path else Path.cwd())
-        settings = resolve_knowledge_paths(config.knowledge, base)
-        store = RagStore(settings)
-        try:
-            digest, path, name = snapshot_file(Path(record.storage_path),
-                                               settings.materials_dir)
-            job = await store.submit(
-                source_uri="attachment://" + record.id,
-                digest=digest,
-                snapshot=path,
-                metadata={
-                    "source_name": record.original_name,
-                    "media_type": record.media_type,
-                    "tags": [],
-                    "attachment_id": record.id,
-                })
-            return {"job_id": job, "source_uri": "attachment://" + record.id,
-                    "status": "submitted", "searchable_confirmed": False}
-        finally:
-            await store.close()
 
     async def delete_file(self, record: AttachmentRecord):
         import shutil

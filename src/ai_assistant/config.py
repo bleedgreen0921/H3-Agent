@@ -90,12 +90,24 @@ class FilesConfig(BaseModel):
 class ToolSelectionConfig(BaseModel):
     """按轮暴露的工具选择；权限白名单仍由 mcp.servers 控制。"""
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
-    mode: Literal['retrieval', 'all'] = 'retrieval'
     top_k: int = Field(default=10, ge=1, le=64, strict=True)
     max_schema_tokens: int = Field(default=40000, ge=0, le=200000, strict=True)
     core: list[str] = Field(default_factory=list)
     max_search_calls: int = Field(default=4, ge=0, le=20, strict=True)
+    llm_timeout_seconds: float = Field(default=15, gt=0, le=120, allow_inf_nan=False)
+    llm_catalog_tokens: int = Field(default=12000, ge=1000, le=100000, strict=True)
     log_path: str | None = None
+
+    @model_validator(mode='before')
+    @classmethod
+    def reject_legacy_mode(cls, data):
+        """旧规则模式已移除；显式报错，避免静默沿用错误配置。"""
+        if isinstance(data, dict):
+            for key in ('mode', 'selector', 'fallback_to_rules'):
+                if key in data:
+                    raise ValueError(
+                        f'tools.selection.{key} 已移除；能力选择固定使用 LLM。')
+        return data
 
 
 class ToolsConfig(BaseModel):
@@ -270,6 +282,14 @@ def load_config(path: str | Path = "assistant.toml", *, profile: str | None = No
                 raise ConfigError('该存储后端尚未实现；未创建连接或回退。') from None
     if 'plan' in data:
         raise ConfigError('未知配置 [plan]：Plan 模式已移除，请删除该配置节。')
+    tools = data.get('tools')
+    selection = tools.get('selection') if isinstance(tools, dict) else None
+    if isinstance(selection, dict):
+        for key in ('mode', 'selector', 'fallback_to_rules'):
+            if key in selection:
+                raise ConfigError(
+                    f'tools.selection.{key} 已移除；能力选择固定使用 LLM，'
+                    '请删除该配置项。')
     mcp = data.get('mcp')
     servers = mcp.get('servers') if isinstance(mcp, dict) else None
     if isinstance(servers, dict):

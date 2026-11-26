@@ -1,23 +1,5 @@
-"""私人知识库管理业务：只读查询与原子操作回执，供终端和渠道复用。"""
-from uuid import uuid4
-
+"""私人知识库管理业务：只读查询和同步状态展示。"""
 from ai_assistant.knowledge import KnowledgeError
-from ai_assistant.storage.knowledge import packed, transaction
-
-
-async def register_submission(store, uri, descriptor, *, restore=True, conn=None):
-    """显式提交和渠道 add 共用；恢复必须请求新一轮扫描，不能复用已扫描的批次。"""
-    async with transaction(store.engine, conn) as conn:
-        # 来源登记和同步请求共用事务；提交不等于已经可检索。
-        source = await store.add_submission(uri, descriptor, restore=restore, conn=conn)
-        if source is None:
-            return {'status': 'removed', 'message': '已移除，需显式添加。'}
-        filters = {'source_id': source}
-        if restore:
-            filters['submission_id'] = str(uuid4())
-        sync = await store.request_sync(filters, conn=conn)
-        return dict(version=1, source_id=source, sync_id=sync, status='submitted',
-                    searchable_confirmed=False, message='来源已登记，后台任务已提交；尚未确认可检索。')
 
 
 async def sources(config, store):
@@ -25,7 +7,10 @@ async def sources(config, store):
     rows = {row['id']: row for row in await store.source_list()}
     # 配置来源尚未同步时也可展示，查询不登记来源。
     for name, row in rows.items():
-        if not name.startswith('submitted:'):
+        if name.startswith('submitted:'):
+            # 旧单文件来源只保留兼容；不再创建新的 submitted: 来源。
+            row['legacy'] = True
+        else:
             row['enabled'] = name in config.knowledge.sources
     for name, definition in config.knowledge.sources.items():
         row = rows.setdefault(name, dict(id=name, checked_at=None, error=None))
@@ -47,38 +32,6 @@ async def status(store, ident):
     if row is None:
         raise KnowledgeError('任务不存在。')
     return dict(row, kind='index')
-
-
-async def receipt(store, principal, input_id, *, conn=None, action=None, target=None):
-    """读取管理回执；同一输入不能改成其他动作或目标。"""
-    row = await store.management_receipt(principal, input_id, conn=conn)
-    if row is not None and action is not None and (row['action'] != action or row['target'] != target):
-        raise KnowledgeError('同一输入已有不同的登记目标，拒绝覆盖或重放。')
-    return row['result'] if row else None
-
-
-async def apply(store, principal, input_id, action, target=None, *, submission=None):
-    """解析在外，登记/恢复/同步/移除和回执在同一事务内；重复输入只读回执。"""
-    async with store.engine.begin() as conn:
-        # 以知识库、主体和输入为粒度加锁，重复请求复用已有回执。
-        key = packed([store.config.knowledge_base_id, principal, input_id])
-        await store.management_lock(conn, key)
-        previous = await receipt(store, principal, input_id, conn=conn, action=action, target=target)
-        if previous is not None:
-            return previous
-
-        # 业务变更与回执写入同一事务，避免恢复时盲目重复操作。
-        if action == 'add':
-            uri, descriptor = submission
-            result = await register_submission(store, uri, descriptor, conn=conn)
-        elif action == 'sync':
-            result = dict(sync_id=await store.request_sync({'source_id': target} if target else {}, conn=conn))
-        elif action == 'remove':
-            result = dict(document_id=target, removed=await store.delete(target, conn=conn))
-        else:
-            raise KnowledgeError('不支持的管理操作。')
-        await store.record_management(conn, principal, input_id, action, target, result)
-        return result
 
 
 def sync_facts(row):

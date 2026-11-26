@@ -16,6 +16,8 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from ai_assistant.attachments.service import AttachmentError
+from ai_assistant.storage.inspect import StorageInspectError, storage_inspector
+from ai_assistant.storage.sessions import SessionError, SessionNotFoundError
 from ai_assistant.web.render import safe_html as _safe_html
 from ai_assistant.web.runtime import WebRuntime, failure_message
 
@@ -58,11 +60,6 @@ class TurnRequest(BaseModel):
     attachment_ids: list[str] = Field(default_factory=list, max_length=20)
     planning_action: str | None = None
     planning_goal: str | None = None
-
-
-class ReferenceRequest(BaseModel):
-    reference: str = Field(min_length=1, max_length=8192)
-    identity: str = "user"
 
 
 def create_app(config) -> FastAPI:
@@ -252,17 +249,82 @@ def create_app(config) -> FastAPI:
             "media_type": record.media_type, "bytes": record.bytes,
         }
 
-    @app.post("/api/attachments/{attachment_id}/ingest")
-    async def ingest_attachment(attachment_id: str, session_id: str):
-        try:
-            return await runtime.attachments.submit_to_knowledge(
-                attachment_id, session_id)
-        except AttachmentError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from None
-
     @app.get("/api/plan/{session_id}")
     async def plan(session_id: str):
         return await runtime.plan_state(session_id)
+
+    async def _inspect_call(handler):
+        if config.sessions is None:
+            raise HTTPException(status_code=400, detail="存储检查需要配置 [sessions]。")
+        try:
+            async with storage_inspector(config.sessions) as inspector:
+                return await handler(inspector)
+        except SessionNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from None
+        except (SessionError, StorageInspectError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from None
+        except Exception as error:
+            logger.warning("Storage inspection failed: category=%s",
+                           type(error).__name__)
+            raise HTTPException(
+                status_code=500, detail="存储检查失败；未修改数据。") from None
+
+    @app.get("/api/storage/sessions/{session_id}")
+    async def storage_session(session_id: str):
+        async def handler(inspector):
+            return await inspector.session(session_id)
+        return await _inspect_call(handler)
+
+    @app.get("/api/storage/sessions/{session_id}/turns")
+    async def storage_turns(session_id: str, limit: int = 20):
+        async def handler(inspector):
+            return await inspector.turns(session_id, limit=limit)
+        return await _inspect_call(handler)
+
+    @app.get("/api/storage/sessions/{session_id}/checkpoints")
+    async def storage_checkpoints(session_id: str, thread_id: str | None = None,
+                                  before: str | None = None, limit: int = 20):
+        async def handler(inspector):
+            return await inspector.checkpoints(
+                session_id, thread_id=thread_id, before=before, limit=limit)
+        return await _inspect_call(handler)
+
+    @app.get("/api/storage/sessions/{session_id}/checkpoints/{checkpoint_id}")
+    async def storage_checkpoint(session_id: str, checkpoint_id: str,
+                                 thread_id: str | None = None,
+                                 channels: str | None = None,
+                                 full: bool = False):
+        async def handler(inspector):
+            selected = [item.strip() for item in (channels or "").split(",")
+                        if item.strip()]
+            return await inspector.checkpoint(
+                session_id, checkpoint_id, thread_id=thread_id,
+                channels=selected or None, full=full)
+        return await _inspect_call(handler)
+
+    @app.get("/api/storage/sessions/{session_id}/messages")
+    async def storage_messages(session_id: str, limit: int = 100):
+        async def handler(inspector):
+            return await inspector.messages(session_id, limit=limit)
+        return await _inspect_call(handler)
+
+    @app.get("/api/storage/sessions/{session_id}/operations")
+    async def storage_operations(session_id: str, limit: int = 100):
+        async def handler(inspector):
+            return await inspector.operations(session_id, limit=limit)
+        return await _inspect_call(handler)
+
+    @app.get("/api/storage/sessions/{session_id}/usage")
+    async def storage_usage(session_id: str):
+        async def handler(inspector):
+            return await inspector.usage(session_id)
+        return await _inspect_call(handler)
+
+    @app.get("/api/storage/sessions/{session_id}/health")
+    async def storage_health(session_id: str):
+        async def handler(inspector):
+            return await inspector.health(session_id)
+        return await _inspect_call(handler)
 
     async def _knowledge_store():
         if config.knowledge is None:
@@ -296,15 +358,6 @@ def create_app(config) -> FastAPI:
             from ai_assistant.knowledge.sync import configure
             await configure(config, store)
             return {"sync_id": await store.request_sync({})}
-        finally:
-            await store.close()
-
-    @app.post("/api/knowledge/submit")
-    async def knowledge_submit(body: ReferenceRequest):
-        store = await _knowledge_store()
-        try:
-            from ai_assistant.knowledge.sync import register
-            return await register(config, body.reference, identity=body.identity)
         finally:
             await store.close()
 

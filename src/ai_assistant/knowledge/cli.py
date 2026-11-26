@@ -12,14 +12,11 @@ def add_commands(commands):
     actions = parser.add_subparsers(dest='action', required=True)
 
     # 各子命令共用配置入口，按功能声明各自的参数和筛选条件。
-    for action in ('submit', 'status', 'worker', 'search', 'delete', 'rebuild', 'check', 'sources', 'sync', 'documents'):
+    for action in ('status', 'worker', 'search', 'delete', 'rebuild', 'check', 'sources', 'sync', 'documents'):
         command = actions.add_parser(action)
         command.add_argument('--config', default='assistant.toml')
         if action in ('sources', 'documents'):
             command.add_argument('--page', type=int, default=1)
-        if action == 'submit':
-            command.add_argument('path')
-            command.add_argument('--tag', action='append', default=[])
         if action == 'sync':
             command.add_argument('--source')
         if action == 'status':
@@ -46,7 +43,7 @@ async def execute(config, args):
     """按配置为指定知识库操作创建观测上下文，再执行命令。"""
     from ai_assistant.observability import (ObservationService, configuration_secrets,
                                             current_service, span)
-    watched = {'worker', 'search', 'submit', 'sync', 'delete', 'rebuild'}
+    watched = {'worker', 'search', 'sync', 'delete', 'rebuild'}
 
     # 仅在显式启用且当前没有观测服务时创建独立观测作用域。
     if (args.action in watched and config.observability.enabled
@@ -100,14 +97,6 @@ async def _execute(config, args):
             event('knowledge.management', action='sync', status='submitted', sync_id=ident,
                   target_id=args.source)
             print(ident, flush=True)
-        elif args.action == 'submit':
-            # 显式登记资料及标签，返回来源和后台任务等提交结果。
-            from ai_assistant.knowledge.sync import register
-            result = await register(config, args.path, tags=args.tag)
-            from ai_assistant.observability import event
-            event('knowledge.management', action='submit', status=result.get('status'),
-                  source_id=result.get('source_id'), sync_id=result.get('sync_id'))
-            print(json.dumps(result, ensure_ascii=False))
         elif args.action == 'status':
             # 按任务类型展示同步进度或 JSON；索引诊断仅按需输出。
             from ai_assistant.knowledge.management import status
@@ -141,7 +130,7 @@ async def _execute(config, args):
             print(render_evidence(docs))
             print('检索范围：已发布快照；查询不自动同步。')
             if not docs:
-                print('暂无可检索内容或相关证据；可提交入库、主动同步或查询任务状态。')
+                print('暂无可检索内容或相关证据；可同步配置来源或查询任务状态。')
         elif args.action == 'delete':
             # 将目标文档移出查询范围，并报告受影响数量。
             removed = await store.delete(args.document_id)

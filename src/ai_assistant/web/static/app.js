@@ -19,6 +19,12 @@ const state = {
   knowledgeTimer: null,
   knowledgeJob: null,
   activeTab: "chat",
+  storage: null,
+  storageThread: null,
+  storageCheckpoints: null,
+  storageDetail: null,
+  storageFull: false,
+  storageRequest: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -444,6 +450,7 @@ async function newSession() {
     showToast("当前轮次仍在执行，请等待完成或取消。", "info");
     return;
   }
+  if (state.activeTab === "storage") showTab("chat");
   const data = await api("/api/sessions", { method: "POST" });
   await refreshSessions({ autoSelect: false });
   await selectSession(data.id);
@@ -456,10 +463,13 @@ async function selectSession(id) {
   }
   const session = state.sessions.find((item) => item.id === id);
   if (!session) return;
-  if (state.activeTab !== "chat") showTab("chat");
+  if (state.activeTab !== "chat" && state.activeTab !== "storage") showTab("chat");
   state.currentSession = id;
   state.pendingPlan = false;
   state.planOpen = null;
+  state.storageThread = null;
+  state.storageDetail = null;
+  state.storageFull = false;
   clearPlanTimer();
   clearKnowledgeTimer();
   renderSessions();
@@ -481,6 +491,7 @@ async function selectSession(id) {
     }
     jumpToBottom();
     await loadPlan();
+    if (state.activeTab === "storage") await loadStorage();
   } catch (error) {
     showToast(error.message);
   }
@@ -554,6 +565,7 @@ function startStream(inputId) {
       showToast(error.message);
     }
     await loadPlan();
+    if (state.activeTab === "storage") await loadStorage();
   });
 
   source.addEventListener("turn.failed", async (event) => {
@@ -679,21 +691,7 @@ function renderChips() {
   state.attachments.forEach((item, index) => {
     const chip = el("span", "chip");
     chip.appendChild(el("span", "", `${item.name} · ${formatBytes(item.bytes)}`));
-    const ingest = el("button", "mini", "入库");
-    ingest.type = "button";
-    ingest.title = "显式提交到知识库";
-    ingest.onclick = async (event) => {
-      event.stopPropagation();
-      try {
-        const result = await api(
-          `/api/attachments/${item.id}/ingest?session_id=${state.currentSession}`,
-          { method: "POST" });
-        showToast(result.document_id ? `已提交入库：${result.document_id}` : "已提交入库。", "info");
-      } catch (error) {
-        showToast(error.message);
-      }
-    };
-    chip.appendChild(ingest);
+    chip.title = "点击移除附件";
     chip.onclick = () => {
       state.attachments.splice(index, 1);
       renderChips();
@@ -827,6 +825,7 @@ function renderSources(sources) {
     head.appendChild(el("strong", "", source.id));
     head.appendChild(el("span", `badge ${source.enabled ? "on" : "off"}`,
       source.enabled ? "已启用" : "未启用"));
+    if (source.legacy) head.appendChild(el("span", "badge off", "旧来源"));
     card.appendChild(head);
     card.appendChild(el("div", "source-meta", sourceKind(config.kind)));
     card.appendChild(el("div", "source-target",
@@ -934,9 +933,372 @@ async function loadSettings() {
   }
 }
 
+function storageBadge(status) {
+  return el("span", `storage-badge ${status || ""}`, status || "未知");
+}
+
+function storageCard(label, value, mono = false) {
+  const card = el("div", "storage-card");
+  card.appendChild(el("div", "storage-card-label", label));
+  card.appendChild(el("div", `storage-card-value${mono ? " mono" : ""}`,
+    value === undefined || value === null || value === "" ? "-" : String(value)));
+  return card;
+}
+
+async function copyText(text, label) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(String(text));
+    showToast(`${label}已复制`, "info");
+  } catch (_) {
+    showToast("复制失败；请手动选择文本。");
+  }
+}
+
+function storageEmpty(box, text) {
+  box.innerHTML = "";
+  box.appendChild(el("div", "storage-empty", text));
+}
+
+function renderStorageSummary(data) {
+  const box = $("storage-summary");
+  box.innerHTML = "";
+  if (!data) return;
+  const session = data.session || {};
+  const counts = data.counts || {};
+  box.appendChild(storageCard("会话", session.title || "新会话"));
+  box.appendChild(storageCard("状态", session.status));
+  box.appendChild(storageCard("线程", (data.threads || []).length));
+  box.appendChild(storageCard("Checkpoint", counts.checkpoints));
+  box.appendChild(storageCard("Web 消息", counts.web_messages));
+  box.appendChild(storageCard("操作回执", counts.operations));
+  const completeId = session.complete
+    && session.complete.configurable
+    && session.complete.configurable.checkpoint_id;
+  box.appendChild(storageCard("完成点", completeId || "无", true));
+  box.appendChild(storageCard("会话 ID", session.id, true));
+}
+
+function renderStorageHealth(data) {
+  const box = $("storage-health");
+  box.innerHTML = "";
+  if (!data) return;
+  const warnings = data.warnings || [];
+  if (!warnings.length) {
+    box.appendChild(el("div", "storage-health-ok", "未发现明显存储异常。"));
+    return;
+  }
+  for (const warning of warnings) {
+    box.appendChild(el("div", "storage-health-item", warning));
+  }
+}
+
+function renderStorageTurns(data) {
+  const box = $("storage-turns");
+  box.innerHTML = "";
+  const items = (data && data.items) || [];
+  if (!items.length) {
+    storageEmpty(box, "暂无轮次记录。");
+    return;
+  }
+  for (const item of items) {
+    const row = el("div", "storage-turn");
+    const head = el("div", "storage-turn-head");
+    head.appendChild(storageBadge(item.status));
+    head.appendChild(el("span", "storage-turn-id", item.input_id || "unknown"));
+    head.appendChild(el("span", "storage-turn-meta",
+      fullTime(item.latest_checkpoint_ts) || ""));
+    row.appendChild(head);
+    row.appendChild(el("div", "storage-turn-meta",
+      `checkpoint ${item.checkpoints || 0} · Web 消息 ${item.web_messages || 0} · ` +
+      `操作 ${item.operations || 0} · ${item.assistant_phase || "-"}`));
+    box.appendChild(row);
+  }
+}
+
+function renderStorageThreads(data) {
+  const select = $("storage-thread");
+  select.innerHTML = "";
+  const threads = (data && data.threads) || [];
+  if (!threads.length) {
+    select.appendChild(el("option", "", "无可用线程"));
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  const current = state.storageThread
+    && threads.some((item) => item.thread_id === state.storageThread)
+    ? state.storageThread : data.session.thread_id;
+  state.storageThread = current;
+  for (const item of threads) {
+    const option = el("option", "", item.thread_id);
+    option.value = item.thread_id;
+    option.selected = item.thread_id === current;
+    select.appendChild(option);
+  }
+}
+
+function renderStorageCheckpoints(data) {
+  const box = $("storage-checkpoints");
+  box.innerHTML = "";
+  const items = (data && data.items) || [];
+  if (!items.length) {
+    storageEmpty(box, "暂无 checkpoint。");
+    return;
+  }
+  const list = el("div", "storage-checkpoints");
+  for (const item of items) {
+    const row = el("div", "storage-checkpoint");
+    const button = el("button", "storage-checkpoint-main");
+    button.type = "button";
+    button.onclick = () => loadStorageCheckpoint(item.checkpoint_id);
+    const head = el("div", "storage-turn-head");
+    head.appendChild(storageBadge(item.turn_status));
+    head.appendChild(el("span", "storage-checkpoint-id", item.checkpoint_id || ""));
+    button.appendChild(head);
+    button.appendChild(el("div", "storage-checkpoint-meta",
+      `step ${item.step ?? "-"} · ${fullTime(item.ts) || "-"} · ` +
+      `phase ${item.assistant_phase || "-"} · source ${item.source || "-"} · ` +
+      `pending ${item.pending_writes || 0}`));
+    const channels = (item.channels || []).map((channel) => channel.name).join(", ");
+    if (channels) {
+      button.appendChild(el("div", "storage-checkpoint-channels", channels));
+    }
+    row.appendChild(button);
+    list.appendChild(row);
+  }
+  box.appendChild(list);
+}
+
+function storageTable(box, headers, rows) {
+  box.innerHTML = "";
+  if (!rows.length) {
+    storageEmpty(box, "暂无数据。");
+    return;
+  }
+  const wrap = el("div", "table-wrap");
+  wrap.appendChild(buildTable(headers, rows));
+  box.appendChild(wrap);
+}
+
+function renderStorageMessages(data) {
+  if (!data) {
+    storageEmpty($("storage-messages"), "Web 消息不可用。");
+    return;
+  }
+  const rows = (data.items || []).map((item) => [
+    fullTime(item.created_at) || "", item.role || "", item.status || "",
+    item.input_id || "", item.text || "",
+  ]);
+  storageTable($("storage-messages"), ["时间", "角色", "状态", "input_id", "正文预览"], rows);
+}
+
+function renderStorageOperations(data) {
+  if (!data) {
+    storageEmpty($("storage-operations"), "操作回执不可用。");
+    return;
+  }
+  const rows = (data.items || []).map((item) => [
+    fullTime(item.created_at) || "", item.status || "", item.tool || "",
+    item.input_id || "", item.source_key || "",
+    JSON.stringify(item.result || {}).slice(0, 300),
+  ]);
+  storageTable($("storage-operations"),
+    ["时间", "状态", "工具", "input_id", "source", "结果预览"], rows);
+}
+
+function renderStorageUsage(data) {
+  const box = $("storage-usage");
+  if (!data || !data.available) {
+    storageEmpty(box, "用量结构不可用或尚未初始化。");
+    return;
+  }
+  const rows = (data.items || []).map((item) => [
+    item.role || "", item.profile || "", item.calls ?? "",
+    item.input_tokens ?? "", item.output_tokens ?? "",
+    item.total_tokens ?? "", item.unfinished ?? "", item.missing ?? "",
+  ]);
+  storageTable(box,
+    ["角色", "配置", "调用", "输入", "输出", "合计", "未结束", "缺失"], rows);
+}
+
+async function loadStorageCheckpoints(before = null, append = false) {
+  if (!state.currentSession || state.activeTab !== "storage") return;
+  const sessionId = state.currentSession;
+  const thread = state.storageThread
+    || (state.storage && state.storage.summary.session.thread_id);
+  if (!thread) return;
+  try {
+    const data = await api(`/api/storage/sessions/${sessionId}/checkpoints` +
+      `?thread_id=${encodeURIComponent(thread)}&limit=20` +
+      (before ? `&before=${encodeURIComponent(before)}` : ""));
+    if (state.currentSession !== sessionId
+        || (state.storageThread && state.storageThread !== thread)) return;
+    if (append && state.storageCheckpoints
+        && state.storageCheckpoints.thread_id === data.thread_id) {
+      state.storageCheckpoints = {
+        ...data,
+        items: [...(state.storageCheckpoints.items || []), ...(data.items || [])],
+      };
+    } else {
+      state.storageCheckpoints = data;
+    }
+    renderStorageCheckpoints(state.storageCheckpoints);
+    $("storage-more").classList.toggle("hidden", !state.storageCheckpoints.next_before);
+  } catch (error) {
+    showToast(error.message);
+    storageEmpty($("storage-checkpoints"), error.message);
+    $("storage-more").classList.add("hidden");
+  }
+}
+
+async function loadStorageCheckpoint(checkpointId) {
+  if (!state.currentSession || !checkpointId) return;
+  const sessionId = state.currentSession;
+  const thread = state.storageThread
+    || (state.storage && state.storage.summary.session.thread_id);
+  try {
+    const data = await api(`/api/storage/sessions/${sessionId}/checkpoints/` +
+      `${encodeURIComponent(checkpointId)}?thread_id=${encodeURIComponent(thread || "")}` +
+      `&full=${state.storageFull ? "true" : "false"}`);
+    if (state.currentSession !== sessionId
+        || (state.storageThread && thread && state.storageThread !== thread)) return;
+    state.storageDetail = data;
+    renderStorageDetail();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+function renderStorageDetail() {
+  const box = $("storage-detail");
+  box.innerHTML = "";
+  const data = state.storageDetail;
+  if (!data) return;
+  const head = el("div", "storage-detail-head");
+  const title = el("div");
+  title.appendChild(el("strong", "", `Checkpoint ${data.checkpoint_id || ""}`));
+  title.appendChild(el("div", "storage-checkpoint-meta",
+    `step ${data.step ?? "-"} · phase ${data.assistant_phase || "-"} · ` +
+    `pending ${(data.pending_writes || []).length}`));
+  head.appendChild(title);
+  const toggle = el("button", "", state.storageFull ? "恢复预览" : "展开完整内容");
+  toggle.type = "button";
+  toggle.onclick = () => {
+    state.storageFull = !state.storageFull;
+    loadStorageCheckpoint(data.checkpoint_id);
+  };
+  head.appendChild(toggle);
+  box.appendChild(head);
+  const ids = el("div", "storage-id-actions");
+  [["checkpoint_id", "复制 checkpoint"], ["input_id", "复制 input_id"],
+   ["execution_thread_id", "复制 execution_thread"]].forEach(([key, label]) => {
+    if (!data[key]) return;
+    const button = el("button", "", label);
+    button.type = "button";
+    button.onclick = () => copyText(data[key], label.replace("复制 ", ""));
+    ids.appendChild(button);
+  });
+  if (ids.childNodes.length) box.appendChild(ids);
+
+  const body = el("div", "storage-detail-body");
+  for (const [name, value] of Object.entries(data.channel_values || {})) {
+    const details = document.createElement("details");
+    details.className = "storage-channel";
+    const summary = document.createElement("summary");
+    summary.textContent = name;
+    details.appendChild(summary);
+    const pre = document.createElement("pre");
+    pre.textContent = typeof value === "string"
+      ? value : JSON.stringify(value, null, 2);
+    details.appendChild(pre);
+    body.appendChild(details);
+  }
+  if (!Object.keys(data.channel_values || {}).length) {
+    body.appendChild(el("div", "muted", "没有可展示的 channel 内容。"));
+  }
+  if ((data.pending_writes || []).length) {
+    const details = document.createElement("details");
+    details.className = "storage-channel";
+    const summary = document.createElement("summary");
+    summary.textContent = `pending_writes (${data.pending_writes.length})`;
+    details.appendChild(summary);
+    const pre = document.createElement("pre");
+    pre.textContent = JSON.stringify(data.pending_writes, null, 2);
+    details.appendChild(pre);
+    body.appendChild(details);
+  }
+  if ((data.blob_sizes || []).length) {
+    const details = document.createElement("details");
+    details.className = "storage-channel";
+    const summary = document.createElement("summary");
+    summary.textContent = `blob_sizes (${data.blob_sizes.length})`;
+    details.appendChild(summary);
+    const pre = document.createElement("pre");
+    pre.textContent = JSON.stringify(data.blob_sizes, null, 2);
+    details.appendChild(pre);
+    body.appendChild(details);
+  }
+  box.appendChild(body);
+}
+
+async function loadStorage() {
+  if (!state.currentSession) {
+    state.storage = null;
+    storageEmpty($("storage-summary"), "请先从左侧选择一个会话。");
+    storageEmpty($("storage-health"), "");
+    storageEmpty($("storage-turns"), "");
+    storageEmpty($("storage-checkpoints"), "");
+    storageEmpty($("storage-messages"), "");
+    storageEmpty($("storage-operations"), "");
+    storageEmpty($("storage-usage"), "");
+    $("storage-detail").innerHTML = "";
+    $("storage-thread").innerHTML = "";
+    return;
+  }
+  const sessionId = state.currentSession;
+  const request = ++state.storageRequest;
+  const base = `/api/storage/sessions/${sessionId}`;
+  try {
+    const [summary, turns, health, messages, operations, usage] = await Promise.all([
+      api(base),
+      api(`${base}/turns?limit=20`),
+      api(`${base}/health`),
+      api(`${base}/messages?limit=100`).catch(() => null),
+      api(`${base}/operations?limit=100`).catch(() => null),
+      api(`${base}/usage`).catch(() => null),
+    ]);
+    if (request !== state.storageRequest || state.currentSession !== sessionId) return;
+    state.storage = { summary, turns, health, messages, operations, usage };
+    if (!state.storageThread
+        || !(summary.threads || []).some((item) => item.thread_id === state.storageThread)) {
+      state.storageThread = summary.session.thread_id;
+    }
+    renderStorageSummary(summary);
+    renderStorageHealth(health);
+    renderStorageTurns(turns);
+    renderStorageThreads(summary);
+    renderStorageMessages(messages);
+    renderStorageOperations(operations);
+    renderStorageUsage(usage);
+    state.storageDetail = null;
+    state.storageFull = false;
+    state.storageCheckpoints = null;
+    $("storage-detail").innerHTML = "";
+    $("storage-more").classList.add("hidden");
+    await loadStorageCheckpoints();
+  } catch (error) {
+    showToast(error.message);
+    storageEmpty($("storage-summary"), error.message);
+    storageEmpty($("storage-health"), "");
+    storageEmpty($("storage-turns"), "");
+    storageEmpty($("storage-checkpoints"), "");
+  }
+}
+
 function showTab(name) {
   state.activeTab = name;
-  for (const view of ["chat", "knowledge", "settings"]) {
+  for (const view of ["chat", "knowledge", "settings", "storage"]) {
     $(`${view}-view`).classList.toggle("hidden", view !== name);
   }
   document.querySelectorAll(".tabs button").forEach((node) => {
@@ -951,6 +1313,7 @@ function showTab(name) {
   if (name === "knowledge") loadKnowledge();
   else clearKnowledgeTimer();
   if (name === "settings") loadSettings();
+  if (name === "storage") loadStorage();
 }
 
 function bind() {
@@ -987,30 +1350,20 @@ function bind() {
     setPlanOpen(!open);
   };
   $("sync-knowledge").onclick = syncKnowledge;
-  $("knowledge-form").onsubmit = async (event) => {
-    event.preventDefault();
-    const input = $("knowledge-reference");
-    const reference = input.value.trim();
-    if (!reference) return;
-    const button = event.target.querySelector("button");
-    button.disabled = true;
-    $("knowledge-status").textContent = "提交中…";
-    try {
-      await api("/api/knowledge/submit", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reference }),
-      });
-      input.value = "";
-      $("knowledge-status").textContent = "已提交入库";
-      showToast("已提交入库。", "info");
-      await loadKnowledge();
-    } catch (error) {
-      $("knowledge-status").textContent = error.message;
-      showToast(error.message);
-    } finally {
-      button.disabled = false;
-    }
+  $("storage-refresh").onclick = () => loadStorage()
+    .catch((error) => showToast(error.message));
+  $("storage-thread").onchange = (event) => {
+    state.storageThread = event.target.value;
+    state.storageDetail = null;
+    state.storageFull = false;
+    state.storageCheckpoints = null;
+    $("storage-detail").innerHTML = "";
+    $("storage-more").classList.add("hidden");
+    loadStorageCheckpoints();
+  };
+  $("storage-more").onclick = () => {
+    const before = state.storageCheckpoints && state.storageCheckpoints.next_before;
+    if (before) loadStorageCheckpoints(before, true);
   };
   document.querySelectorAll(".tabs button").forEach((node) => {
     node.onclick = () => showTab(node.dataset.tab);

@@ -138,7 +138,8 @@ def create_assistant_agent(model, tools, *, checkpointer, settings,
     from ai_assistant.capabilities.policy import CapabilityPolicy
     prompt_sections = tuple(prompt_sections or ())
     if capability_policy is None:
-        capability_policy = CapabilityPolicy.from_tools(tools)
+        # 未提供注册表时没有显式效果元数据；未知工具不推测读写。
+        capability_policy = CapabilityPolicy()
     # 基础提示保持通用；领域规则由组件 sections 注入。
     prompt = SYSTEM_PROMPT
     if persona:

@@ -66,36 +66,6 @@ class SourceStore:
                     dict(kb=kb, id=name, c=packed(source)),
                 )
 
-    async def add_submission(self, uri, descriptor, *, restore=True, conn=None):
-        """登记显式提交来源，并按 restore 决定是否恢复已移除文档。"""
-        source = "submitted:" + hashlib.sha256(uri.encode()).hexdigest()[:24]
-        kb = self.config.knowledge_base_id
-        async with transaction(self.engine, conn) as conn:
-            # 与同步提交、移除使用相同文档行锁，避免并发绕过移除标记。
-            removed = (await conn.execute(text(
-                "SELECT deleted FROM rag_documents WHERE kb=:kb AND source_uri=:uri FOR UPDATE"
-            ), dict(kb=kb, uri=uri))).scalar()
-            if removed and not restore:
-                return None
-            await conn.execute(
-                text("""INSERT INTO rag_sources(kb,id,config)
-                VALUES(:kb,:id,CAST(:c AS jsonb)) ON CONFLICT(kb,id) DO UPDATE SET enabled=true"""),
-                dict(kb=kb, id=source, c=packed({"kind": "submitted"})),
-            )
-            await conn.execute(
-                text("""INSERT INTO rag_source_documents(kb,source_id,uri,descriptor)
-                VALUES(:kb,:id,:uri,CAST(:d AS jsonb)) ON CONFLICT(kb,source_id,uri)
-                DO UPDATE SET descriptor=rag_source_documents.descriptor || EXCLUDED.descriptor"""),
-                dict(kb=kb, id=source, uri=uri, d=packed(descriptor)),
-            )
-            await conn.execute(
-                text(
-                    "UPDATE rag_documents SET deleted=false WHERE kb=:kb AND source_uri=:uri AND :restore"
-                ),
-                dict(kb=kb, uri=uri, restore=restore),
-            )
-        return source
-
     async def source_list(self):
         """列出当前知识库的来源记录。"""
         async with self.engine.connect() as conn:

@@ -5,11 +5,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from ai_assistant.documents.formats import RAG_SCAN_EXTENSIONS
 from ai_assistant.knowledge import KnowledgeError
 from ai_assistant.workspace.files import ReadOnlyWorkspace, WorkspaceError
 
-# 显式支持提交的本地文件扩展名及飞书只读接口地址。
-EXTENSIONS = {".txt", ".md", ".pdf", ".docx", ".xlsx", ".pptx", ".csv"}
+# 配置来源可扫描的本地文件扩展名及飞书只读接口地址。
+EXTENSIONS = RAG_SCAN_EXTENSIONS
 
 
 class SourceFailure(KnowledgeError):

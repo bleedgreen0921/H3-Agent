@@ -316,7 +316,6 @@ button:focus-visible, textarea:focus-visible, input:focus-visible,
   border: 1px solid #c7d2fe; border-radius: 999px; background: #eef2ff;
   font-size: 12px;
 }
-.chip .mini { padding: 1px 6px; border-radius: 999px; font-size: 11px; }
 
 /* 知识库 */
 .panel { width: 100%; max-width: 1040px; margin: 0 auto; padding: 20px 20px 40px; }
@@ -348,6 +347,108 @@ button:focus-visible, textarea:focus-visible, input:focus-visible,
 .inline-form input {
   flex: 1; min-width: 0; padding: 9px 11px; border: 1px solid var(--border-strong);
   border-radius: 8px; background: var(--surface);
+}
+
+/* 存储检查 */
+.storage-warning {
+  margin-bottom: 12px; padding: 9px 12px; border: 1px solid #fde68a;
+  border-radius: 8px; background: #fffbeb; color: #92400e; font-size: 12px;
+}
+.storage-health { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.storage-health-item {
+  padding: 8px 11px; border: 1px solid #fecdca; border-radius: 8px;
+  background: #fef3f2; color: #b42318; font-size: 12px; line-height: 1.5;
+}
+.storage-health-ok {
+  padding: 8px 11px; border: 1px solid #bbf7d0; border-radius: 8px;
+  background: #f0fdf4; color: #027a48; font-size: 12px;
+}
+.storage-summary {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px; margin-bottom: 8px;
+}
+.storage-card {
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface); box-shadow: var(--shadow);
+}
+.storage-card-label { color: var(--faint); font-size: 11px; }
+.storage-card-value {
+  margin-top: 3px; overflow-wrap: anywhere; color: #344054;
+  font-size: 13px; font-weight: 600; line-height: 1.45;
+}
+.storage-card-value.mono { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 400; }
+.storage-turn {
+  padding: 9px 12px; border-bottom: 1px solid #f0f2f5;
+  background: var(--surface); font-size: 12px;
+}
+.storage-turn:first-child { border-top: 1px solid var(--border); border-radius: 8px 8px 0 0; }
+.storage-turn:last-child { border-radius: 0 0 8px 8px; }
+.storage-turn:only-child { border: 1px solid var(--border); border-radius: 8px; }
+.storage-turn-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.storage-turn-id { color: var(--faint); font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; }
+.storage-turn-meta { margin-top: 4px; color: var(--muted); font-size: 11px; }
+.storage-badge {
+  display: inline-block; padding: 1px 7px; border-radius: 999px;
+  background: #f2f4f7; color: var(--muted); font-size: 11px;
+}
+.storage-badge.complete { background: #ecfdf3; color: #027a48; }
+.storage-badge.failed, .storage-badge.unknown { background: #fef3f2; color: #b42318; }
+.storage-badge.running { background: #fffbeb; color: #b54708; }
+.storage-checkpoints { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+#storage-more { display: block; width: 100%; margin: 2px 0 12px; }
+.storage-checkpoint {
+  display: flex; align-items: stretch; gap: 8px; padding: 0;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+}
+.storage-checkpoint-main {
+  flex: 1; min-width: 0; padding: 9px 11px; border: 0; border-radius: 8px;
+  background: transparent; text-align: left;
+}
+.storage-checkpoint-main:hover { background: #f8fafc; }
+.storage-checkpoint-id {
+  overflow: hidden; color: #344054; font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px; text-overflow: ellipsis; white-space: nowrap;
+}
+.storage-checkpoint-meta { margin-top: 3px; color: var(--muted); font-size: 11px; }
+.storage-checkpoint-channels {
+  margin-top: 3px; overflow: hidden; color: var(--faint);
+  font-size: 11px; text-overflow: ellipsis; white-space: nowrap;
+}
+.storage-detail { margin: 8px 0 16px; }
+.storage-detail-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 9px 11px; border: 1px solid #dbe3ee;
+  border-radius: 8px 8px 0 0; background: #f8faff; font-size: 12px;
+}
+.storage-detail-body {
+  max-height: 55vh; overflow: auto; padding: 10px 12px;
+  border: 1px solid #dbe3ee; border-top: 0; border-radius: 0 0 8px 8px;
+  background: var(--surface);
+}
+.storage-id-actions {
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 7px 10px;
+  border: 1px solid #dbe3ee; border-top: 0; background: #fbfcfe;
+}
+.storage-id-actions button { font-size: 11px; padding: 4px 8px; }
+.storage-channel {
+  margin: 8px 0; border: 1px solid var(--border); border-radius: 8px;
+  background: #fbfcfd;
+}
+.storage-channel summary {
+  padding: 7px 10px; cursor: pointer; color: #344054; font-size: 12px;
+}
+.storage-channel pre {
+  max-height: 42vh; margin: 0; padding: 10px; overflow: auto;
+  border-top: 1px solid var(--border); background: #fff;
+  color: #344054; font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 11px; line-height: 1.55; white-space: pre-wrap;
+}
+.storage-thread {
+  max-width: 360px; padding: 5px 8px; border: 1px solid var(--border-strong);
+  border-radius: 7px; background: var(--surface); font-size: 12px;
+}
+.storage-empty {
+  padding: 24px 0; color: var(--muted); font-size: 13px; text-align: center;
 }
 
 /* 设置 */

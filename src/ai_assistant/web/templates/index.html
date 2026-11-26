@@ -22,6 +22,7 @@
       <button type="button" data-tab="chat" class="active">对话</button>
       <button type="button" data-tab="knowledge">知识库</button>
       <button type="button" data-tab="settings">设置</button>
+      <button type="button" data-tab="storage">存储</button>
     </nav>
   </aside>
 
@@ -71,7 +72,7 @@
         <div class="composer-row">
           <div class="composer-left">
             <label class="upload">附件
-              <input id="file-input" type="file" multiple accept=".pdf,.docx,.md">
+              <input id="file-input" type="file" multiple accept=".bash,.bat,.c,.cc,.cfg,.cjs,.cmd,.conf,.cpp,.cs,.css,.csv,.cxx,.dart,.docx,.fish,.go,.groovy,.h,.hh,.hpp,.htm,.html,.ini,.java,.js,.json,.jsonl,.jsx,.kt,.kts,.less,.log,.lua,.markdown,.md,.mjs,.ndjson,.pdf,.php,.pl,.ps1,.py,.pyi,.r,.rb,.rs,.rst,.sass,.scala,.scss,.sh,.sql,.svelte,.swift,.toml,.ts,.tsv,.tsx,.txt,.vue,.xml,.yaml,.yml,.zsh">
             </label>
             <span id="composer-mode" class="composer-mode">普通对话</span>
           </div>
@@ -99,10 +100,7 @@
         <span id="knowledge-document-count" class="muted"></span>
       </div>
       <div id="knowledge-documents" class="table-wrap"></div>
-      <form id="knowledge-form" class="inline-form">
-        <input id="knowledge-reference" placeholder="飞书文档链接或工作区相对路径">
-        <button type="submit">提交入库</button>
-      </form>
+      <p class="muted knowledge-hint">知识来源由配置维护；修改来源配置后点击“同步来源”。</p>
     </section>
   </main>
 
@@ -112,6 +110,37 @@
     </header>
     <section class="panel scroll-panel">
       <div id="settings" class="settings-list"></div>
+    </section>
+  </main>
+
+  <main id="storage-view" class="view hidden">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="page-title">存储检查</div>
+        <button id="storage-refresh" type="button">刷新</button>
+      </div>
+    </header>
+    <section class="panel scroll-panel">
+      <div class="storage-warning">
+        只读调试视图：包含会话正文、工具结果和操作回执，仅供本机查看。
+      </div>
+      <div id="storage-health" class="storage-health"></div>
+      <div id="storage-summary" class="storage-summary"></div>
+      <div class="panel-head"><h2>轮次</h2></div>
+      <div id="storage-turns"></div>
+      <div class="panel-head">
+        <h2>Checkpoint</h2>
+        <select id="storage-thread" class="storage-thread"></select>
+      </div>
+      <div id="storage-checkpoints"></div>
+      <button id="storage-more" type="button" class="hidden">加载更多 checkpoint</button>
+      <div id="storage-detail"></div>
+      <div class="panel-head"><h2>Web 消息</h2></div>
+      <div id="storage-messages"></div>
+      <div class="panel-head"><h2>操作回执</h2></div>
+      <div id="storage-operations"></div>
+      <div class="panel-head"><h2>模型用量</h2></div>
+      <div id="storage-usage"></div>
     </section>
   </main>
 </div>

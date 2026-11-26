@@ -21,7 +21,7 @@ def core_sections():
 def attachment_section():
     """返回启用附件读取时使用的指导。"""
     return PromptSection('tools.attachment', 60,
-        'PDF、DOCX、Markdown 附件先用 read_attachment（传入附件列表中的 attachment_id）读取正文，按 next_cursor 续读；整理内容概述、主要要点，重要数字和结论保留返回的位置：PDF 物理页码、DOCX 段落或表格行、Markdown 行号。不得编造 Word 页码。读取不自动授权写入或入库；未读完、有 gaps 或图片未识别时注明处理范围，不声称完整覆盖。')
+        'PDF、DOCX、Markdown、纯文本、代码、JSON、CSV 附件先用 read_attachment（传入附件列表中的 attachment_id）读取正文，按 next_cursor 续读；整理内容概述、主要要点，重要数字和结论保留返回的位置：PDF 物理页码、DOCX 段落或表格行、文本/代码/JSON 行号、CSV 记录号。不得编造 Word 页码。代码附件只读，不执行。附件不会自动入库；长期保存只能通过配置来源和 rag sync。未读完、有 gaps 或图片未识别时注明处理范围，不声称完整覆盖。')
 
 
 def knowledge_section():

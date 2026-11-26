@@ -73,7 +73,7 @@ async def search_knowledge(
     text = render_evidence(selected, limit=budget)
     coverage = '\n检索范围：当前允许访问的已发布快照；查询不自动同步。'
     if not docs:
-        coverage += '\n暂无可检索内容或相关证据；可提交入库、主动同步或查询任务状态。'
+        coverage += '\n暂无可检索内容或相关证据；可同步配置来源或查询任务状态。'
     if len(selected) < len(docs):
         coverage += f"\n证据展示受预算限制（候选 {len(docs)}，展示 {len(selected)}）；可缩小问题或指定文档继续检索。"
     from ai_assistant.observability import event
@@ -81,28 +81,6 @@ async def search_knowledge(
           evidence_count=len(selected))
     # artifact 即模型所见证据：未展示候选不进入回执与历史。
     return text + coverage, selected
-
-
-@tool(response_format="content_and_artifact")
-@knowledge_call
-async def ingest_document(
-    reference: str, runtime: ToolRuntime[ToolContext], identity: str = "user"
-):
-    """仅在用户明确要求长期入库时登记文档。返回来源和后台任务 ID；尚未确认可检索，普通阅读不调用。"""
-    if identity not in ("user", "bot"):
-        raise ToolException("identity 必须为 user 或 bot。")
-
-    # 登记请求关联可信输入和主体，返回提交回执而非已可检索结论。
-    from ai_assistant.knowledge.registration import register_document
-    result = await register_document(require_config(runtime), reference, identity=identity,
-        input_id=runtime.context.input_id, principal=getattr(runtime.context.caller, 'binding', 'local'))
-    from ai_assistant.observability import event
-    event("knowledge.registration", action="add", status=result.get("status"),
-          source_id=result.get("source_id"), sync_id=result.get("sync_id"))
-    import json
-    return json.dumps(result, ensure_ascii=False), {'registration': result, 'receipt_version': 1,
-        'execution_fact': {'version': 1, 'nature': 'effect', 'control': 'continue',
-                           'registered': result.get('status') == 'submitted'}}
 
 
 @tool
@@ -141,7 +119,7 @@ def knowledge_tools(*, include_management=True):
     """按权限范围选择仅检索或包含管理操作的工具集合。"""
     return [
         t.model_copy(update={"handle_tool_error": True})
-        for t in ((search_knowledge, ingest_document, knowledge_status)
+        for t in ((search_knowledge, knowledge_status)
                   if include_management else (search_knowledge,))
     ]
 

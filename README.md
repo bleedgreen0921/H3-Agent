@@ -5,8 +5,8 @@
 ## 主要能力
 
 - 本地 Web 对话：多轮会话、流式过程、引用/来源侧栏、取消和重载恢复。
-- 本地附件：上传 PDF、DOCX、Markdown 后由模型按需读取；支持页码/段落/行号和续读；不自动入库。
-- 知识库：显式登记、不可变快照、后台同步/索引、混合检索、重排和带定位引用。
+- 本地附件：上传 PDF、DOCX、Markdown、文本、代码、JSON、CSV 后由模型按需读取；支持页码/段落/行号/记录号和续读；附件只读，不自动入库。
+- 知识库：配置来源、不可变快照、后台同步/索引、混合检索、重排和带定位引用。
 - 飞书只读：读取 docx、Wiki、电子表格、多维表格和云空间文件夹；不包含飞书写入。
 - 本地 Skills：按需加载本地指导与资源，不执行脚本、不安装依赖。
 - 规划模式：先生成 DAG 草稿，再执行只读并行/写任务串行，保留真实回执。
@@ -58,9 +58,11 @@ cp config.example/assistant.example.toml assistant.toml
 [integrations.feishu]  # 只读文档 OAuth
 [knowledge]      # pgvector、Embedding、Reranker 和来源
 [planning]       # /plan 预算
-[tools.selection]# 按轮工具暴露
+[tools.selection]# LLM 在显式过滤后的候选内选择工具
 [skills]         # 本地 Skills
 ```
+
+能力选择先由程序按权限、读写、身份、创建限制和 schema 预算过滤候选，再由对话模型选择相关工具与 Skill；选择失败只保留核心工具，不回退关键词或全量绑定。
 
 ## 飞书只读文档
 
@@ -76,10 +78,10 @@ cp config.example/assistant.example.toml assistant.toml
 
 ## 附件读取
 
-1. 在 Web 输入框上传 PDF/DOCX/Markdown。
+1. 在 Web 输入框上传 PDF/DOCX/Markdown/文本/代码/JSON/CSV。
 2. 附件只关联当前会话，不自动进入模型上下文。
-3. 模型需要时调用 `read_attachment`，按页码/段落/行号返回，并给出 `next_cursor`。
-4. 用户点击“加入知识库”或明确要求时，才提交后台索引。
+3. 模型需要时调用 `read_attachment`，按页码/段落/行号/CSV 记录号返回，并给出 `next_cursor`。
+4. 附件不提供入库入口；长期知识只能通过配置来源和 `rag sync` 进入知识库。
 
 默认限制：单附件 25 MiB，单次读取 16,000 字符；不支持 OCR、图片理解、音频/视频。
 
@@ -100,12 +102,33 @@ Web 端的模式切换和按钮等价于 `/plan`、`/plan run`、`/plan exit`，
 
 Planner 只生成草稿，不执行工具；信息不足时先返回问题并暂停执行，用户补充后重新规划。`/plan run` 后只读任务并行、写任务串行。规划模式由用户手动进入和退出；任务完成、失败或取消后仍保留计划状态，发送新目标可重新规划，`/plan exit` 才回到普通对话；不自动重跑旧计划。
 
+## 持久化检查
+
+本地 Web 顶部切换到“存储”，可以只读查看：
+
+- 会话索引和完成点；
+- checkpoint 历史和 channel 内容；
+- Web 展示消息；
+- 外部操作回执；
+- 模型用量。
+
+CLI 也提供同一套只读入口：
+
+```bash
+./assistant.sh session inspect <session_id>
+./assistant.sh session checkpoints <session_id>
+./assistant.sh session checkpoint <session_id> <checkpoint_id>
+./assistant.sh session messages <session_id>
+./assistant.sh session operations <session_id>
+```
+
+检查器不构建模型、不执行工具、不修改会话，也不直接展示原始 msgpack blob。详细说明见 `docs/storage-inspection.md`。
+
 ## 知识库
 
-- 显式登记：CLI `rag submit`、Web 知识库页面提交、用户明确要求时 `ingest_document`。
+- 知识来源只来自显式配置的本地目录、飞书 Wiki/文件夹；新增、修改、删除通过 `rag sync` 扫描来源。
 - 只查询已发布快照，不自动同步、等待新索引或自动续答。
-- 支持本地目录、飞书 Wiki/文件夹、单个飞书文档链接。
-- 本地支持 TXT/Markdown/PDF/DOCX/XLSX/PPTX/CSV；飞书支持 docx/Wiki/电子表格/多维表格。
+- 本地支持 TXT/Markdown/PDF/DOCX/代码/JSON/CSV/TSV/XLSX/PPTX；飞书支持 docx/Wiki/电子表格/多维表格。
 - 扫描件 OCR、图片理解、旧版云文档和全文总结不在当前范围。
 - 检索使用 1024 维 Embedding、向量+关键词混合召回和 Reranker。
 

@@ -33,6 +33,11 @@ MESSAGES = {
     'docx_too_large': 'DOCX 解压总量超过 100 MiB。',
     'markdown_invalid': 'Markdown 必须是 UTF-8 文本，不能是二进制附件。',
     'pdf_invalid': 'PDF 已损坏或格式无效。',
+    'text_encoding': '文本必须是 UTF-8 或带 BOM 的 UTF-16。',
+    'text_binary': '文件包含二进制内容，不能按文本读取。',
+    'json_invalid': 'JSON 文件语法无效。',
+    'csv_invalid': 'CSV/TSV 记录格式无效或字段过大。',
+    'attachment_format_unsupported': '不支持的附件格式。',
     'parser_failed': '本地解析失败，请查看诊断中的具体原因。',
 }
 
@@ -88,15 +93,20 @@ async def _stop_parser(process):
     await process.wait()
 
 
-async def parse_snapshot(path: Path, *, timeout: float, attachment=False):
+async def parse_snapshot(path: Path, *, timeout: float, attachment=False,
+                         granularity: str | None = None):
     """启动解析子进程并读取结果；超时或取消时等待进程组清理。"""
+    if granularity is None:
+        granularity = 'read' if attachment else 'ingest'
+    if granularity not in {'read', 'ingest'}:
+        raise ValueError('granularity must be read or ingest')
     # 独立解释器隔离解析资源，并允许超时终止。
     with tempfile.TemporaryDirectory(prefix='rag-parse-') as directory:
         output = Path(directory) / 'documents.json'
         env = dict(os.environ, HF_HUB_OFFLINE='1',
                    TRANSFORMERS_OFFLINE='1', UNSTRUCTURED_DOWNLOAD_NLTK='False')
         process = await asyncio.create_subprocess_exec(
-            __import__('sys').executable, '-m', 'ai_assistant.knowledge.loading', str(path), str(output), *(['attachment'] if attachment else []),
+            __import__('sys').executable, '-m', 'ai_assistant.knowledge.loading', str(path), str(output), granularity,
             env=env, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
             start_new_session=True)
 
@@ -139,105 +149,9 @@ async def parse_snapshot(path: Path, *, timeout: float, attachment=False):
 
 
 def _run_local_loader(path):
-    """在子进程中按扩展名选择本地加载器，并保留可定位信息。"""
-    # 原生文本/PDF Loader 同样运行在可终止的解析子进程中。
-    suffix = Path(path).suffix.lower()
-    if suffix in ('.txt', '.md'):
-        from langchain_community.document_loaders import TextLoader
-        return TextLoader(str(path), encoding='utf-8').load()
-    if suffix == '.pdf':
-        from langchain_community.document_loaders import PyPDFLoader
-        docs = PyPDFLoader(str(path)).load()
-        for doc in docs:
-            if isinstance(doc.metadata.get('page'), int):
-                doc.metadata['page_number'] = doc.metadata['page'] + 1
-        return docs
-
-    # CSV 每条非空记录单独生成文档，保留记录序号。
-    if suffix == '.csv':
-        import csv
-        from langchain_core.documents import Document
-        with Path(path).open(encoding='utf-8-sig', newline='') as stream:
-            rows = csv.reader(stream)
-            header = next(rows, [])
-            return [Document(page_content=' | '.join(
-                f'{header[i] if i<len(header) else i+1}: {value}' for i,value in enumerate(row)),
-                metadata={'csv_record':index}) for index,row in enumerate(rows,1) if any(v.strip() for v in row)]
-    # XLSX 同时读取公式和缓存值，按行保存工作表及单元格范围。
-    if suffix == '.xlsx':
-        from openpyxl import load_workbook
-        from openpyxl.utils import get_column_letter
-        from langchain_core.documents import Document
-        book = load_workbook(path, read_only=True, data_only=False)
-        values = load_workbook(path, read_only=True, data_only=True)
-        docs = []
-        try:
-            for sheet in book:
-                header = None
-                for index,(row,display) in enumerate(zip(sheet.iter_rows(values_only=True),
-                    values[sheet.title].iter_rows(values_only=True)),1):
-                    if header is None:
-                        header = row
-                    if not any(v is not None for v in row):
-                        continue
-                    parts = []
-                    for i,value in enumerate(row):
-                        shown = display[i] if i<len(display) and display[i] is not None else value
-                        part = f'{header[i] if i<len(header) else i+1}: {shown}'
-                        if isinstance(value,str) and value.startswith('='):
-                            part += f'（公式：{value}）'
-                        parts.append(part)
-                    docs.append(Document(page_content=' | '.join(parts),metadata={
-                        'sheet_name':sheet.title,'cell_range':f'A{index}:{get_column_letter(max(1,len(row)))}{index}'}))
-            return docs
-        finally:
-            book.close(); values.close()
-
-    # DOCX 使用 python-docx 读取正文和表格，避免依赖 NLTK。
-    if suffix == '.docx':
-        from docx import Document as WordDocument
-        from langchain_core.documents import Document
-        document = WordDocument(str(path))
-        parts = [paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()]
-        for table in document.tables:
-            for row in table.rows:
-                values = [cell.text.strip() for cell in row.cells]
-                if any(values):
-                    parts.append(' | '.join(values))
-        return [Document(page_content='\n'.join(parts), metadata={'paragraph_count': len(document.paragraphs)})]
-
-    # PPTX 使用 python-pptx 读取幻灯片文本，保留页码。
-    if suffix == '.pptx':
-        from pptx import Presentation
-        from langchain_core.documents import Document
-        presentation = Presentation(str(path))
-        docs = []
-        for index, slide in enumerate(presentation.slides, 1):
-            values = []
-            for shape in slide.shapes:
-                if hasattr(shape, 'text') and shape.text.strip():
-                    values.append(shape.text.strip())
-            if values:
-                docs.append(Document(page_content='\n'.join(values),
-                                     metadata={'slide_number': index}))
-        return docs
-
-    # 其他格式使用本地 Unstructured；阻止此路径主动联网和下载资源。
-    import socket
-    def deny_network(*args, **kwargs):
-        raise ParserNetworkBlocked('Parser network access is disabled')
-    def deny_download(*args, **kwargs):
-        raise ParserResourceMissing('Parser resource download is disabled; provision resources offline')
-    socket.socket.connect = deny_network
-    socket.create_connection = deny_network
-    import nltk
-    nltk.download = deny_download
-    import unstructured.nlp.tokenize as tokenize
-    tokenize.download_nltk_packages = deny_download
-    from langchain_unstructured import UnstructuredLoader
-    loader = UnstructuredLoader(file_path=path, partition_via_api=False,
-                                api_key='local-only-unused', url='http://127.0.0.1')
-    return list(loader.lazy_load())
+    """兼容旧入口；统一解析器的 ingest 粒度。"""
+    from ai_assistant.documents.parsing import parse_document
+    return parse_document(path, granularity='ingest')
 
 
 def _main():
@@ -245,27 +159,14 @@ def _main():
     import sys
     import traceback
     try:
-        # 附件解析采用单独路径；PDF 保留每页文本及提取缺口。
-        if len(sys.argv) > 3 and sys.argv[3] == 'attachment' and Path(sys.argv[1]).suffix != '.pdf':
-            from ai_assistant.tools.attachment_parsing import parse_text_attachment
-            docs = parse_text_attachment(sys.argv[1])
-        elif len(sys.argv) > 3 and sys.argv[3] == 'attachment':
-            from pypdf import PdfReader
-            from pypdf.errors import PdfReadError
-            try:
-                reader = PdfReader(sys.argv[1])
-                if reader.is_encrypted:
-                    raise IngestionError('pdf_encrypted', MESSAGES['pdf_encrypted'])
-                docs = []
-                for number, page in enumerate(reader.pages, 1):
-                    try:
-                        text = page.extract_text() or ''
-                        gap = not text.strip()
-                    except Exception:
-                        text, gap = '', True
-                    docs.append(Document(page_content=text, metadata={'page_number': number, 'gap': gap}))
-            except PdfReadError:
-                raise IngestionError('pdf_invalid', MESSAGES['pdf_invalid']) from None
+        mode = sys.argv[3] if len(sys.argv) > 3 else 'ingest'
+        if mode == 'attachment':
+            mode = 'read'
+        if mode not in {'read', 'ingest'}:
+            mode = 'ingest'
+        if mode == 'read':
+            from ai_assistant.documents.parsing import parse_document
+            docs = parse_document(sys.argv[1], granularity='read')
         else:
             docs = _run_local_loader(sys.argv[1])
 

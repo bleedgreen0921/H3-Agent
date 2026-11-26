@@ -253,14 +253,6 @@ class SkillCatalog:
                     raise SkillError(reason) from None
             return self._prepared[skill.id]
 
-    def search(self, query='', offset=0, limit=20):
-        """按名称和描述进行不区分大小写的子串搜索并分页。"""
-        if offset < 0 or not 1 <= limit <= 100:
-            raise SkillError('Invalid pagination.')
-        matches = [dict(id=s.id, name=s.metadata['name'], description=s.metadata['description']) for s in self.skills.values()
-                   if query.casefold() in (s.metadata['name'] + ' ' + s.metadata['description']).casefold()]
-        return dict(skills=matches[offset:offset + limit], total=len(matches), next_offset=offset + limit if offset + limit < len(matches) else None)
-
     def active(self, records):
         """只恢复存在且包摘要与会话记录一致的激活 Skill。"""
         active = []

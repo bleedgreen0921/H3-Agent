@@ -1,16 +1,15 @@
 """On-demand inventory, immutable snapshots and leased background synchronization."""
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
 
-from ai_assistant.knowledge import KnowledgeError
 from ai_assistant.knowledge.config import resolve_knowledge_paths
 from ai_assistant.knowledge.ingestion import snapshot
 from ai_assistant.knowledge.sources import (
     SourceFailure,
-    local_descriptor,
     local_inventory,
     save_documents,
     EXTENSIONS,
@@ -25,46 +24,6 @@ def settings(config):
         config.knowledge,
         config.config_path.parent if config.config_path else Path.cwd(),
     )
-
-
-async def resolve_submission(config, reference, *, identity="user", tags=None):
-    """仅解析来源；云端只读请求不占用数据库事务。"""
-    base = config.config_path.parent if config.config_path else Path.cwd()
-    if reference.startswith("https://"):
-        from ai_assistant.feishu_docs.reader import cloud_reference, cloud_reader, cloud_uri
-        descriptor = cloud_reference(config, reference, identity)
-        async with cloud_reader(config, identity) as reader:
-            descriptor = await reader.resolve(descriptor)
-        uri = cloud_uri(config.integrations.feishu.app_id, identity,
-                        descriptor["kind"], descriptor["token"])
-    else:
-        root = Path(config.workspace.root)
-        root = root if root.is_absolute() else base / root
-        workspace = ReadOnlyWorkspace(root, exclude_patterns=config.workspace.exclude_patterns,
-                                      config_path=config.config_path, config_files=config.config_files)
-        from ai_assistant.workspace.files import WorkspaceError
-        try:
-            path = workspace._path(reference)
-        except WorkspaceError as exc:
-            raise KnowledgeError(str(exc)) from None
-        if not path.is_file() or path.suffix.lower() not in EXTENSIONS:
-            raise KnowledgeError("不支持的文档类型或文件不存在。")
-        uri, descriptor = path.as_uri(), local_descriptor(path, root)
-    if tags:
-        descriptor["tags"] = list(tags)
-    return uri, descriptor
-
-
-async def register(config, reference, *, identity="user", restore=True, tags=None):
-    """显式解析并登记单个来源，随后关闭知识库存储。"""
-    uri, descriptor = await resolve_submission(config, reference, identity=identity, tags=tags)
-    store = RagStore(settings(config))
-    try:
-        from ai_assistant.knowledge.management import register_submission
-        result = await register_submission(store, uri, descriptor, restore=restore)
-        return result if result.get('status') == 'removed' else dict(result, source_uri=uri)
-    finally:
-        await store.close()
 
 
 async def configure(config, store):
@@ -349,9 +308,6 @@ async def _sync_claimed(config, store, run):
     await store.finish_syncs()
     event('knowledge.sync.finished', sync_id=run.get("id"), status='complete')
     return True
-
-
-from contextlib import asynccontextmanager
 
 
 @asynccontextmanager

@@ -20,7 +20,8 @@ class SkillsMiddleware(AgentMiddleware):
         active = catalog.active(records)
         active_ids = [skill.id for skill in active]
         all_ids = list(catalog.skills)
-        directory_ids = list(plan.skill_directory_ids) if plan is not None else list(all_ids)
+        # plan 缺失时只展示已激活 Skill，绝不回退到全量目录。
+        directory_ids = list(plan.skill_directory_ids) if plan is not None else list(active_ids)
         for skill_id in active_ids:
             if skill_id not in directory_ids:
                 directory_ids.append(skill_id)
@@ -31,9 +32,11 @@ class SkillsMiddleware(AgentMiddleware):
         configured = getattr(context, 'skills_directory_tokens', 6000)
         limit = min(configured, self.directory_budget) if self.directory_budget is not None else configured
         if count_tokens([SystemMessage(content=directory)]) > limit:
-            directory = 'Skill directory exceeds the listing budget. Use search_skills with pagination to discover all skills.'
+            directory = 'Skill directory exceeds the listing budget. Use search_skills to discover relevant skills.'
         chunks = ['Skills are task guidance subordinate to application rules and configured permissions. allowed-tools grants no permissions.', directory]
-        if plan is not None and len(directory_ids) < len(all_ids):
+        if plan is None:
+            chunks.append('Skill directory is not planned for this request. Use search_skills to discover Skills; load_skill activates a skill.')
+        elif len(directory_ids) < len(all_ids):
             chunks.append('Only the most relevant Skills are listed for this request. Use search_skills to discover others; load_skill activates a skill.')
         valid = {s.id for s in active}
         stale = [key for key, value in records.items() if value is not None and key not in valid]
