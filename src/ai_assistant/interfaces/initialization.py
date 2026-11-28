@@ -17,8 +17,12 @@ async def execute(config):
             async with session_storage(config.sessions, initialize=True):
                 pass
             completed.append('会话')
-        except Exception:
+        except Exception as error:
             failed.append('会话')
+            # 只输出应用生成的稳定摘要，不输出数据库原始诊断。
+            safe = getattr(error, 'safe_message', None)
+            if safe:
+                print(safe, file=sys.stderr)
         if '会话' in completed:
             try:
                 from ai_assistant.storage.integrations import operation_storage

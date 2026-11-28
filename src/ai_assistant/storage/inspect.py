@@ -184,7 +184,7 @@ class StorageInspector:
         ident = session_uuid(session_id)
         row = await (await self.repo.execute(
             '''SELECT id,workspace,thread_id,thread_ids,complete,status,
-                      format_version,binding,title,last_input_id,
+                      format_version,title,last_input_id,
                       created_at,updated_at
                FROM assistant_sessions WHERE id=%s''', (ident,))).fetchone()
         if not row:
@@ -246,7 +246,7 @@ class StorageInspector:
         ], len(rows) > limit
 
     async def list_sessions(self, limit=50):
-        rows = await self.repo.list_admin(None, 0, max(1, min(int(limit), 100)))
+        rows = await self.repo.list_admin(0, max(1, min(int(limit), 100)))
         return [dict(row) for row in rows]
 
     async def session(self, session_id):

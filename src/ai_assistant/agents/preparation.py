@@ -9,8 +9,7 @@ from langchain_core.messages import SystemMessage
 class ContextPreparationMiddleware(AgentMiddleware):
     def prepare(self, request):
         context = request.runtime.context
-        caller = getattr(context, 'caller', None)
-        timezone = 'UTC' if caller and not caller.personal else getattr(context, 'timezone', 'UTC')
+        timezone = getattr(context, 'timezone', 'UTC')
         original = request.system_message
         if original and original.additional_kwargs.get('assistant_time'):
             return request

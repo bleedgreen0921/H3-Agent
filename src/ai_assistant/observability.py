@@ -34,9 +34,9 @@ _service = ContextVar("assistant_observation_service", default=None)
 
 # 事件和上传元数据仅接受列出的标识、状态及指标字段。
 _ALLOWED = frozenset({"input_id", "session_id", "thread_id", "execution_thread_id",
-    "operation_id", "outbox_id", "attempt", "part", "status", "phase", "category",
-    "elapsed_seconds", "queue_wait_seconds", "preparation_seconds", "agent_seconds",
-    "result_commit_seconds", "reply_delivery_seconds", "maintenance_seconds",
+    "operation_id", "attempt", "status", "phase", "category",
+    "elapsed_seconds", "preparation_seconds", "agent_seconds",
+    "result_commit_seconds", "maintenance_seconds",
     "run_id", "parent_run_id", "profile", "role", "tool", "remote_id", "execution_status",
     "model_first_body_seconds", "input_tokens", "output_tokens", "total_tokens",
     "tool_count", "selected_count", "schema_tokens", "reason",

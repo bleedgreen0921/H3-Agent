@@ -100,7 +100,7 @@ class TurnBroker:
         self._publish(turn, {"event": "turn.started", "input_id": turn.input_id,
                              "session_id": turn.session_id})
         try:
-            caller = Caller("web", True, scope="local")
+            caller = Caller()
             await self.runtime.record_attachment_inputs(turn.session_id, attachment_ids)
             display_text = text
             if attachment_ids:
@@ -252,13 +252,12 @@ class WebRuntime:
         async with session_storage(self.config.sessions) as repo:
             rows = await (await repo.execute(
                 '''SELECT s.id,s.title,s.updated_at,s.status FROM assistant_sessions s
-                WHERE s.binding IS NULL OR s.binding LIKE %s
-                ORDER BY s.updated_at DESC,s.id LIMIT %s''', ("web:%", limit))).fetchall()
+                ORDER BY s.updated_at DESC,s.id LIMIT %s''', (limit,))).fetchall()
         return [dict(row) for row in rows]
 
     async def create_session(self):
         async with session_storage(self.config.sessions) as repo:
-            row = await repo.open(self.workspace_root(), binding=None)
+            row = await repo.open(self.workspace_root())
         return str(row["id"])
 
     async def delete_session(self, session_id):

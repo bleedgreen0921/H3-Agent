@@ -12,7 +12,7 @@ from ai_assistant.runtime.prompts import (
 
 @dataclass
 class ComponentContext:
-    """组件装配时共享的配置、调用者、资源栈和工具上下文。"""
+    """组件装配时共享的配置、本地调用者、资源栈和工具上下文。"""
     config: object
     caller: object
     stack: object
@@ -161,8 +161,7 @@ class AttachmentsComponent(Component):
     name = 'attachments'
 
     def enabled(self, config, caller, retriever=None):
-        return bool(config.attachments.enabled and caller.personal
-                    and config.sessions is not None)
+        return bool(config.attachments.enabled and config.sessions is not None)
 
     async def open(self, ctx):
         from ai_assistant.attachments.service import AttachmentService
@@ -187,7 +186,7 @@ class FeishuDocsComponent(Component):
     name = 'feishu_docs'
 
     def enabled(self, config, caller, retriever=None):
-        return bool(config.integrations.feishu is not None and caller.personal)
+        return bool(config.integrations.feishu is not None)
 
     async def open(self, ctx):
         import httpx

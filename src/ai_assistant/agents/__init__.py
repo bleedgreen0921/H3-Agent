@@ -62,8 +62,6 @@ def load_project_rules(context):
     from ai_assistant.workspace.files import WorkspaceError
     import os
     import stat
-    if context.caller is not None and not context.caller.personal:
-        return ''
     workspace = context.workspace
     try:
         names = [p.name for p in workspace.root.iterdir() if p.name.lower() == 'agents.md']

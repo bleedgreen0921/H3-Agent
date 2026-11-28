@@ -24,7 +24,6 @@ def add_commands(commands):
         command = actions.add_parser(action)
         _add_config(command)
         if action == 'list':
-            command.add_argument('--binding')
             command.add_argument('--page', type=int, default=1)
         if action == 'delete':
             command.add_argument('session_id')
@@ -181,12 +180,12 @@ async def execute(config, args):
     if args.action in {'list', 'delete'}:
         async with session_storage(config.sessions) as repo:
             if args.action == 'list':
-                # 支持按聊天绑定筛选，每页读取 10 条会话。
+                # 分页列出本机会话，每页读取 10 条。
                 if args.page < 1:
                     raise ConfigError('页码必须大于 0。')
-                rows = await repo.list_admin(args.binding, (args.page - 1) * 10, 10)
+                rows = await repo.list_admin((args.page - 1) * 10, 10)
                 for row in rows:
-                    print(f"{'● ' if row['current'] else ''}{row['title'] or '新会话'} | {row['id']} | {row['binding'] or '本机'} | {row['status']} | {row['updated_at']}")
+                    print(f"{'● ' if row['current'] else ''}{row['title'] or '新会话'} | {row['id']} | {row['status']} | {row['updated_at']}")
             else:
                 # 删除由会话仓库执行，不清理工作区或知识库。
                 await repo.delete(args.session_id)

@@ -46,10 +46,8 @@ class AssistantSession:
                 raise ConfigError('Opening a session requires [sessions].')
             self._reset()
             return
-        caller = self.context.caller
-        binding = caller.binding if caller and caller.scope != 'local' else None
         try:
-            row = await self.repository.open(self.context.workspace.root, session_id, binding=binding)
+            row = await self.repository.open(self.context.workspace.root, session_id)
         except SessionError as error:
             event('session.open_failed', status='failed',
                   code=getattr(error, 'code', 'session_error'),

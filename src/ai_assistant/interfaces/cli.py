@@ -78,6 +78,8 @@ def _main(argv: list[str] | None = None) -> int:
     add_skills(commands)
     from ai_assistant.integrations.cli import add_commands as add_mcp
     add_mcp(commands)
+    from ai_assistant.storage.migrations.cli import add_commands as add_db
+    add_db(commands)
 
     # 本地 Web 主入口。
     web_parser = commands.add_parser("web", help="Local web UI")
@@ -144,6 +146,21 @@ def _main(argv: list[str] | None = None) -> int:
         if args.command == "init":
             from ai_assistant.interfaces.initialization import execute
             return asyncio.run(execute(config))
+
+        # 数据库结构命令只操作显式配置的会话存储，不构建模型。
+        if args.command == "db":
+            from ai_assistant.storage.migrations.backup import BackupError
+            from ai_assistant.storage.migrations.base import MigrationError
+            from ai_assistant.storage.migrations.cli import execute as execute_db
+            try:
+                return execute_db(config, args)
+            except (ConfigError, MigrationError, BackupError) as error:
+                print(f"数据库操作失败：{error}", file=sys.stderr)
+                return 2
+            except Exception:
+                print("数据库操作失败：请检查连接、结构和备份工具；未自动重试。",
+                      file=sys.stderr)
+                return 2
 
         # 本地 Web 服务是主入口；CLI 仍负责配置、初始化和管理。
         if args.command == "web":

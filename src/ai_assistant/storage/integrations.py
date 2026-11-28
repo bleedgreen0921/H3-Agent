@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from ai_assistant.config import ConfigError
 
-# 只保留外部效果回执；旧渠道 inbox/outbox 不再创建或使用。
+# 只保留外部效果回执；不创建渠道投递队列。
 DDL = '''CREATE TABLE IF NOT EXISTS assistant_operations (
  id text PRIMARY KEY, input_id text NOT NULL, principal text NOT NULL,
  tool text NOT NULL, args_digest text NOT NULL, source_key text,

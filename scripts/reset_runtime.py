@@ -1,4 +1,4 @@
-"""一次性重置会话与渠道历史；默认预览，不删除知识库或远端内容。"""
+"""一次性重置运行时会话与派生数据；默认预览，不删除知识库或远端内容。"""
 import argparse
 import json
 from pathlib import Path
@@ -9,24 +9,20 @@ from ai_assistant.storage.sessions import lock_key
 
 # 精确列出应用和固定 Saver 拥有的表；禁止前缀匹配与 CASCADE。
 TABLES = (
-    'assistant_outbox', 'assistant_inbox', 'assistant_chat_commands',
-    'assistant_channel_sessions', 'assistant_operations',
+    'assistant_operations',
     'assistant_model_usage', 'assistant_attachments', 'assistant_web_messages',
     'checkpoint_writes', 'checkpoint_blobs', 'checkpoints', 'checkpoint_migrations',
-    'assistant_sessions', 'assistant_session_schema',
+    'assistant_sessions', 'assistant_session_schema', 'assistant_schema_migrations',
 )
-LOCKS = (714160001, 714160002, 714160004, 714160005, 714160006)
+LOCKS = (714160001, 714160002, 714160005)
 REQUIRED = {
-    'assistant_outbox': {'id', 'input_id', 'body', 'status', 'part'},
-    'assistant_inbox': {'id', 'binding', 'body', 'status'},
-    'assistant_chat_commands': {'input_id', 'binding', 'action'},
-    'assistant_channel_sessions': {'binding', 'session_id'},
     'assistant_operations': {'id', 'input_id', 'principal', 'tool', 'args_digest'},
     'assistant_model_usage': {'call_id', 'session_id', 'profile', 'role'},
     'assistant_attachments': {'id', 'session_id', 'storage_path'},
     'assistant_web_messages': {'id', 'session_id', 'role', 'text'},
     'assistant_sessions': {'id', 'workspace', 'thread_ids'},
     'assistant_session_schema': {'singleton', 'version'},
+    'assistant_schema_migrations': {'version', 'name', 'checksum', 'status'},
     'checkpoints': {'thread_id', 'checkpoint_ns', 'checkpoint_id', 'checkpoint'},
     'checkpoint_blobs': {'thread_id', 'checkpoint_ns', 'channel', 'version'},
     'checkpoint_writes': {'thread_id', 'checkpoint_ns', 'checkpoint_id', 'task_id'},

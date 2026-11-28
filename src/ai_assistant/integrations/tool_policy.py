@@ -90,7 +90,7 @@ ACCOUNT_PATHS = (
 # 业务定位标识：即使包含 id 语义也不应被脱敏。
 BUSINESS_KEYS = frozenset({
     "guid", "task_id", "document_id", "reminder_id", "operation_id",
-    "outbox_id", "input_id", "sync_id", "job_id", "source_id", "build_id",
+    "input_id", "sync_id", "job_id", "source_id", "build_id",
     "revision_id", "url", "start", "due", "reminders", "effect_id",
     "execution_fact", "registration", "task_model_view", "protected_receipt",
 })

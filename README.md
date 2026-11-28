@@ -39,7 +39,7 @@ cp config.example/assistant.example.toml assistant.toml
 
 `web serve` 会输出带一次性本地令牌的访问地址。默认只监听 `127.0.0.1`，不提供公网或多用户认证。
 
-启动不会自动安装依赖、迁移数据库或下载模型。已有部署升级前先备份；当前会话结构为 v5，旧结构不自动升级。
+启动不会自动安装依赖、迁移数据库或下载模型。已有部署升级前先备份；当前会话结构为 v6，旧结构不自动升级。v5 数据库需先停止服务，执行 `./assistant.sh db status`、`./assistant.sh db backup` 和 `./assistant.sh db migrate --execute`。
 
 ## 配置
 
@@ -142,6 +142,8 @@ CLI 也提供同一套只读入口：
 ./assistant.sh init
 ./assistant.sh config list
 ./assistant.sh config check
+./assistant.sh db status
+./assistant.sh db migrate
 ./assistant.sh web serve
 ./assistant.sh feishu auth status
 ./assistant.sh rag worker
@@ -149,7 +151,7 @@ CLI 也提供同一套只读入口：
 ./assistant.sh session list
 ```
 
-`init` 显式创建/核对会话、操作回执、附件、Web 消息、知识库和用量表；普通启动不建表。`scripts/reset_runtime.py` 默认只预览，`--execute` 才删除会话/checkpoint/操作/用量/附件/Web 消息，知识库保留；`scripts/delete_feishu_sessions.py` 只删除旧渠道绑定会话及其投递/操作数据，知识库保留。
+`init` 显式创建/核对会话、操作回执、附件、Web 消息、知识库和用量表；普通启动不建表。`scripts/reset_runtime.py` 默认只预览，`--execute` 才删除会话/checkpoint/操作/用量/附件/Web 消息，知识库保留。数据库升级使用 `./assistant.sh db status`、`db backup` 和 `db migrate`：默认预览，`--execute` 才执行；破坏性迁移默认要求备份，确认删除旧渠道会话时加 `--delete-legacy-sessions`。
 
 ## 文档导航
 
@@ -160,4 +162,5 @@ CLI 也提供同一套只读入口：
 | [配置与运行行为](docs/configuration.md) | profiles、Web、附件、飞书、Skills |
 | [知识库](docs/knowledge.md) | 登记、同步、索引与检索 |
 | [测试与验收](docs/testing.md) | 自动测试、合成评测与真实验收 |
+| [升级与迁移](docs/upgrade.md) | 版本检查、备份、显式迁移与回滚 |
 | [开发约定](AGENTS.md) | 分层、权限与开发约束 |

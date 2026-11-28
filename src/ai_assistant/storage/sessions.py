@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from ai_assistant.config import ConfigError
+from ai_assistant.storage.version import SCHEMA_LOCK, SCHEMA_VERSION
 
 
 class SessionError(RuntimeError):
@@ -44,11 +45,6 @@ class SessionNotFoundError(SessionError):
     safe_message = '目标会话不存在；本轮未执行。'
 
 
-class SessionBindingError(SessionError):
-    code = 'session_binding_mismatch'
-    safe_message = '目标会话不属于当前聊天；本轮未执行。'
-
-
 class SessionWorkspaceError(SessionError):
     code = 'session_workspace_mismatch'
     safe_message = '目标会话属于其他工作区；本轮未执行。'
@@ -65,17 +61,16 @@ class SessionDeletingError(SessionError):
 
 
 
-# 会话索引只保存状态、绑定和 checkpoint 定位，不保存完整对话正文。
+# 会话索引只保存状态和 checkpoint 定位，不保存完整对话正文或渠道身份。
 DDL = '''CREATE TABLE IF NOT EXISTS assistant_sessions (
     id uuid PRIMARY KEY, workspace text NOT NULL, thread_id text NOT NULL,
     thread_ids text[] NOT NULL, complete jsonb,
     status text NOT NULL CHECK(status IN ('ready','running','interrupted','deleting')),
     format_version integer NOT NULL DEFAULT 1,
-    binding text, title text NOT NULL DEFAULT '', last_input_id text,
+    title text NOT NULL DEFAULT '', last_input_id text,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 )'''
-SCHEMA_LOCK = 714160001
 
 
 def session_uuid(value):
@@ -117,9 +112,13 @@ class SessionRepository:
         """检查当前会话结构版本及原生 Saver 必需表。"""
         row = await (await self.execute(
             'SELECT version FROM assistant_session_schema WHERE singleton = true')).fetchone()
-        if not row or row['version'] != 5:
+        if not row or row['version'] != SCHEMA_VERSION:
+            if row and row['version'] == 5:
+                raise SessionFormatError(
+                    'Session schema v5 requires migration.',
+                    safe_message='会话结构仍为 v5；请执行 ./assistant.sh db migrate。')
             raise SessionFormatError('Unsupported session schema; run init with a compatible application.')
-        await self.execute('SELECT binding,title,last_input_id FROM assistant_sessions LIMIT 0')
+        await self.execute('SELECT title,last_input_id FROM assistant_sessions LIMIT 0')
         # Also fail before any model calls if native Saver initialization is missing.
         for table in ('checkpoints', 'checkpoint_blobs', 'checkpoint_writes', 'checkpoint_migrations'):
             await self.execute(f'SELECT 1 FROM {table} LIMIT 0')
@@ -147,21 +146,19 @@ class SessionRepository:
             if not self.broken:
                 await self.execute('SELECT pg_advisory_unlock(%s)', (lock_key(ident),))
 
-    async def open(self, workspace, ident=None, *, binding=None):
-        """创建或打开会话，并检查聊天归属、格式与工作区。"""
+    async def open(self, workspace, ident=None):
+        """创建或打开会话，并检查格式与工作区。"""
         await self.release()
         creating = ident is None
         ident = await self.acquire(str(uuid4()) if creating else ident)
         if creating:
             thread = str(uuid4())
             await self.execute('''INSERT INTO assistant_sessions
-                (id,workspace,thread_id,thread_ids,status,binding) VALUES(%s,%s,%s,%s,'ready',%s)''',
-                (ident, str(workspace), thread, [thread], binding))
+                (id,workspace,thread_id,thread_ids,status) VALUES(%s,%s,%s,%s,'ready')''',
+                (ident, str(workspace), thread, [thread]))
         row = await (await self.execute('SELECT * FROM assistant_sessions WHERE id=%s', (ident,))).fetchone()
         if not row:
             raise SessionNotFoundError('Session not found.')
-        if binding is not None and row['binding'] != binding:
-            raise SessionBindingError('会话不属于当前聊天。')
         if row['format_version'] != 1:
             raise SessionFormatError('Unsupported session format.')
         if row['status'] == 'deleting':
@@ -170,47 +167,16 @@ class SessionRepository:
             raise SessionWorkspaceError('Session belongs to a different workspace.')
         return row
 
-    async def binding_session(self, binding):
-        return await (await self.execute(
-            'SELECT * FROM assistant_sessions WHERE binding=%s ORDER BY updated_at DESC LIMIT 1',
-            (binding,))).fetchone()
-
-    async def binding_session_id(self, binding):
-        row = await self.binding_session(binding)
-        return {'session_id': row['id']} if row else None
-
-    async def session_binding(self, ident):
-        return await (await self.execute(
-            'SELECT binding FROM assistant_sessions WHERE id=%s', (str(ident),))).fetchone()
-
-    async def list_binding(self, binding, offset=0, limit=11):
-        return await (await self.execute('''SELECT id,title,updated_at,status
-            FROM assistant_sessions WHERE binding=%s
-            ORDER BY updated_at DESC,id LIMIT %s OFFSET %s''',
-            (binding, limit, offset))).fetchall()
-
-    async def list_admin(self, binding=None, offset=0, limit=10):
-        return await (await self.execute('''SELECT id,title,binding,updated_at,status,
+    async def list_admin(self, offset=0, limit=10):
+        return await (await self.execute('''SELECT id,title,updated_at,status,
             false AS current
-            FROM assistant_sessions WHERE (%s::text IS NULL OR binding=%s)
+            FROM assistant_sessions
             ORDER BY updated_at DESC,id LIMIT %s OFFSET %s''',
-            (binding, binding, limit, offset))).fetchall()
-
-    async def status_for_binding(self, ident, binding):
-        return await (await self.execute(
-            'SELECT status FROM assistant_sessions WHERE id=%s AND binding=%s',
-            (str(ident), binding))).fetchone()
+            (limit, offset))).fetchall()
 
     async def status(self, ident):
         return await (await self.execute(
             'SELECT status FROM assistant_sessions WHERE id=%s', (str(ident),))).fetchone()
-
-    async def bind(self, binding, session_id):
-        """绑定当前聊天与会话，拒绝覆盖不匹配的既有归属。"""
-        cursor = await self.execute('''UPDATE assistant_sessions SET binding=%s
-            WHERE id=%s AND (binding IS NULL OR binding=%s)''', (binding, session_id, binding))
-        if cursor.rowcount != 1:
-            raise SessionBindingError('会话不属于当前聊天。')
 
     async def list(self):
         return await (await self.execute('''SELECT id,workspace,status,created_at,updated_at
@@ -252,17 +218,15 @@ class SessionRepository:
         await self.update_current("UPDATE assistant_sessions SET status='interrupted', updated_at=clock_timestamp() WHERE id=%s",
                            (self.current,))
 
-    async def delete(self, ident, *, binding=None):
-        """持锁标记删除，清理 Saver 线程后删除索引和聊天绑定。"""
+    async def delete(self, ident):
+        """持锁标记删除，清理 Saver 线程后删除索引。"""
         ident = session_uuid(ident)
         if self.current != ident:
             await self.release()
             ident = await self.acquire(ident)
-        row = await (await self.execute('SELECT thread_ids,status,binding FROM assistant_sessions WHERE id=%s', (ident,))).fetchone()
-        if not row or (binding is not None and row['binding'] != binding):
+        row = await (await self.execute('SELECT thread_ids FROM assistant_sessions WHERE id=%s', (ident,))).fetchone()
+        if not row:
             raise SessionNotFoundError('未找到可删除的会话。')
-        if binding is not None and row['status'] == 'running':
-            raise SessionBusyError('会话正在执行，请先 /cancel 并等待清理结束。')
 
         # 先持久化 deleting；Saver 清理失败时保留状态供后续重试。
         await self.execute("UPDATE assistant_sessions SET status='deleting' WHERE id=%s", (ident,))
@@ -312,11 +276,22 @@ async def postgres_session_storage(settings, *, initialize=False):
                                 await repo.execute('''CREATE TABLE IF NOT EXISTS assistant_session_schema (
                                     singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton), version integer NOT NULL)''')
                                 row = await (await repo.execute('SELECT version FROM assistant_session_schema')).fetchone()
-                                if row and row['version'] != 5:
+                                if row and row['version'] != SCHEMA_VERSION:
                                     raise SessionFormatError('Unsupported session schema version.')
                                 await repo.execute(DDL)
-                                await repo.execute('CREATE INDEX IF NOT EXISTS assistant_sessions_binding ON assistant_sessions(binding,updated_at DESC,id)')
-                                await repo.execute('INSERT INTO assistant_session_schema VALUES(true,5) ON CONFLICT(singleton) DO NOTHING')
+                                await repo.execute('INSERT INTO assistant_session_schema VALUES(true,%s) ON CONFLICT(singleton) DO NOTHING', (SCHEMA_VERSION,))
+                                # 迁移历史独立记录；新库写入当前版本基线。
+                                from ai_assistant import __version__
+                                from ai_assistant.storage.migrations.history import (
+                                    BASELINE_CHECKSUM, BASELINE_INSERT, BASELINE_NAME, HISTORY_DDL,
+                                )
+                                await repo.execute(HISTORY_DDL)
+                                history = await (await repo.execute(
+                                    'SELECT count(*) AS n FROM assistant_schema_migrations')).fetchone()
+                                if not history['n']:
+                                    await repo.execute(BASELINE_INSERT, (
+                                        SCHEMA_VERSION, BASELINE_NAME,
+                                        BASELINE_CHECKSUM, __version__))
                         finally:
                             await repo.execute('SELECT pg_advisory_unlock(%s)', (SCHEMA_LOCK,))
                     await repo.check_schema()

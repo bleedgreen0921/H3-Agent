@@ -36,11 +36,10 @@ async def assistant_session(config, model_name=None, *, retriever=None,
     """按配置创建会话及其资源，在退出时等待清理。"""
     from ai_assistant.integrations.policy import Caller
     caller = caller or Caller()
-    persona = load_persona(config) if caller.personal else ''
-    # 本地及主人私聊是仅有入口，不再为群聊构造另一套能力集合。
-    caller.__post_init__()
-    if not caller.personal:
-        raise ConfigError('仅支持本地入口和主人私聊。')
+    # 当前只有本地 Web/CLI 入口；owner 仅用于外部工具授权，不再表示其他聊天身份。
+    if not caller.owner:
+        raise ConfigError('仅支持本地主人入口。')
+    persona = load_persona(config)
     selected = model_name or config.default_model
     if selected not in config.models:
         raise ConfigError('Unknown model profile.')
@@ -68,15 +67,15 @@ async def assistant_session(config, model_name=None, *, retriever=None,
         # 统一托管工具上下文、操作回执和模型客户端。
         context = await stack.enter_async_context(tool_context(
             config, retriever=retriever, retriever_factory=retriever_factory,
-            skill_snapshot=getattr(resources, "skills", None) if caller.personal else None))
+            skill_snapshot=getattr(resources, "skills", None)))
         context = replace(context, usage_store=usage_store,
-                          timezone=config.agent.timezone if caller.personal else 'UTC',
+                          timezone=config.agent.timezone,
                           caller=caller,
                           skills_directory_tokens=config.skills.directory_tokens if config.skills else 6000)
         from ai_assistant.storage.integrations import operation_storage
         operation_store = (await stack.enter_async_context(operation_storage(config.sessions))
                            if config.sessions else None)
-        # ToolContext 与组件只依赖操作回执仓储；inbox/outbox 仍由渠道使用完整 store。
+        # ToolContext 与组件只依赖操作回执仓储。
         operations = operation_store.operations if operation_store is not None else None
         context = replace(context, operations=operations)
         model = await stack.enter_async_context(model_session(config, selected,
@@ -111,7 +110,7 @@ async def assistant_session(config, model_name=None, *, retriever=None,
         log_path = resolve_log_path(config.tools.selection.log_path, base)
         skills = context.services.get('skills')
         skill_ids = tuple(sorted(getattr(skills, 'skills', {}) or {}))
-        key = (caller.binding, tuple(tool.name for tool in tools), skill_ids,
+        key = (tuple(tool.name for tool in tools), skill_ids,
                tuple(sorted((name, repr(meta)) for name, meta in tool_metadata.items())),
                repr(config.tools.selection), str(log_path))
         cache = getattr(resources, 'capability_cache', None) if resources is not None else None

@@ -91,7 +91,7 @@ class MCPMiddleware(AgentMiddleware):
                 if context.operations is None or context.input_id is None:
                     raise ToolException('External writes require durable operations and an input ID.')
                 fresh, operation = await context.operations.begin(
-                    context.input_id, operation_principal(context.caller),
+                    context.input_id, operation_principal(),
                     entry.id, arguments)
                 if not fresh:
                     result = operation.get('result') or {}
